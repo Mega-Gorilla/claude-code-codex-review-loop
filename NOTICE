@@ -1,12 +1,2 @@
 Claude Code–Codex Review Loop
 Copyright 2026 Mega-Gorilla
-
-This product includes a target-experience document developed in the historical
-Mega-Gorilla/coding-review-agent-loop fork. That repository was derived from
-wwind123/coding-review-agent-loop, Copyright 2026 Wild Wind, licensed under the
-MIT License. The applicable license text is included at
-LICENSES/MIT-coding-review-agent-loop.txt.
-
-No legacy implementation source code is included in the bootstrap revision.
-Any future selective port must record its source commit and preserve all
-applicable notices.

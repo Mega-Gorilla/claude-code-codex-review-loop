@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Claude Code–Codex review loop: target experience
 
 | Field | Value |

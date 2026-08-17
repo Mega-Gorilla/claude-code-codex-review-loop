@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Claude Code–Codex Review Loop
 
 Claude Codeをcoder、Codexをread-only reviewerとして使用し、GitHub Issue / PRを正式な会話履歴として、人間の明示承認まで開発ループを進めるためのプロジェクトです。
@@ -26,4 +28,8 @@ cc-review issue 123 --repo OWNER/REPO
 
 ## License
 
-新規の成果物は[Apache License 2.0](LICENSE)で提供します。旧repository由来の資料またはコードを選択移植する場合は、[NOTICE](NOTICE)と[LICENSES](LICENSES/)に出典と適用ライセンスを記録します。
+本repositoryの現行成果物は[Apache License 2.0](LICENSE)で提供します。旧repositoryの実装コードは含まれていません。将来、第三者成果物を選択移植する場合は、そのPRで出典と適用ライセンスを追加します。
+
+## Independence
+
+本プロジェクトはAnthropicまたはOpenAIの公式プロジェクトではなく、両社から承認・支援されたものではありません。Claude Code、Codexおよび関連する名称は、それぞれの権利者に帰属します。

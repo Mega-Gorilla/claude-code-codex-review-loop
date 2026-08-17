@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Architecture planning
 
 次のimplementation planで、以下のcomponentと依存関係を定義します。

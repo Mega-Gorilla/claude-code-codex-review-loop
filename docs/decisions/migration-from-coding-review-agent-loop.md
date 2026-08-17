@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # coding-review-agent-loopからの移行記録
 
 ## Source lineage
@@ -24,4 +26,5 @@
 - 旧実装sourceは一括copyしない。
 - 選択移植する場合は、対象file、source commit、理由、適用license、移植後testを同じPRへ記録する。
 - 旧repositoryのIssue / PRを参照せず、本repository内の移行済み文書とdecision recordを正式なbaselineとする。
-- 新規成果物の主ライセンスはApache-2.0とする。
+- 本repositoryへ移行した計画文書を含め、現行成果物はApache-2.0とする。
+- 将来、第三者成果物を選択移植する場合は、元ライセンスと必要なnoticeを同じPRで追加する。
