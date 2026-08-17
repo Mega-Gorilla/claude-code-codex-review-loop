@@ -3,8 +3,8 @@
 | Field | Value |
 | --- | --- |
 | Status | **Agreed** |
-| Parent roadmap | [#1](https://github.com/Mega-Gorilla/coding-review-agent-loop/issues/1) |
-| Alignment record | [PR #3](https://github.com/Mega-Gorilla/coding-review-agent-loop/pull/3) |
+| Origin | 旧repositoryで合意した計画を自己完結する形で移行 |
+| Approval | 新repositoryのbootstrap前にユーザー合意済み |
 | Owner | Mega-Gorilla |
 | Last updated | 2026-08-17 |
 | Scope | Windows PowerShell 7、Linux/SSH上のPowerShell 7 |
@@ -15,7 +15,7 @@
 
 実装詳細を決める前に、ユーザーから見た操作、表示、停止条件、復旧、最終成果物を合意するためのゴールドキュメントとして使用する。
 
-この文書はPR #3で合意済みの設計baselineである。`Decided`は合意済みの完成状態、`Proposed`はimplementation planで検証する実装詳細を示す。
+この文書は旧repositoryから移行した合意済みの設計baselineである。`Decided`は合意済みの完成状態、`Proposed`はimplementation planで検証する実装詳細を示す。
 
 ## 2. 用語と合意状態
 

@@ -28,6 +28,11 @@ def test_license_and_migration_notice_are_present() -> None:
 
 def test_target_experience_is_an_agreed_baseline() -> None:
     target = (ROOT / "docs" / "plans" / "target-experience.md").read_text(encoding="utf-8")
+    migration = (
+        ROOT / "docs" / "decisions" / "migration-from-coding-review-agent-loop.md"
+    ).read_text(encoding="utf-8")
 
     assert "| Status | **Agreed** |" in target
     assert "cc-review" in target
+    assert "https://github.com/Mega-Gorilla/coding-review-agent-loop" not in target
+    assert "https://github.com/Mega-Gorilla/coding-review-agent-loop" not in migration
