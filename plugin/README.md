@@ -1,0 +1,3 @@
+# Claude Code Plugin
+
+`cc-review` Skillと薄いplatform launcherを配置する予定です。workflow判断はPluginへ実装せず、version付きController CLIを呼び出します。
