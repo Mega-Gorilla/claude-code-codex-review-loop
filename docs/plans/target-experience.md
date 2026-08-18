@@ -234,7 +234,7 @@ MVPでは、`AWAITING_USER_DECISION`または`READY_FOR_HUMAN_MERGE`に対する
 
 ### 5.4 Controller最小化と既存実装の再利用
 
-**Status: Superseded by D-030。再利用表は事前承認ではなく調査対象とする**
+**Status: Proposed implementation direction。再利用範囲の見直しをD-030として[implementation plan](implementation-plan.md) Section 8へ提示中**
 
 新しい会話databaseやLLM付きControllerを作らず、既存リポジトリのGitHub comment transport、public renderer、round metadata、resume処理、`discuss` modeの個別発言投稿を共通のGitHub conversation transportへ一般化する。
 
@@ -638,9 +638,11 @@ SSH切断中に予期しないnative permission promptが先に表示された�
 
 各fresh Codex reviewには現在headの完全なdiff、前headからの差分、過去findingとdisposition、Claudeの対応、clarification、ユーザーdecision、test / CIを渡す。session memoryは引き継がないが、GitHub canonical conversationとfinding ledgerによってPR内のreview contextを再構築する。GitHubへ確認できない内部memoryは次roundの根拠にしない。
 
-### Decided: merge承認の入力形式
+### Open intervention questions
 
-自然言語入力を主経路とし、Claudeが明示確認を行ったうえで`APPROVE_MERGE`へ構造化する。加えて、head SHAとmerge methodを引数で渡す固定commandを併用する（D-028）。固定commandは代替経路であり、対話gateを置き換えない。
+- merge承認を固定commandで補助するか、明示確認付き自然言語だけにするか
+
+D-028として推奨案とdecision briefを[implementation plan](implementation-plan.md) Section 8へ提示している。ユーザーの明示回答後に`Decided`とする。
 
 ## 9. Roles and permission boundary
 
@@ -889,9 +891,11 @@ final reportはApproved follow-up候補ごとにCodex評価、Issue draftまた�
 | Temp paths | `%TEMP%`, `%LOCALAPPDATA%` | `/tmp`, XDG/cache directory |
 | Long-running session | terminalを維持 | 対応`tmux` wrapper内は切断後も継続。wrapper外はGitHub checkpointからresume |
 
-### Decided: PowerShellの検証範囲
+### Open platform questions
 
-MVPの正式検証対象をMSI / winget版PowerShell 7とする。Windows Store版は未検証と明記し、Approved follow-up候補として扱う（D-029）。
+- Windows Store版とMSI版PowerShellの両方を正式検証するか
+
+D-029として推奨案とdecision briefを[implementation plan](implementation-plan.md) Section 8へ提示している。ユーザーの明示回答後に`Decided`とする。
 
 ## 13. MVP boundary
 
@@ -948,7 +952,7 @@ MVPの正式検証対象をMSI / winget版PowerShell 7とする。Windows Store�
 
 ## 14. Resolved roadmap questions
 
-完成イメージ合意で列挙したQ-001～Q-012はD-016～D-026によって解決済みである。Section 8のmerge承認入力形式とSection 12のPowerShell検証範囲は、implementation planでD-028とD-029として決定した。残る実装詳細は[implementation plan](implementation-plan.md)で検証・決定する。
+完成イメージ合意で列挙したQ-001～Q-012はD-016～D-026によって解決済みである。Section 8のmerge承認入力形式とSection 12のPowerShell検証範囲は、[implementation plan](implementation-plan.md) Section 8がD-028とD-029として推奨案を提示しており、ユーザー判断待ちである。残る実装詳細も同文書で検証・決定する。
 
 ## 15. Decision log
 
@@ -981,9 +985,9 @@ MVPの正式検証対象をMSI / winget版PowerShell 7とする。Windows Store�
 | D-025 | 2026-08-17 | 対応環境のClaude CodeではAuto modeを通常の実装・test・build・read-only Web調査・feature branchへのcommit / pushに使用し、非対応時は限定permission profileへfallbackする。tool permissionとworkflow承認を分離し、例外blockは`AWAITING_TOOL_PERMISSION`で標準permission設定後に明示resumeする。Codexは各roundをfresh sessionで実行し、GitHub contextを再構築したexact-head隔離checkout内でtest・build・再現・Web調査を許可するが、実repositoryとGitHubへの永続変更権限を持たない | Decided | 完成イメージ合意 |
 | D-026 | 2026-08-17 | Claude Code Pluginを正式配布単位とし、Skillと薄いplatform wrapperをversion管理する。Controllerは任意repositoryから呼べるinstall済みCLI packageとし、repo-local Skillは開発・test、user-level単体Skillはfallbackに限定する。MCP serverとしての実装・配布は行わない | Decided | 完成イメージ合意 |
 | D-027 | 2026-08-18 | 本repositoryのIssue #2を親roadmapとし、target experience、implementation plan、子Issueをここから参照する。implementation planは`docs/plans/implementation-plan.md`として作成する | Decided | PR #1 merge後のroadmap整備 |
-| D-028 | 2026-08-18 | merge承認は自然言語＋明示確認を主経路とし、head SHAとmerge methodを引数で渡す固定commandを併用する。承認のbind対象を推論ではなく検証で確定し、headless経路とSSH resumeでも同一形式を使えるようにする | Decided | implementation plan Section 6 |
-| D-029 | 2026-08-18 | MVPの正式検証対象をMSI / winget版PowerShell 7とし、Windows Store版は未検証と明記してApproved follow-up候補として扱う | Decided | implementation plan Section 6 |
-| D-030 | 2026-08-18 | GitHub canonical conversation transportを新規実装とし、Section 5.4の再利用表は事前承認ではなく調査対象として扱う。Controllerの最小化はcode再利用ではなく責務の限定によって達成する | Decided | implementation plan Section 6 |
+| D-028 | 2026-08-18 | merge承認は自然言語＋明示確認を主経路とし、head SHAとmerge methodを引数で渡す固定commandを併用する。承認のbind対象を推論ではなく検証で確定し、headless経路とSSH resumeでも同一形式を使えるようにする | Proposed: ユーザー判断待ち | implementation plan Section 8 |
+| D-029 | 2026-08-18 | MVPの正式検証対象をMSI installer配布のPowerShell 7とし、Windows Store版は未検証と明記してApproved follow-up候補として扱う | Proposed: ユーザー判断待ち | implementation plan Section 8 |
+| D-030 | 2026-08-18 | GitHub canonical conversation transportの公開interfaceを新設し、Section 5.4の再利用表は事前承認ではなくcomponent単位の再利用判定へ置き換える。algorithmとtestの選択移植余地は残す | Proposed: ユーザー判断待ち | implementation plan Section 8 |
 
 ## 16. Agreement checklist
 
