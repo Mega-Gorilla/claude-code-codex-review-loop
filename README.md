@@ -22,6 +22,7 @@ cc-review issue 123 --repo OWNER/REPO
 ## Documents
 
 - [完成イメージ](docs/plans/target-experience.md)
+- [実装計画](docs/plans/implementation-plan.md)
 - [独立v2として開始する設計判断](docs/decisions/0001-independent-v2.md)
 - [参考実装の調査と独立再実装の選択](docs/decisions/0002-independent-reimplementation.md)
 - [Architecture planning](docs/architecture/README.md)

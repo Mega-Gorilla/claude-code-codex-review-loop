@@ -15,6 +15,7 @@ DOCUMENT_PATHS = (
     "docs/architecture/README.md",
     "docs/decisions/0001-independent-v2.md",
     "docs/decisions/0002-independent-reimplementation.md",
+    "docs/plans/implementation-plan.md",
     "docs/plans/target-experience.md",
     "plugin/README.md",
     "wrappers/README.md",
@@ -46,6 +47,15 @@ def test_target_experience_is_an_agreed_baseline() -> None:
     assert "cc-review" in target
 
 
+def test_implementation_plan_derives_from_the_agreed_baseline() -> None:
+    """implementation planがtarget experienceとroadmap Issueへ紐付いていることを確認する。"""
+
+    plan = (ROOT / "docs" / "plans" / "implementation-plan.md").read_text(encoding="utf-8")
+
+    assert "[target-experience.md](target-experience.md)" in plan
+    assert "Issue #2" in plan
+
+
 def test_only_the_current_repository_is_referenced_for_the_owner() -> None:
     """同一owner配下では本repository以外を正式文書の参照として残さない。"""
 
@@ -74,6 +84,7 @@ def test_versioned_project_files_declare_apache_license() -> None:
         "docs/architecture/README.md",
         "docs/decisions/0001-independent-v2.md",
         "docs/decisions/0002-independent-reimplementation.md",
+        "docs/plans/implementation-plan.md",
         "docs/plans/target-experience.md",
         "plugin/README.md",
         "src/claude_code_codex_review_loop/__init__.py",
