@@ -5,7 +5,7 @@
 | Field | Value |
 | --- | --- |
 | Status | **Agreed** |
-| Origin | 旧repositoryで合意した計画を自己完結する形で移行 |
+| Origin | bootstrap設計討議で合意した完成イメージ |
 | Approval | 新repositoryのbootstrap前にユーザー合意済み |
 | Owner | Mega-Gorilla |
 | Last updated | 2026-08-17 |
@@ -17,7 +17,7 @@
 
 実装詳細を決める前に、ユーザーから見た操作、表示、停止条件、復旧、最終成果物を合意するためのゴールドキュメントとして使用する。
 
-この文書は旧repositoryから移行した合意済みの設計baselineである。`Decided`は合意済みの完成状態、`Proposed`はimplementation planで検証する実装詳細を示す。
+この文書は本repositoryで合意済みの設計baselineである。`Decided`は合意済みの完成状態、`Proposed`はimplementation planで検証する実装詳細を示す。
 
 ## 2. 用語と合意状態
 
@@ -948,38 +948,38 @@ final reportはApproved follow-up候補ごとにCodex評価、Issue draftまた�
 
 ## 14. Resolved roadmap questions
 
-旧repositoryの完成イメージ討議で列挙したQ-001～Q-012はD-016～D-026によって解決済みである。Section 8のmerge承認入力形式やSection 12のWindows distribution検証等、target behaviorを変えない実装詳細はimplementation planで検証・決定する。
+完成イメージ合意で列挙したQ-001～Q-012はD-016～D-026によって解決済みである。Section 8のmerge承認入力形式やSection 12のWindows distribution検証等、target behaviorを変えない実装詳細はimplementation planで検証・決定する。
 
 ## 15. Decision log
 
 | ID | Date | Decision | Status | Source |
 | --- | --- | --- | --- | --- |
-| D-001 | 2026-08-17 | 実行はユーザーがIssue / PR commandで開始する | Decided | 旧repository roadmap討議 |
-| D-002 | 2026-08-17 | PR自動検知、watcher、webhook、label triggerは対象外 | Decided | 旧repository roadmap討議 |
-| D-003 | 2026-08-17 | Controllerは対話型TUIへキー入力を注入せず、agent turnを非対話CLIとして起動する | Superseded by D-014 / D-015: Claudeはactive Skill host、Codexだけをfresh subprocess化。キー注入禁止は維持 | 旧repository roadmap討議、旧repository計画PR討議 |
-| D-004 | 2026-08-17 | PowerShellからの操作・log監視を維持する | Decided | 旧repository roadmap討議 |
-| D-005 | 2026-08-17 | 明示承認のない無人auto-merge、deploy、本番操作は行わない | Decided | 旧repository roadmap討議、旧repository計画PR討議 |
-| D-006 | 2026-08-17 | 正常なterminal stateは`READY_FOR_HUMAN_MERGE` | Superseded by D-013 | 旧repository roadmap討議 |
-| D-007 | 2026-08-17 | 旧repositoryで親roadmap討議と完成イメージ合意討議を分けて進める | Superseded: 本repositoryのroadmap Issueは発行後に採番して記録する | 旧repository完成イメージ討議 |
-| D-008 | 2026-08-17 | 既存docsは初回整理で移動せず、indexで分類する | Decided | 旧repository完成イメージ討議の準備 |
-| D-009 | 2026-08-17 | Issue modeは指定Issueの内容を実装要件とし、対応PRが既にあれば重複作成せず再利用する | Decided | 旧repository計画PR討議 |
-| D-010 | 2026-08-17 | Claudeのdraft decision requestをCodexが判断要否も含めてreviewし、`ASK_USER`時はClaudeが最終briefを作成して停止、`PROCEED_WITH_RECORD`時はPRへ記録して継続する | Decided | 旧repository計画PR討議 |
-| D-011 | 2026-08-17 | ClaudeはCodexの返答へ同一topicあたり最大5 clarification turnsまで再問い合わせでき、解決・no-progress・ユーザー判断移行時は早期終了する | Decided | 旧repository計画PR討議 |
-| D-012 | 2026-08-17 | GitHub Issue / PRをagent・ユーザー間の正式なconversation sourceとし、各論理turnを投稿・read-after-write確認してから次agentを起動する | Decided | 旧repository計画PR討議 |
-| D-013 | 2026-08-17 | `READY_FOR_HUMAN_MERGE`をClaude Code PowerShell画面で質問・修正依頼・明示承認を受ける対話gateとし、明示承認をGitHubへ記録後、Controllerが同一headを再検証・merge・確認して`MERGED`を正常な最終状態とする | Decided | 旧repository計画PR討議 |
-| D-014 | 2026-08-17 | 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを呼び出し、active sessionの会話contextを維持したままClaudeがhost / coderを担当する。`cc-review` CLIはheadless・復旧用の補助経路とする | Decided | 旧repository計画PR討議 |
-| D-015 | 2026-08-17 | Codex reviewer / final reporterは既存の対話sessionを再利用せず、現在headとGitHub canonical conversationを入力に毎回freshなread-only subprocessとして実行する | Decided; durable read-onlyと検証用一時書込の境界はD-025で補足 | 旧repository計画PR討議 |
-| D-016 | 2026-08-17 | 最初のreleaseへPR modeとIssue modeの両方を含める。内部実装はPR modeを先行可能だが、Issue取得・実装・既存PR再利用・Issue→PR handoff・共通review loopまで完成する前に初回releaseとしない | Decided | 旧repository計画PR討議 |
-| D-017 | 2026-08-17 | agentごとのtab / paneは既定で自動起動せず、ユーザーがClaude Code画面から明示要求した場合だけ任意wrapperで監視paneを開く。wrapperなしでもcore loopは動作し、Codex paneはfresh subprocessのread-only log監視に限定する | Decided | 旧repository計画PR討議 |
-| D-018 | 2026-08-17 | Linux/SSHでは対応`tmux` wrapper内のrunをSSH切断後もユーザー判断不要な範囲で継続する。判断が必要ならGitHubへ資料を投稿して`AWAITING_USER_DECISION`、merge-readyならfinal reportを投稿して`READY_FOR_HUMAN_MERGE`でmergeせず終了する。wrapper外はprocess生存を保証せずGitHub checkpointからresumeし、独自daemonはMVP外とする | Decided | 旧repository計画PR討議 |
-| D-019 | 2026-08-17 | final report言語はrepository設定ファイルで選択可能にし、repository設定、user-level設定、組込み既定値の順に解決する。未設定時の既定は日本語とする | Decided | 旧repository計画PR討議 |
-| D-020 | 2026-08-17 | CI pending時は設定可能なbounded foreground wait（既定20分・30秒間隔）を行い、上限後もpendingならGitHubへ記録して`WAITING_CI`で終了し、CI完了後に明示resumeする | Decided | 旧repository計画PR討議 |
-| D-021 | 2026-08-17 | MVPではGitHub commentへ直接入力されたユーザー回答を次の明示Skill resume時に取得する。comment watcher / webhookによる非同期自動resumeは認可・重複・編集・head bindingを備える後続releaseとする | Decided | 旧repository計画PR討議 |
-| D-022 | 2026-08-17 | merge methodはrepository設定で`merge` / `squash` / `rebase`を選択可能にする。未設定で許可方式が複数ならユーザー判断を求め、承認をheadとmethodの両方へbindする | Decided | 旧repository計画PR討議 |
-| D-023 | 2026-08-17 | local artifactは正常runを既定30日、`FAILED` / `BLOCKED` / salvageを90日保持し、active / locked runを除外して起動時または明示commandでbounded cleanupする | Decided | 旧repository計画PR討議 |
-| D-024 | 2026-08-17 | Approved follow-upは自動Issue化せず、Claudeが最大3件のdeduplicate済み候補をdraftし、Codexが必要性・現在PR対応要否・重複・scopeをread-only reviewした後、ユーザーが候補ごとに明示許可した場合だけControllerがIssueを作成する。不許可・未回答はfinal reportへ残し、非blockingなfollow-upのpermission状態はmergeを妨げない | Decided | 旧repository計画PR討議 |
-| D-025 | 2026-08-17 | 対応環境のClaude CodeではAuto modeを通常の実装・test・build・read-only Web調査・feature branchへのcommit / pushに使用し、非対応時は限定permission profileへfallbackする。tool permissionとworkflow承認を分離し、例外blockは`AWAITING_TOOL_PERMISSION`で標準permission設定後に明示resumeする。Codexは各roundをfresh sessionで実行し、GitHub contextを再構築したexact-head隔離checkout内でtest・build・再現・Web調査を許可するが、実repositoryとGitHubへの永続変更権限を持たない | Decided | 旧repository計画PR討議 |
-| D-026 | 2026-08-17 | Claude Code Pluginを正式配布単位とし、Skillと薄いplatform wrapperをversion管理する。Controllerは任意repositoryから呼べるinstall済みCLI packageとし、repo-local Skillは開発・test、user-level単体Skillはfallbackに限定する。MCP serverとしての実装・配布は行わない | Decided | 旧repository計画PR討議 |
+| D-001 | 2026-08-17 | 実行はユーザーがIssue / PR commandで開始する | Decided | 初期要件整理 |
+| D-002 | 2026-08-17 | PR自動検知、watcher、webhook、label triggerは対象外 | Decided | 初期要件整理 |
+| D-003 | 2026-08-17 | Controllerは対話型TUIへキー入力を注入せず、agent turnを非対話CLIとして起動する | Superseded by D-014 / D-015: Claudeはactive Skill host、Codexだけをfresh subprocess化。キー注入禁止は維持 | 初期要件整理、完成イメージ合意 |
+| D-004 | 2026-08-17 | PowerShellからの操作・log監視を維持する | Decided | 初期要件整理 |
+| D-005 | 2026-08-17 | 明示承認のない無人auto-merge、deploy、本番操作は行わない | Decided | 初期要件整理、完成イメージ合意 |
+| D-006 | 2026-08-17 | 正常なterminal stateは`READY_FOR_HUMAN_MERGE` | Superseded by D-013 | 初期要件整理 |
+| D-007 | 2026-08-17 | 初期要件整理と完成イメージ合意を別の討議として分けて進める | Superseded: 本repositoryのroadmap Issueは発行後に採番して記録する | 完成イメージ合意 |
+| D-008 | 2026-08-17 | 既存docsは初回整理で移動せず、indexで分類する | Decided | 完成イメージ合意の準備 |
+| D-009 | 2026-08-17 | Issue modeは指定Issueの内容を実装要件とし、対応PRが既にあれば重複作成せず再利用する | Decided | 完成イメージ合意 |
+| D-010 | 2026-08-17 | Claudeのdraft decision requestをCodexが判断要否も含めてreviewし、`ASK_USER`時はClaudeが最終briefを作成して停止、`PROCEED_WITH_RECORD`時はPRへ記録して継続する | Decided | 完成イメージ合意 |
+| D-011 | 2026-08-17 | ClaudeはCodexの返答へ同一topicあたり最大5 clarification turnsまで再問い合わせでき、解決・no-progress・ユーザー判断移行時は早期終了する | Decided | 完成イメージ合意 |
+| D-012 | 2026-08-17 | GitHub Issue / PRをagent・ユーザー間の正式なconversation sourceとし、各論理turnを投稿・read-after-write確認してから次agentを起動する | Decided | 完成イメージ合意 |
+| D-013 | 2026-08-17 | `READY_FOR_HUMAN_MERGE`をClaude Code PowerShell画面で質問・修正依頼・明示承認を受ける対話gateとし、明示承認をGitHubへ記録後、Controllerが同一headを再検証・merge・確認して`MERGED`を正常な最終状態とする | Decided | 完成イメージ合意 |
+| D-014 | 2026-08-17 | 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを呼び出し、active sessionの会話contextを維持したままClaudeがhost / coderを担当する。`cc-review` CLIはheadless・復旧用の補助経路とする | Decided | 完成イメージ合意 |
+| D-015 | 2026-08-17 | Codex reviewer / final reporterは既存の対話sessionを再利用せず、現在headとGitHub canonical conversationを入力に毎回freshなread-only subprocessとして実行する | Decided; durable read-onlyと検証用一時書込の境界はD-025で補足 | 完成イメージ合意 |
+| D-016 | 2026-08-17 | 最初のreleaseへPR modeとIssue modeの両方を含める。内部実装はPR modeを先行可能だが、Issue取得・実装・既存PR再利用・Issue→PR handoff・共通review loopまで完成する前に初回releaseとしない | Decided | 完成イメージ合意 |
+| D-017 | 2026-08-17 | agentごとのtab / paneは既定で自動起動せず、ユーザーがClaude Code画面から明示要求した場合だけ任意wrapperで監視paneを開く。wrapperなしでもcore loopは動作し、Codex paneはfresh subprocessのread-only log監視に限定する | Decided | 完成イメージ合意 |
+| D-018 | 2026-08-17 | Linux/SSHでは対応`tmux` wrapper内のrunをSSH切断後もユーザー判断不要な範囲で継続する。判断が必要ならGitHubへ資料を投稿して`AWAITING_USER_DECISION`、merge-readyならfinal reportを投稿して`READY_FOR_HUMAN_MERGE`でmergeせず終了する。wrapper外はprocess生存を保証せずGitHub checkpointからresumeし、独自daemonはMVP外とする | Decided | 完成イメージ合意 |
+| D-019 | 2026-08-17 | final report言語はrepository設定ファイルで選択可能にし、repository設定、user-level設定、組込み既定値の順に解決する。未設定時の既定は日本語とする | Decided | 完成イメージ合意 |
+| D-020 | 2026-08-17 | CI pending時は設定可能なbounded foreground wait（既定20分・30秒間隔）を行い、上限後もpendingならGitHubへ記録して`WAITING_CI`で終了し、CI完了後に明示resumeする | Decided | 完成イメージ合意 |
+| D-021 | 2026-08-17 | MVPではGitHub commentへ直接入力されたユーザー回答を次の明示Skill resume時に取得する。comment watcher / webhookによる非同期自動resumeは認可・重複・編集・head bindingを備える後続releaseとする | Decided | 完成イメージ合意 |
+| D-022 | 2026-08-17 | merge methodはrepository設定で`merge` / `squash` / `rebase`を選択可能にする。未設定で許可方式が複数ならユーザー判断を求め、承認をheadとmethodの両方へbindする | Decided | 完成イメージ合意 |
+| D-023 | 2026-08-17 | local artifactは正常runを既定30日、`FAILED` / `BLOCKED` / salvageを90日保持し、active / locked runを除外して起動時または明示commandでbounded cleanupする | Decided | 完成イメージ合意 |
+| D-024 | 2026-08-17 | Approved follow-upは自動Issue化せず、Claudeが最大3件のdeduplicate済み候補をdraftし、Codexが必要性・現在PR対応要否・重複・scopeをread-only reviewした後、ユーザーが候補ごとに明示許可した場合だけControllerがIssueを作成する。不許可・未回答はfinal reportへ残し、非blockingなfollow-upのpermission状態はmergeを妨げない | Decided | 完成イメージ合意 |
+| D-025 | 2026-08-17 | 対応環境のClaude CodeではAuto modeを通常の実装・test・build・read-only Web調査・feature branchへのcommit / pushに使用し、非対応時は限定permission profileへfallbackする。tool permissionとworkflow承認を分離し、例外blockは`AWAITING_TOOL_PERMISSION`で標準permission設定後に明示resumeする。Codexは各roundをfresh sessionで実行し、GitHub contextを再構築したexact-head隔離checkout内でtest・build・再現・Web調査を許可するが、実repositoryとGitHubへの永続変更権限を持たない | Decided | 完成イメージ合意 |
+| D-026 | 2026-08-17 | Claude Code Pluginを正式配布単位とし、Skillと薄いplatform wrapperをversion管理する。Controllerは任意repositoryから呼べるinstall済みCLI packageとし、repo-local Skillは開発・test、user-level単体Skillはfallbackに限定する。MCP serverとしての実装・配布は行わない | Decided | 完成イメージ合意 |
 
 ## 16. Agreement checklist
 
@@ -1005,7 +1005,7 @@ final reportはApproved follow-up候補ごとにCodex評価、Issue draftまた�
 - [x] MVP inclusions、later phases、exclusionsを確認した
 - [x] Q-001～Q-012がD-016～D-026で解決済みであることを確認した
 - [x] 文書statusを`Agreed`へ変更した
-- [x] implementation plan作成へ進むことを旧repositoryの計画PR討議と後続discussionで確認した
+- [x] implementation plan作成へ進むことを完成イメージ合意と後続discussionで確認した
 
 ## 17. Agreement後のnext action
 

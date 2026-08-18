@@ -1,9 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+DOCUMENT_PATHS = (
+    "README.md",
+    "docs/README.md",
+    "docs/architecture/README.md",
+    "docs/decisions/0001-independent-v2.md",
+    "docs/decisions/0002-independent-reimplementation.md",
+    "docs/plans/target-experience.md",
+    "plugin/README.md",
+    "wrappers/README.md",
+)
 
 
 def test_project_identity_is_consistent() -> None:
@@ -27,31 +39,22 @@ def test_apache_license_and_notice_are_present() -> None:
 
 def test_target_experience_is_an_agreed_baseline() -> None:
     target = (ROOT / "docs" / "plans" / "target-experience.md").read_text(encoding="utf-8")
-    migration = (
-        ROOT / "docs" / "decisions" / "migration-from-coding-review-agent-loop.md"
-    ).read_text(encoding="utf-8")
-
     assert "| Status | **Agreed** |" in target
     assert "cc-review" in target
 
 
-def test_fork_identifiers_are_not_referenced() -> None:
-    """削除予定のfork repository固有の識別子を正式な参照として残さない。"""
+def test_superseded_fork_identifiers_are_not_referenced() -> None:
+    """本repository以外のreview agent loop系forkを正式な参照として残さない。"""
 
-    paths = (
-        "README.md",
-        "docs/README.md",
-        "docs/architecture/README.md",
-        "docs/decisions/0001-independent-v2.md",
-        "docs/decisions/migration-from-coding-review-agent-loop.md",
-        "docs/plans/target-experience.md",
-    )
-    # fork元の本家<https://github.com/wwind123/coding-review-agent-loop>は出典として許容する。
-    fork_identifier = "Mega-Gorilla/coding-review-agent-loop"
+    # 本repository`Mega-Gorilla/claude-code-codex-review-loop`以外の、
+    # 同一owner配下のreview agent loop系repositoryを検出する。
+    # 参考実装の出典（別owner）はADR-0002へ記録するため対象外とする。
+    superseded_fork = re.compile(r"Mega-Gorilla/(?!claude-code-codex-review-loop)[\w.-]*review[\w.-]*loop")
 
-    for path in paths:
+    for path in DOCUMENT_PATHS:
         text = (ROOT / path).read_text(encoding="utf-8")
-        assert fork_identifier not in text, path
+        found = superseded_fork.findall(text)
+        assert not found, f"{path}: {found}"
 
 
 def test_versioned_project_files_declare_apache_license() -> None:
@@ -62,7 +65,7 @@ def test_versioned_project_files_declare_apache_license() -> None:
         "docs/README.md",
         "docs/architecture/README.md",
         "docs/decisions/0001-independent-v2.md",
-        "docs/decisions/migration-from-coding-review-agent-loop.md",
+        "docs/decisions/0002-independent-reimplementation.md",
         "docs/plans/target-experience.md",
         "plugin/README.md",
         "src/claude_code_codex_review_loop/__init__.py",
@@ -75,22 +78,20 @@ def test_versioned_project_files_declare_apache_license() -> None:
         assert any(
             "SPDX-License-Identifier: Apache-2.0" in line for line in text.splitlines()[:3]
         ), path
+
+
 def test_cli_naming_is_unified_on_cc_review() -> None:
     """旧CLI名`agent-loop`と関連namespaceが設計baselineへ再混入しないことを確認する。"""
 
-    paths = (
-        "README.md",
-        "docs/README.md",
-        "docs/architecture/README.md",
-        "docs/plans/target-experience.md",
-        "plugin/README.md",
-        "wrappers/README.md",
+    # 参考実装のrepository名に含まれる`-agent-loop`は出典表記として許容するため、
+    # 直前がhyphenまたは英数字の場合は検出対象から除外する。
+    legacy_tokens = (
+        re.compile(r"(?<![\w-])agent-loop"),
+        re.compile(r"AGENT_LOOP"),
+        re.compile(r"agent_loop"),
     )
-    legacy_tokens = ("agent-loop", "AGENT_LOOP", "agent_loop")
 
-    for path in paths:
+    for path in DOCUMENT_PATHS:
         text = (ROOT / path).read_text(encoding="utf-8")
-        # 旧repository名`coding-review-agent-loop`は出典表記として許容する。
-        text = text.replace("coding-review-agent-loop", "")
         for token in legacy_tokens:
-            assert token not in text, f"{path}: {token}"
+            assert not token.search(text), f"{path}: {token.pattern}"
