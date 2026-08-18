@@ -15,4 +15,4 @@
 9. checkpoint、resume、artifact retention
 10. Windows PowerShell、Linux/SSH、`tmux` wrapper
 
-初期実装Issueは、この文書をarchitecture planへ更新し、レビュー・合意した後に発行します。
+初期実装Issueは、この文書をarchitecture planへ更新し、レビュー・合意した後に発行し、親roadmap Issue #2から参照します。
