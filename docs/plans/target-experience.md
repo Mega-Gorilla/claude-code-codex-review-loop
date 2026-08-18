@@ -8,7 +8,7 @@
 | Origin | bootstrap設計討議で合意した完成イメージ |
 | Approval | 新repositoryのbootstrap前にユーザー合意済み |
 | Owner | Mega-Gorilla |
-| Last updated | 2026-08-17 |
+| Last updated | 2026-08-18 |
 | Scope | Windows PowerShell 7、Linux/SSH上のPowerShell 7 |
 
 ## 1. この文書の目的
@@ -960,7 +960,7 @@ final reportはApproved follow-up候補ごとにCodex評価、Issue draftまた�
 | D-004 | 2026-08-17 | PowerShellからの操作・log監視を維持する | Decided | 初期要件整理 |
 | D-005 | 2026-08-17 | 明示承認のない無人auto-merge、deploy、本番操作は行わない | Decided | 初期要件整理、完成イメージ合意 |
 | D-006 | 2026-08-17 | 正常なterminal stateは`READY_FOR_HUMAN_MERGE` | Superseded by D-013 | 初期要件整理 |
-| D-007 | 2026-08-17 | 初期要件整理と完成イメージ合意を別の討議として分けて進める | Superseded: 本repositoryのroadmap Issueは発行後に採番して記録する | 完成イメージ合意 |
+| D-007 | 2026-08-17 | 初期要件整理と完成イメージ合意を別の討議として分けて進める | Superseded by D-027 | 完成イメージ合意 |
 | D-008 | 2026-08-17 | 既存docsは初回整理で移動せず、indexで分類する | Decided | 完成イメージ合意の準備 |
 | D-009 | 2026-08-17 | Issue modeは指定Issueの内容を実装要件とし、対応PRが既にあれば重複作成せず再利用する | Decided | 完成イメージ合意 |
 | D-010 | 2026-08-17 | Claudeのdraft decision requestをCodexが判断要否も含めてreviewし、`ASK_USER`時はClaudeが最終briefを作成して停止、`PROCEED_WITH_RECORD`時はPRへ記録して継続する | Decided | 完成イメージ合意 |
@@ -980,6 +980,7 @@ final reportはApproved follow-up候補ごとにCodex評価、Issue draftまた�
 | D-024 | 2026-08-17 | Approved follow-upは自動Issue化せず、Claudeが最大3件のdeduplicate済み候補をdraftし、Codexが必要性・現在PR対応要否・重複・scopeをread-only reviewした後、ユーザーが候補ごとに明示許可した場合だけControllerがIssueを作成する。不許可・未回答はfinal reportへ残し、非blockingなfollow-upのpermission状態はmergeを妨げない | Decided | 完成イメージ合意 |
 | D-025 | 2026-08-17 | 対応環境のClaude CodeではAuto modeを通常の実装・test・build・read-only Web調査・feature branchへのcommit / pushに使用し、非対応時は限定permission profileへfallbackする。tool permissionとworkflow承認を分離し、例外blockは`AWAITING_TOOL_PERMISSION`で標準permission設定後に明示resumeする。Codexは各roundをfresh sessionで実行し、GitHub contextを再構築したexact-head隔離checkout内でtest・build・再現・Web調査を許可するが、実repositoryとGitHubへの永続変更権限を持たない | Decided | 完成イメージ合意 |
 | D-026 | 2026-08-17 | Claude Code Pluginを正式配布単位とし、Skillと薄いplatform wrapperをversion管理する。Controllerは任意repositoryから呼べるinstall済みCLI packageとし、repo-local Skillは開発・test、user-level単体Skillはfallbackに限定する。MCP serverとしての実装・配布は行わない | Decided | 完成イメージ合意 |
+| D-027 | 2026-08-18 | 本repositoryのIssue #2を親roadmapとし、target experience、implementation plan、子Issueをここから参照する。implementation planは`docs/plans/implementation-plan.md`として作成する | Decided | PR #1 merge後のroadmap整備 |
 
 ## 16. Agreement checklist
 
@@ -1012,5 +1013,5 @@ final reportはApproved follow-up候補ごとにCodex評価、Issue draftまた�
 1. `docs/plans/implementation-plan.md`を作成する
 2. agreed target experienceをtechnical componentとdependencyへ分解する
 3. Windows process、safe PR preset、final reporter等の実装Issueを発行する
-4. 本repositoryで親roadmap Issueを発行し、そこからtarget experience、implementation plan、子Issueを参照する
+4. 発行済みの親roadmap Issue #2からtarget experience、implementation plan、子Issueを参照する
 5. dependency順に小さなPRで実装する
