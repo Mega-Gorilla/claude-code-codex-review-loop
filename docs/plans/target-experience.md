@@ -960,7 +960,7 @@ final reportはApproved follow-up候補ごとにCodex評価、Issue draftまた�
 | D-004 | 2026-08-17 | PowerShellからの操作・log監視を維持する | Decided | 初期要件整理 |
 | D-005 | 2026-08-17 | 明示承認のない無人auto-merge、deploy、本番操作は行わない | Decided | 初期要件整理、完成イメージ合意 |
 | D-006 | 2026-08-17 | 正常なterminal stateは`READY_FOR_HUMAN_MERGE` | Superseded by D-013 | 初期要件整理 |
-| D-007 | 2026-08-17 | 初期要件整理と完成イメージ合意を別の討議として分けて進める | Superseded by D-027 | 完成イメージ合意 |
+| D-007 | 2026-08-17 | 初期要件整理と完成イメージ合意を別の討議として分けて進める | Decided | 完成イメージ合意 |
 | D-008 | 2026-08-17 | 既存docsは初回整理で移動せず、indexで分類する | Decided | 完成イメージ合意の準備 |
 | D-009 | 2026-08-17 | Issue modeは指定Issueの内容を実装要件とし、対応PRが既にあれば重複作成せず再利用する | Decided | 完成イメージ合意 |
 | D-010 | 2026-08-17 | Claudeのdraft decision requestをCodexが判断要否も含めてreviewし、`ASK_USER`時はClaudeが最終briefを作成して停止、`PROCEED_WITH_RECORD`時はPRへ記録して継続する | Decided | 完成イメージ合意 |
