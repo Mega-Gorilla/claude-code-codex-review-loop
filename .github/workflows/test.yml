@@ -45,4 +45,21 @@ jobs:
 
       - name: Check pushed commit diff
         if: github.event_name == 'push'
-        run: git diff --check HEAD^..HEAD
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          base="${BEFORE_SHA:-}"
+          if [ "${base}" = "0000000000000000000000000000000000000000" ]; then
+            base=""
+          fi
+          if [ -n "${base}" ] && ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base=""
+          fi
+          if [ -z "${base}" ]; then
+            base="$(git hash-object -t tree /dev/null)"
+          fi
+          echo "Checking ${base}..${AFTER_SHA}"
+          git diff --check "${base}" "${AFTER_SHA}"

@@ -6,7 +6,7 @@ Claude Codeをcoder、Codexをread-only reviewerとして使用し、GitHub Issu
 
 ## Status
 
-現在はarchitecture planning段階です。合意済みの完成イメージを基に、新しいControllerを独立設計します。旧`coding-review-agent-loop`の実装コードはこのrepositoryへ含めていません。
+現在はarchitecture planning段階です。合意済みの完成イメージを基に、新しいControllerを独立設計します。
 
 ## Planned interface
 

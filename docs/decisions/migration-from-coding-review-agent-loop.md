@@ -6,7 +6,7 @@
 
 - Original: <https://github.com/wwind123/coding-review-agent-loop>
 - Historical fork: `Mega-Gorilla/coding-review-agent-loop`（削除予定）
-- Legacy alignment record: PR #3（内容は本repositoryへ移行済み）
+- Legacy alignment record: 旧repositoryの計画PR（内容は本repositoryへ移行済み）
 - Agreed plan merge commit: `72c8b77a2c76e33bb56971d3c610d0e236befa0f`
 - Agreed plan head: `4e6080e6e2719092347996cea401e38a908c7c29`
 
