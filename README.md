@@ -28,7 +28,7 @@ cc-review issue 123 --repo OWNER/REPO
 
 ## License
 
-本repositoryの現行成果物は[Apache License 2.0](LICENSE)で提供します。旧repositoryの実装コードは含まれていません。将来、第三者成果物を選択移植する場合は、そのPRで出典と適用ライセンスを追加します。
+本repositoryの現行成果物は[Apache License 2.0](LICENSE)で提供します。将来、第三者成果物を選択移植する場合は、そのPRで出典と適用ライセンスを追加します。
 
 ## Independence
 
