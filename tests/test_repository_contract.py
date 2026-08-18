@@ -6,6 +6,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+REPOSITORY_OWNER = "Mega-Gorilla"
+CURRENT_REPOSITORY = "claude-code-codex-review-loop"
+
 DOCUMENT_PATHS = (
     "README.md",
     "docs/README.md",
@@ -43,18 +46,23 @@ def test_target_experience_is_an_agreed_baseline() -> None:
     assert "cc-review" in target
 
 
-def test_superseded_fork_identifiers_are_not_referenced() -> None:
-    """本repository以外のreview agent loop系forkを正式な参照として残さない。"""
+def test_only_the_current_repository_is_referenced_for_the_owner() -> None:
+    """同一owner配下では本repository以外を正式文書の参照として残さない。"""
 
-    # 本repository`Mega-Gorilla/claude-code-codex-review-loop`以外の、
-    # 同一owner配下のreview agent loop系repositoryを検出する。
-    # 参考実装の出典（別owner）はADR-0002へ記録するため対象外とする。
-    superseded_fork = re.compile(r"Mega-Gorilla/(?!claude-code-codex-review-loop)[\w.-]*review[\w.-]*loop")
+    # repository参照を抽出し、完全一致で本repositoryだけを許可する。
+    # 参考実装の出典は別ownerのため対象外で、ADR-0002へ限定して記録する。
+    reference = re.compile(rf"{REPOSITORY_OWNER}/([\w.-]+)")
 
     for path in DOCUMENT_PATHS:
         text = (ROOT / path).read_text(encoding="utf-8")
-        found = superseded_fork.findall(text)
-        assert not found, f"{path}: {found}"
+        others = sorted(
+            {
+                name.removesuffix(".git")
+                for name in reference.findall(text)
+                if name.removesuffix(".git") != CURRENT_REPOSITORY
+            }
+        )
+        assert not others, f"{path}: {others}"
 
 
 def test_versioned_project_files_declare_apache_license() -> None:
