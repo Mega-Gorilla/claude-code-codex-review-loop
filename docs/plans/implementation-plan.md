@@ -137,13 +137,33 @@ src/claude_code_codex_review_loop/
 
 ### C-01 domain state machine
 
-遷移関数は`(state, event) -> (state, [command])`。GitHub永続化とread-after-write確認の完了をeventとして要求し、gate未通過の遷移を表現できないようにする。
+遷移関数は`(machine_state, event) -> (machine_state, [command])`。GitHub永続化とread-after-write確認の完了をeventとして要求し、gate未通過の遷移を表現できないようにする。
+
+**遷移registry**: states、events、commands、guard条件、terminal / resumable分類を**単一のregistry**として定義し、完全遷移表と遷移図をregistryから導出・照合する。target experienceの「State model」節の図はユーザー向け簡略図として維持し、実装の正本はregistryとする。簡略図が省略している遷移（失敗系からのresume、各状態でのcancel可否、GitHub投稿・確認失敗、preflight失敗）もregistryでは全て定義する。
+
+**MachineState**: 可視の17 stateとは別に、immutableな`MachineState`が復帰先等の付随情報を保持する。典型例は`AWAITING_TOOL_PERMISSION`で、`RUNNING_REVIEW`と`APPLYING_FIXES`のどちらから入ったかをMachineStateが保持し、permission承認eventで元の処理へ戻る。**復帰先をeventの引数として外部から渡す設計は採らない**（不正な状態jumpを防ぐ）。
+
+**初期・terminal・resume semantics**:
+
+- C-01の開始点はpreflight成功eventによる`RUNNING_REVIEW`への遷移とする。preflight失敗は`FAILED`への遷移としてC-01の入力に含める
+- `MERGED`と`CANCELLED`はterminal。terminal状態からはいかなる処理も開始できない
+- `FAILED` / `BLOCKED` / `REPORT_FAILED` / `MERGE_FAILED` / `WAITING_CI`はresumableとし、明示resume eventと復帰先をregistryで定義する
+- retry可能な失敗とterminalな失敗をevent / guardで区別する
+- **`MERGING`中のcancelは即`CANCELLED`にしない**。merge結果の照会eventを要求し、GitHub上で結果を確定できない場合は`MERGE_FAILED`として安全停止する（成功と表示しない、二重mergeしない、というtarget experienceの失敗方針から導出）
+
+**canonical record gateの責務境界**: C-01が持つのは順序制約だけである。(1) agent / user発言の発生 -> (2) canonical record永続化commandの発行 -> (3) 後続層からの**検証済みevidence event**の受領 -> (4) その後にのみ次agent起動commandの発行。GitHubへの投稿はC-05、actor・record chainの検証はC-06の責務であり、C-01はどちらも実装しない。gateの解除は単なるbooleanではなく、将来のverified record（C-06）へ接続できる型付きevidenceで表現する。
+
+**Phase 1のscope限定**: `domain/`のうちPhase 1で実装するのはstates / events / commands / machineと、machineの成立に不可欠な最小のvalue objectのみ。finding ledgerはPhase 10、run ID等のid生成は最初に必要とするPhaseで追加し、Phase 1では空moduleも先行実装も作らない。
 
 | ID | 受入条件 |
 | --- | --- |
-| AC-C01-01 | 17 stateすべてが到達可能で、遷移表と遷移図をdata drivenで照合できる |
-| AC-C01-02 | 未定義遷移と到達不能stateをtestが検出する |
-| AC-C01-03 | 検証済みcanonical recordの永続化eventが無い状態では、次agentを起動するcommandを生成できない |
+| AC-C01-01 | 17 stateすべてが到達可能で、遷移表と遷移図が同一registryから導出され、data drivenで照合できる |
+| AC-C01-02 | 未定義遷移がsilent no-opにならず、構造化されたerrorとして拒否される。全state × event組合せをtable-driven testで検査し、到達不能stateを検出する |
+| AC-C01-03 | 検証済みcanonical recordのevidence eventが無い状態では、次agentを起動するcommandを生成できない。gate解除は型付きevidenceによる |
+| AC-C01-04 | 遷移関数が純粋である: 同一入力から常に同一結果、入力を変更しない、I/O・時刻・乱数・環境変数へ依存しない、command列の順序が決定論的 |
+| AC-C01-05 | terminal状態（`MERGED` / `CANCELLED`）からいかなる処理も開始できない。resumable状態は定義されたresume eventだけで復帰する |
+| AC-C01-06 | 待機状態（`AWAITING_TOOL_PERMISSION`等）から、進入元に応じた正しい処理位置へ復帰する。復帰先はMachineStateが保持し、eventから注入できない |
+| AC-C01-07 | `MERGING`中のcancelがmerge結果の照会を経由し、結果を確定できない場合に`CANCELLED`ではなく`MERGE_FAILED`へ遷移する |
 
 ### C-02 agent protocol schemaとcheckpoint envelope
 
@@ -467,7 +487,7 @@ schema検証は、runtime依存をゼロに保ち、必要なschema機能だけ�
 | Phase | 内容 | Component | 完了条件 | 追加するcheckpoint field |
 | --- | --- | --- | --- | --- |
 | 0 | 基盤と品質ゲート | — | CIでlint、type、coverage、size ratchetが動作する。P-001を決定する | — |
-| 1 | domain state machine | C-01 | AC-C01-01〜03 | — |
+| 1 | domain state machine | C-01 | AC-C01-01〜07 | — |
 | 2 | protocol schemaとenvelope | C-02 | AC-C02-01〜03 | envelope schemaとmigration policyを定義（永続化はPhase 5以降） |
 | 3 | process abstraction | C-03 | AC-C03-01、AC-C03-02 | — |
 | 4 | security policy | C-04 | AC-C04-01〜03 | — |
