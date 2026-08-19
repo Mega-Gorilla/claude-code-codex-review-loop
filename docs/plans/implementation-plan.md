@@ -141,21 +141,25 @@ src/claude_code_codex_review_loop/
 
 遷移関数は`(machine_state, event) -> (machine_state, [command])`。GitHub永続化とread-after-write確認の完了をeventとして要求し、gate未通過の遷移を表現できないようにする。
 
-**遷移registry**: states、events、commands、guard条件、terminal / resumable分類を**単一のregistry**として定義し、完全遷移表と遷移図をregistryから導出・照合する。共通規則（cancel / failure等）もregistry内で個別ruleへ展開し、**各`(state, event, guard)`に一致するruleは0件または1件**とする（重複はtestでfail。優先順位による解決はしない）。target experienceの「State model」節の図はユーザー向け簡略図として維持し、計画文書はnormativeな期待挙動、実装のcode registryが実行可能な単一の正本であり、表・図はregistryから生成してsnapshot照合する。簡略図が省略している遷移（失敗系からのresume、各状態でのcancel可否、GitHub投稿・確認失敗、preflight失敗）もregistryでは全て定義する。
+**遷移registry**: states、events、commands、guard条件、terminal / resumable分類を**単一のregistry**として定義し、完全遷移表と遷移図をregistryから導出・照合する。guardは自由なpredicateではなく**有限のtyped discriminator**（`awaiting`値、`pending_record`一致、`return_to` / `recovery_to`の有無）に限定し、共通規則（cancel / failure等）もregistry内で個別ruleへ展開して、**到達可能なMachineState付随値の各組合せ × 各eventに一致するruleは0件または1件**とする（overlapはdiscriminator全値の展開で機械的に検査しfail。優先順位による解決はしない）。target experienceの「State model」節の図はユーザー向け簡略図として維持し、計画文書はnormativeな期待挙動、実装のcode registryが実行可能な単一の正本であり、表・図はregistryから生成してsnapshot照合する。簡略図が省略している遷移（失敗系からのresume、各状態でのcancel可否、GitHub投稿・確認失敗、preflight失敗）もregistryでは全て定義する。
 
-**MachineState**: 可視の17 stateとは別に、immutableな`MachineState`が付随情報を保持する: `return_to`（tool permissionからの復帰先）、`recovery_to`（`BLOCKED` / `FAILED`からの安全な再開地点）、`awaiting`（依頼済みで応答待ちの相手）、`pending_record`（永続化の確認待ちrecordのkindとopaque binding）。典型例は`AWAITING_TOOL_PERMISSION`で、`RUNNING_REVIEW`と`APPLYING_FIXES`のどちらから入ったかを`return_to`が保持し、permission承認eventで元の処理へ戻る。**復帰先・再開地点をeventの引数として外部から渡す設計は採らない**（不正な状態jumpを防ぐ）。
+**MachineState**: 可視の17 stateとは別に、immutableな`MachineState`が付随情報を保持する: `return_to`（tool permissionからの復帰先）、`recovery_to`（`BLOCKED` / `FAILED`からの安全な再開地点）、`awaiting`（発行済みcommandに対応する「次に受理してよい応答」の有限typed discriminator。応答eventはguard一致でのみ受理・消費され、順序を飛ばした応答・消費済み応答の再入力は構造化errorで拒否される）、`pending_record`（永続化の確認待ちrecordのkindとopaque binding）。典型例は`AWAITING_TOOL_PERMISSION`で、`RUNNING_REVIEW`と`APPLYING_FIXES`のどちらから入ったかを`return_to`が保持し、permission承認eventで元の処理へ戻る。**復帰先・再開地点をeventの引数として外部から渡す設計は採らない**（不正な状態jumpを防ぐ）。
 
 **初期・terminal・resume semantics**:
 
 - 開始は`initialize(preflight_event)`の専用APIとする。preflight成功で`RUNNING_REVIEW`へ、失敗は`FAILED`へ（可視の17 stateに「未開始」を追加しない）
 - `MERGED`と`CANCELLED`はterminal。terminal状態からはいかなる処理も開始できない
 - `FAILED` / `BLOCKED` / `REPORT_FAILED` / `MERGE_FAILED` / `WAITING_CI` / `AWAITING_USER_DECISION` / `AWAITING_TOOL_PERMISSION` / `READY_FOR_HUMAN_MERGE`はresumableとし、resume時に許可するeventと復帰先・再発行commandをregistryで定義する（後3者は通常eventがresumeを兼ねる）
-- **`BLOCKED` / `FAILED`からの一律fresh reviewは採らない**。進入時のruleが`recovery_to`を設定し、resume preflight成功でそこへ復帰する。head変更・checkpoint不整合等で安全を証明できない場合のみfresh reviewへfallbackする
+- **`BLOCKED` / `FAILED`からの一律fresh reviewは採らない**。進入時のruleが`recovery_to`を設定し（`pending_record` / `awaiting`は変更せず引き継ぐ）、resume preflight成功でそこへ復帰する。head変更・checkpoint不整合等で安全を証明できない場合のみfresh reviewへfallbackする
+- **resume actionは優先順位で決める**: (1) `pending_record`があれば同一bindingの冪等な永続化確認のみを再開（次agentを起動しない）、(2) `awaiting`があれば対応するcommandの再発行・結果照会、(3) どちらも無い場合だけ`recovery_to`の駆動commandを発行する。`BLOCKED` / `FAILED`滞在中の失敗は既存のrecovery情報を上書きしない
 - retry可能な失敗とterminalな失敗をevent / guardで区別する
+- **cancelは2系統**: 通常の対話cancelはユーザーのcancel intentをcanonical recordとして検証した後にのみ`CANCELLED`へ遷移する。Ctrl+C等の緊急停止はC-01のeventではなく、C-08がrunを停止しC-07がMachineStateをそのままcheckpointする
 - **merge実行は2段階**: 承認検証後の`MERGING`ではまずpreconditions再検証commandのみを発行し、**全条件一致の結果eventを受けて初めて**merge実行commandを発行する。実行後はGitHub照会の結果eventだけが`MERGED` / `MERGE_FAILED`を決める
 - **`MERGING`中のcancel・runtime失敗は即`CANCELLED` / `FAILED`にしない**。merge結果の照会commandを発行し、merge未実行の確認eventでのみ`CANCELLED`、完了確認で`MERGED`、確定できない場合は`MERGE_FAILED`として安全停止する（成功と表示しない、二重mergeしない、というtarget experienceの失敗方針から導出）
 
-**canonical record gateの責務境界**: C-01が持つのは順序制約だけである。(1) agent / user発言の発生（`PRODUCED` event。registryに列挙された許可stateでのみ受理され、`pending_record`を設定する） -> (2) canonical record永続化commandの発行 -> (3) 後続層からの**検証済みevidence event**（`VERIFIED`）の受領。`pending_record`とkindおよびopaque bindingが一致する場合だけ受理し、不一致・過去evidenceの再利用・対応するPRODUCEDを経ないVERIFIEDは構造化errorで拒否する -> (4) その後にのみ次agent起動commandの発行。`pending_record`保持中は他のsemantic eventを拒否し、partial turnはMachineStateごとcheckpointが引き継ぐ。GitHubへの投稿はC-05、actor・record chain・evidence真正性の検証はC-06、binding値の採番はC-08の責務であり、C-01はbindingの等価比較のみを行う。
+**canonical record gateの責務境界**: C-01が持つのは順序制約だけである。(1) agent / user発言の発生（`PRODUCED` event。registryに列挙された許可stateでのみ受理され、`pending_record`を設定する） -> (2) canonical record永続化commandの発行 -> (3) 後続層からの**検証済みevidence event**（`VERIFIED`）の受領。`pending_record`とkindおよびopaque bindingが一致する場合だけ受理し、不一致・過去evidenceの再利用・対応するPRODUCEDを経ないVERIFIEDは構造化errorで拒否する -> (4) その後にのみ次agent起動commandの発行。`pending_record`保持中は他のsemantic eventを拒否し、partial turnはMachineStateごとcheckpointが引き継ぐ。永続化commandは冪等（既投稿なら確認のみ）であることをC-05へ要求する。GitHubへの投稿はC-05、actor・record chain・evidence真正性の検証はC-06、binding値の採番はC-08の責務であり、C-01はbindingの等価比較のみを行う。
+
+**外部recordの直接受理**: ユーザーがGitHubへ直接記入したrecord（判断回答、gateへの質問・変更要求・merge承認、cancel intent）は既に永続化済みであり、`PRODUCED -> 永続化 -> VERIFIED`を通さない（再投稿すると二重投稿になる）。C-05が既存commentを観測し、C-06がcomment ID・body hash・actor（allowlist完全一致、D-031）・対象headを検証したtyped external evidenceを、C-01は`awaiting`（`USER_INPUT`系）と受理stateの一致でのみ直接受理する。同一commentの再利用はC-06 / C-07が拒否する。
 
 **Phase 1のscope限定**: `domain/`のうちPhase 1で実装するのはstates / events / commands / machineと、machineの成立に不可欠な最小のvalue objectのみ。finding ledgerはPhase 10、run ID等のid生成は最初に必要とするPhaseで追加し、Phase 1では空moduleも先行実装も作らない。
 
@@ -168,6 +172,7 @@ src/claude_code_codex_review_loop/
 | AC-C01-05 | terminal状態（`MERGED` / `CANCELLED`）からいかなる処理も開始できない。resumable状態は定義されたresume eventだけで復帰する |
 | AC-C01-06 | 待機状態（`AWAITING_TOOL_PERMISSION`等）から、進入元に応じた正しい処理位置へ復帰する。復帰先はMachineStateが保持し、eventから注入できない |
 | AC-C01-07 | `MERGING`中のcancelがmerge結果の照会を経由し、結果を確定できない場合に`CANCELLED`ではなく`MERGE_FAILED`へ遷移する |
+| AC-C01-08 | guardが有限のtyped discriminatorに限定され、到達可能なMachineState付随値ごとに各eventへ一致するruleが0または1件であることをtestで検査する。順序を飛ばした応答（merge実行command発行前の完了event、verdict確認前のbrief / decision record）、消費済み応答の再入力（duplicate preconditions OK）、`awaiting` / binding不一致がnegative testで拒否される |
 
 ### C-02 agent protocol schemaとcheckpoint envelope
 
@@ -491,7 +496,7 @@ schema検証は、runtime依存をゼロに保ち、必要なschema機能だけ�
 | Phase | 内容 | Component | 完了条件 | 追加するcheckpoint field |
 | --- | --- | --- | --- | --- |
 | 0 | 基盤と品質ゲート | — | CIでlint、type、coverage、size ratchetが動作する。P-001を決定する | — |
-| 1 | domain state machine | C-01 | AC-C01-01〜07 | — |
+| 1 | domain state machine | C-01 | AC-C01-01〜08 | — |
 | 2 | protocol schemaとenvelope | C-02 | AC-C02-01〜03 | envelope schemaとmigration policyを定義（永続化はPhase 5以降） |
 | 3 | process abstraction | C-03 | AC-C03-01、AC-C03-02 | — |
 | 4 | security policy | C-04 | AC-C04-01〜03 | — |
