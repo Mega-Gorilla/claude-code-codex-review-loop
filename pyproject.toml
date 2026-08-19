@@ -18,7 +18,7 @@ authors = [
 dependencies = []
 
 [project.optional-dependencies]
-# 開発用依存。ratchetを安定させるため完全pinとする。
+# 開発用依存。ratchetを安定させるため、直接依存をexact pinとする（推移依存は固定しない）。
 # runtime依存の方針はP-001（Phase 0のPR 2）で決定し、ここへは含めない。
 dev = [
   "pytest==9.1.1",
@@ -48,6 +48,9 @@ strict = true
 [tool.coverage.run]
 branch = true
 source = ["claude_code_codex_review_loop"]
+# subprocessとして起動した子processも自動計測する。parallel dataのためreport前にcombineが必要。
+parallel = true
+patch = ["subprocess"]
 
 [tool.coverage.report]
 show_missing = true

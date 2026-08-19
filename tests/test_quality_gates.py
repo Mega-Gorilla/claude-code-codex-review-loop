@@ -66,47 +66,51 @@ def test_modules_do_not_exceed_size_baseline() -> None:
     )
 
 
-def test_subprocess_execution_is_measured_by_coverage(tmp_path: Path) -> None:
-    """subprocessとして実行したPython codeがcoverageへ計上されることを確認する。
+def test_plain_subprocess_is_measured_automatically(tmp_path: Path) -> None:
+    """`patch = subprocess`により、通常のPython subprocessが自動計測されることを確認する。
 
-    親のcoverage設定から隔離するため、COVERAGE_FILEとCOVERAGE_RCFILEをtmpへ向ける。
+    coverage配下の親scriptが素の`python child.py`をspawnし、childだけが実行した行が
+    combine後のreportへ含まれることを検証する。外側のpytest coverageと干渉しないよう、
+    COVERAGE_FILE / COVERAGE_RCFILE / COVERAGE_PROCESS_STARTをtmpへ隔離する。
     """
 
-    script = tmp_path / "child_script.py"
-    script.write_text(
+    child = tmp_path / "child.py"
+    child.write_text(
         "import claude_code_codex_review_loop as pkg\nprint(pkg.__version__)\n",
         encoding="utf-8",
     )
+    parent = tmp_path / "parent.py"
+    parent.write_text(
+        "import subprocess\nimport sys\n"
+        'subprocess.run([sys.executable, "child.py"], check=True)\n',
+        encoding="utf-8",
+    )
     rcfile = tmp_path / "coveragerc"
-    rcfile.write_text("[run]\nbranch = True\n", encoding="utf-8")
+    rcfile.write_text("[run]\nbranch = True\nparallel = True\npatch = subprocess\n", encoding="utf-8")
     data_file = tmp_path / ".coverage"
-    env = {
-        **os.environ,
-        "COVERAGE_FILE": str(data_file),
-        "COVERAGE_RCFILE": str(rcfile),
-    }
+    env = {**os.environ, "COVERAGE_FILE": str(data_file), "COVERAGE_RCFILE": str(rcfile)}
+    env.pop("COVERAGE_PROCESS_START", None)
 
-    run = subprocess.run(
-        [sys.executable, "-m", "coverage", "run", str(script)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env=env,
-        cwd=tmp_path,
-    )
-    assert run.returncode == 0, run.stderr
-    assert data_file.exists()
+    def _run(*args: str) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            [sys.executable, "-m", "coverage", *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            cwd=tmp_path,
+        )
+        assert result.returncode == 0, f"coverage {args[0]} failed:\n{result.stdout}\n{result.stderr}"
+        return result
 
-    report = subprocess.run(
-        [sys.executable, "-m", "coverage", "report"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env=env,
-        cwd=tmp_path,
-    )
-    assert report.returncode == 0, report.stderr
+    _run("run", str(parent))
+    # parallel dataが親・子それぞれから書かれているはず
+    assert list(tmp_path.glob(".coverage*")), "parallel dataが生成されていない"
+    _run("combine")
+    report = _run("report")
     # coverage 7のfile patternは`*`がpath separatorを跨がないため、includeでは絞らず全reportを検証する。
+    # 親scriptはpackageをimportしないため、次の2行はchildの実行がcombineへ含まれた証拠になる。
+    assert "child.py" in report.stdout, "childの実行がcoverageへ計上されていない:\n" + report.stdout
     assert "claude_code_codex_review_loop" in report.stdout, (
-        "subprocessの実行がcoverageへ計上されていない:\n" + report.stdout
+        "childがimportしたpackageがcoverageへ計上されていない:\n" + report.stdout
     )

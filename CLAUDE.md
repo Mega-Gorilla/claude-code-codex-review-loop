@@ -22,7 +22,7 @@ python -m pip install -e ".[dev]"   # 開発環境の準備（Python >= 3.11）
 python -m pytest -q                 # 全test
 python -m ruff check .              # lint
 python -m mypy                      # type check（src対象、strict）
-python -m coverage run -m pytest -q; python -m coverage report   # coverage（floorはquality-baseline.toml）
+python -m coverage run -m pytest -q; python -m coverage combine; python -m coverage report   # coverage（floorはquality-baseline.toml）
 python -m pytest tests/test_repository_contract.py::test_project_identity_is_consistent -q   # 単体test
 git diff --check origin/main...HEAD # CIと同じwhitespace check
 ```

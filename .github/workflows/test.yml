@@ -49,6 +49,9 @@ jobs:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: python -m coverage run -m pytest -q
 
+      - name: Combine coverage data
+        run: python -m coverage combine
+
       - name: Enforce coverage floor
         shell: bash
         run: |
