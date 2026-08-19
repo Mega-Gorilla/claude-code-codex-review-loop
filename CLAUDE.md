@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-architecture planningは完了し、実装は未着手です（`src/claude_code_codex_review_loop/`はversion stubのみ）。
+planningは完了し（target experienceとimplementation planは承認済み）、実装は未着手です（`src/claude_code_codex_review_loop/`はversion stubのみ）。
 
 | 正本 | 役割 |
 | --- | --- |
-| `docs/plans/target-experience.md`（Status: **Agreed**） | 何を作るか。user-visible behaviorと合意済み制約。Section 14がdecision log（D-001〜D-031） |
-| `docs/plans/implementation-plan.md`（Status: Draft） | どう作るか。設計原則P-002〜P-015、component C-01〜C-15、Phase 0〜17、受入条件AC-CNN-NN |
+| `docs/plans/target-experience.md`（Status: **Agreed**） | 何を作るか。user-visible behaviorと合意済み制約。decision log（D-001〜D-031）を含む |
+| `docs/plans/implementation-plan.md`（Status: **Accepted**） | どう作るか。設計原則P-002〜P-015、component C-01〜C-15、Phase 0〜17、受入条件AC-CNN-NN |
 
 親roadmapはIssue #2、実装子IssueはPhase 0〜17に対応する#5〜#22です。次の作業はIssue #5（Phase 0: 基盤と品質ゲート）から、dependency順に進めます。
 
@@ -41,7 +41,8 @@ CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3
 
 | Item | Name |
 | --- | --- |
-| Repository / product | `claude-code-codex-review-loop` |
+| Product表示名 | `Claude Code–Codex Review Loop`（en dash `–`） |
+| Repository slug | `claude-code-codex-review-loop` |
 | Recommended CLI | `cc-review`（長いalias: `claude-code-codex-review-loop`） |
 | Python package | `claude_code_codex_review_loop` |
 | Claude Code Plugin / Skill | `cc-review` |
@@ -63,9 +64,11 @@ CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3
 
 製品は、Claude Codeをcoder、Codexをread-only reviewerとして、GitHub Issue / PRを正式な会話履歴に据え、人間の明示承認までを進めるdevelopment loopです。
 
-**4つのrole**: Controller（LLMを内包しない決定論的state machine）/ Claude Code active host（既存の対話型sessionのままcoder）/ Codex fresh reviewer（turnごとに新規起動するdurable read-only subprocess）/ User（merge等の明示承認）。
+**5つのrole**: User（実行開始と明示承認）/ Controller（LLMを内包しない決定論的state machine）/ Claude Code host・coder（既存の対話型sessionのまま実装を担当）/ Codex reviewer（turnごとに新規起動するdurable read-only subprocess）/ Codex final reporter（承認済みheadの変更と検証履歴をread-onlyで説明）。
 
-**active host protocol**（implementation plan Section 2）: Controller CLIはClaude Code sessionの子processであり、親のLLM turnを呼び戻せない。そのためcore engineはClaudeを起動せず、`advance`で次の`HOST_ACTION`を返し、active hostが自分のcontextで実行して`submit`で結果を返すstep engineとする。Controllerが直接起動するのはCodex reviewerだけ。この制御反転は全workflowの前提であり、覆すと全体の書き直しになる。
+**起動主体**: 主経路のClaude coderはactive hostが実行し、Controllerは起動しない。headless復旧経路のClaude coderだけはControllerがsubprocess adapterとして起動する。Codex reviewerとfinal reporterはControllerがfresh subprocessとして起動する。
+
+**active host protocol**（implementation planの「active host protocol」節）: Controller CLIはClaude Code sessionの子processであり、親のLLM turnを呼び戻せない。そのためcore engineはClaudeを起動せず、`advance`で次の`HOST_ACTION`を返し、active hostが自分のcontextで実行して`submit`で結果を返すstep engineとする。この制御反転は全workflowの前提であり、覆すと全体の書き直しになる。
 
 **6つの不変条件**（`docs/architecture/overview.md`）:
 
@@ -78,15 +81,15 @@ CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3
 
 **security境界**: C-05は未検証metadataのI/Oに限定し、canonical recordの検証と生成はC-06が行う。C-07以降は検証済みrecordだけを入力にする。ユーザー判断の受理はGitHub login allowlistとの完全一致が必須（D-031、fail closed）。permission bypass flagをcode上で構築しない（P-006）。
 
-**state model**: 17 state（`RUNNING_REVIEW`〜`MERGED` / `MERGE_FAILED` / `BLOCKED` / `FAILED` / `CANCELLED` / `REPORT_FAILED`）。遷移図はtarget-experience Section 7。agentまたはユーザーの発言を伴う全遷移はGitHub永続化gateを通過する。
+**state model**: 17 state（`RUNNING_REVIEW`〜`MERGED` / `MERGE_FAILED` / `BLOCKED` / `FAILED` / `CANCELLED` / `REPORT_FAILED`）。遷移図はtarget-experienceの「State model」節。agentまたはユーザーの発言を伴う全遷移はGitHub永続化gateを通過する。
 
 **除外事項**: PR自動検知 / watcher / webhook、対話型TUIへのキー入力注入、既存Codex対話sessionの再利用、無人auto-merge、MCP serverとしての実装・配布（D-026）、独自daemon。
 
 ## Working conventions
 
 - **decision flow**: target behaviorを変える決定はD-NNNとしてdecision logへ追記する。`Open` / `Proposed`を`Decided`へ変更できるのは、GitHub上のユーザーの明示合意recordだけ。implementation planが単独でgold documentのstatusを変えてはならない（過去のレビューで差し戻された）。Phase内で決める技術判断（P-001等）はユーザー判断と区別する。
-- **開発フロー**: `CONTRIBUTING.md`が正本。Issue → `agent/<topic>` branch → dependency順の小さいPR → Codexレビューでblocking解消 → **ユーザーの明示承認を得てmerge**。PRのready化とmergeは必ずユーザーの明示指示を待つ。レビュー承認はmerge承認ではない。
+- **開発フロー**: `CONTRIBUTING.md`が正本。Issue → `agent/<topic>` branch → dependency順の小さいPR → Codexレビューでblocking解消 → **ユーザーの明示承認を得てmerge**。レビュー承認はmerge承認ではない。
 - **選択移植**: ADR-0002に従う。`docs/research/reference-implementation-assessment.md`のcomponent別判定が入口。移植PRへ対象file・source commit・理由・適用license・移植後testを記録し、`THIRD_PARTY_FILES`へ登録する。参考実装のrepository識別子とcommit SHAを正式文書へ書かない。
 - **文書language**: 文書・commit messageは日本語（技術用語は英語のまま）。書き方の規約はCONTRIBUTING「文書の書き方」。
-- **gh操作**: Issue / PR番号は作業directoryのremoteへ解決されるため、`--repo Mega-Gorilla/claude-code-codex-review-loop`を明示する（別projectのclone上で実行して番号が別repositoryへ解決された事故がある）。
-- **commit内容の確認**: `git diff HEAD~1`は作業treeと比較するため、commit済み内容の確認には`git show --stat <sha>`を使う（stage漏れの誤報告が起きた）。
+- **gh操作**: Issue / PR番号は作業directoryのremoteへ解決されるため、`--repo Mega-Gorilla/claude-code-codex-review-loop`を必ず明示する。
+- **commit内容の確認**: commit済み内容の確認には`git show --stat <sha>`を使う（`git diff HEAD~1`は作業treeとの比較になる）。

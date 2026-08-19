@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Draft** |
+| Status | **Accepted**（PR #4のユーザー承認とmergeにより確定） |
 | Baseline | [target-experience.md](target-experience.md)（Status: Agreed） |
 | Parent roadmap | Issue #2 |
 | Owner | Mega-Gorilla |
