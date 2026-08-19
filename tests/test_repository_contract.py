@@ -12,11 +12,17 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_OWNER = "Mega-Gorilla"
 CURRENT_REPOSITORY = "claude-code-codex-review-loop"
 
-# SPDX表示を求めないfile。LICENSEとNOTICEは第三者向けの原文を保つ。
+# SPDX表示を求めないfile。LICENSEとNOTICEは原文を保つ。
 SPDX_EXEMPT = frozenset({"LICENSE", "NOTICE"})
 
 # SPDX表示を求めるsuffix。
-VERSIONED_SUFFIXES = frozenset({".md", ".py", ".toml", ".yml", ".yaml"})
+VERSIONED_SUFFIXES = frozenset(
+    {".md", ".py", ".toml", ".yml", ".yaml", ".ps1", ".sh", ".psm1", ".psd1"}
+)
+
+# 選択移植した第三者成果物。ADR-0002のSelective porting policyに従い、
+# path、適用SPDX ID、出典を登録する。登録fileはApache-2.0を強制しない。
+THIRD_PARTY_FILES: dict[str, str] = {}
 
 
 def _tracked_files() -> tuple[str, ...]:
@@ -43,6 +49,23 @@ def versioned_files() -> tuple[str, ...]:
         for path in _tracked_files()
         if Path(path).suffix in VERSIONED_SUFFIXES and Path(path).name not in SPDX_EXEMPT
     )
+
+
+def project_files() -> tuple[str, ...]:
+    """本project独自の成果物。Apache-2.0を必須とする。"""
+
+    return tuple(path for path in versioned_files() if path not in THIRD_PARTY_FILES)
+
+
+def _declared_spdx(path: str) -> str | None:
+    """先頭3行からSPDX identifierを取り出す。"""
+
+    text = (ROOT / path).read_text(encoding="utf-8")
+    for line in text.splitlines()[:3]:
+        match = re.search(r"SPDX-License-Identifier:\s*(\S+)", line)
+        if match:
+            return match.group(1).rstrip("-->").strip()
+    return None
 
 
 def document_paths() -> tuple[str, ...]:
@@ -123,15 +146,22 @@ def test_only_the_current_repository_is_referenced_for_the_owner() -> None:
         assert not others, f"{path}: {others}"
 
 
-def test_versioned_project_files_declare_apache_license() -> None:
-    paths = versioned_files()
+def test_project_files_declare_apache_license() -> None:
+    """本project独自の成果物はApache-2.0を宣言する。"""
+
+    paths = project_files()
     assert len(paths) >= 15, f"discoveryが機能していない: {len(paths)}件"
 
     for path in paths:
-        text = (ROOT / path).read_text(encoding="utf-8")
-        assert any(
-            "SPDX-License-Identifier: Apache-2.0" in line for line in text.splitlines()[:3]
-        ), path
+        assert _declared_spdx(path) == "Apache-2.0", path
+
+
+def test_third_party_files_declare_their_recorded_license() -> None:
+    """選択移植した第三者成果物は、登録した元licenseを保持する。"""
+
+    for path, expected in THIRD_PARTY_FILES.items():
+        assert (ROOT / path).exists(), f"登録されたfileが存在しない: {path}"
+        assert _declared_spdx(path) == expected, path
 
 
 def test_cli_naming_is_unified_on_cc_review() -> None:

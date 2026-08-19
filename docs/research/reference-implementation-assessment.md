@@ -5,7 +5,7 @@
 | Field | Value |
 | --- | --- |
 | Authority | **Research（informative）**。要件ではない |
-| 関連決定 | D-030（[target experience](../plans/target-experience.md) Section 14） |
+| 関連決定 | D-030（[target experience](../plans/target-experience.md) Section 14）。新しいpublic transport boundaryはC-05とC-06にまたがる |
 | Last updated | 2026-08-19 |
 
 この文書は、[ADR-0002](../decisions/0002-independent-reimplementation.md)に出典を記録した参考実装を調査した結果をまとめたものです。**要件ではありません。** 設計の正本は[implementation plan](../plans/implementation-plan.md)であり、本書はその判断材料です。
@@ -75,29 +75,32 @@ implementation planの設計原則は本projectの要件から導出していま
 | 必要extension | **Windows側は新規実装・新規test**。Job Object相当で子孫を確実に停止する |
 | 移植時test | 両OSで孫processが残らないこと。Ctrl+Cの2段階 |
 
-### C-05 GitHub canonical conversation transport
+### C-05 GitHub transport（未検証metadataのI/O）
+
+このcomponentは認証を行わない。producer認証とrecord検証はC-06の評価行を参照。
 
 | 項目 | 内容 |
 | --- | --- |
-| source slice | `github.py`、`round_transport.py`、`round_state.py`、`comment_rendering.py`、`gh_ops.py` |
+| source slice | `github.py`、`round_transport.py`、`comment_rendering.py`、`gh_ops.py` |
 | 観測事実 | core投稿関数は一時fileと`--body-file`を使用し、長大bodyのsidecar分割と上限checkを持つ。ただし戻り値がなく、comment ID / URL / hashを返さない。Skill helper側は本文を引数で渡し、IDも返さない |
-| 観測事実 | round metadataからのresumeは、compression、bounded decompression、sidecar分割、hash検証を備える。一方で**author検証がなく**、payloadへ大きなresponse本文を格納する |
-| 再利用kernel | transport mechanics（sidecar分割、bounded decompression、上限check、hash検証）。公開用renderの発言者・model明示 |
-| 再利用しない | 投稿helperのinterface（ID非返却）。Skill helper層の引数渡し。author検証のないrecord復元。payloadへ大きな本文を格納するmetadata設計 |
-| 必要extension | comment ID / URL / body hashの返却、read-after-write確認、producer認証、予約markerのescape、record間のhash chain |
-| 移植時test | 偽marker、本文とmarkerの同時編集、record削除・並べ替え、sidecar欠落・差替えのnegative test |
-| 注意 | transport mechanicsとpayload schemaは別々に判定する。前者は候補、後者は本projectの「metadataは必要最小限」と方針が異なる |
+| 再利用kernel | transport mechanics（sidecar分割、bounded decompression、上限check、body hashの算出）。公開用renderの発言者・model明示 |
+| 再利用しない | 投稿helperのinterface（ID非返却）。Skill helper層の引数渡し |
+| 必要extension | comment ID / URL / body hashの返却、read-after-write確認、idempotency marker、thread操作、予約markerのescape |
+| 移植時test | 投稿→再取得→hash一致、timeout後の重複投稿なし、予約markerのescape |
 
-### C-06 actor認証とcredential隔離
+### C-06 canonical record検証とcredential隔離
+
+producer認証、chain検証、sequence、編集・削除検知はこのcomponentが所有する。
 
 | 項目 | 内容 |
 | --- | --- |
-| source slice | `protocol.py`の署名解析、`agents/`のpermission構成 |
-| 観測事実 | 署名行だけで人間の要求と判定していた。skill modeがpermission bypass flagを無条件付与していた |
-| 再利用kernel | なし |
-| 再利用しない | 署名ベースの人間判定。bypass flagの構築経路 |
-| 必要extension | 全体を新規設計（login allowlist、fail closed、credential隔離、OS別file権限） |
-| 移植時test | 該当なし（新規実装のnegative testで担保） |
+| source slice | `round_state.py`（marker検出とround復元）、`protocol.py`の署名解析、`agents/`のpermission構成 |
+| 観測事実 | `round_state`のrecord復元は、comment bodyにmarkerがあればauthorを確認しない。署名行だけで人間の要求と判定していた。skill modeがpermission bypass flagを無条件付与していた |
+| 観測事実 | round metadataはcompressionとhash検証を備えるが、author検証が無く、payloadへ大きなresponse本文を格納する |
+| 再利用kernel | metadata codecの構造（marker、compression、hash field）だけ |
+| 再利用しない | **author検証のないrecord復元**（選択移植してはならない）。署名ベースの人間判定。bypass flagの構築経路。payloadへ大きな本文を格納するmetadata設計 |
+| 必要extension | login allowlistとfail closed、actor解決、record間のhash chain、sequence番号、編集・削除検知、credential隔離、OS別file権限 |
+| 移植時test | 偽marker、agent本文へ埋め込まれたmarker、本文とmarkerの同時編集、中間record削除、並べ替え、既知comment IDの消失、allowlist外authorの承認 |
 
 ### C-07 resumeとartifact retention
 

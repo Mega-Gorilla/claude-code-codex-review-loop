@@ -61,7 +61,7 @@ PRでは、対応するcomponent IDとPhaseをPR本文へ記載してくださ�
 - 適用license
 - 移植後test
 
-第三者成果物の場合は、元licenseと必要なnoticeも同じPRで追加します。
+第三者成果物の場合は、元licenseと必要なnoticeも同じPRで追加し、`THIRD_PARTY_FILES`へ登録します。SPDX表示をApache-2.0へ書き換えません。
 
 参考実装の識別子とcommit SHAを、本repositoryの正式な文書へ設計根拠として記録しません。調査結果は[reference implementation assessment](docs/research/reference-implementation-assessment.md)にあります。
 
@@ -75,7 +75,8 @@ PRでは、対応するcomponent IDとPhaseをPR本文へ記載してくださ�
 | 参考実装の調査結果 | [reference implementation assessment](docs/research/reference-implementation-assessment.md) |
 | 表示例 | `docs/examples/`。要件は正本へ書く |
 | 用語を追加する | [glossary](docs/glossary.md) |
-| version管理対象fileを追加する | 先頭3行以内にSPDX表示を置く。検査対象はgit管理下のfileから自動discoveryするため、path listの手動更新は不要 |
+| 本project独自のfileを追加する | 先頭3行以内に`SPDX-License-Identifier: Apache-2.0`を置く。検査対象は`.md` / `.py` / `.toml` / `.yml` / `.yaml` / `.ps1` / `.sh` / `.psm1` / `.psd1`をgit管理下から自動discoveryするため、path listの手動更新は不要 |
+| 第三者成果物を選択移植する | 元licenseのSPDX表示を保持し、`tests/test_repository_contract.py`の`THIRD_PARTY_FILES`へpathと適用SPDX IDを登録する。登録しないとApache-2.0を要求してfailする |
 
 ## 文書の書き方
 
