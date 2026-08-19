@@ -137,6 +137,8 @@ src/claude_code_codex_review_loop/
 
 ### C-01 domain state machine
 
+完全な遷移registry（event / command一覧、遷移表、terminal / resumable分類、test計画）は[Phase 1計画](phase-01-domain-state-machine.md)が正本。本節はその要約と受入条件を持つ。
+
 遷移関数は`(machine_state, event) -> (machine_state, [command])`。GitHub永続化とread-after-write確認の完了をeventとして要求し、gate未通過の遷移を表現できないようにする。
 
 **遷移registry**: states、events、commands、guard条件、terminal / resumable分類を**単一のregistry**として定義し、完全遷移表と遷移図をregistryから導出・照合する。target experienceの「State model」節の図はユーザー向け簡略図として維持し、実装の正本はregistryとする。簡略図が省略している遷移（失敗系からのresume、各状態でのcancel可否、GitHub投稿・確認失敗、preflight失敗）もregistryでは全て定義する。
