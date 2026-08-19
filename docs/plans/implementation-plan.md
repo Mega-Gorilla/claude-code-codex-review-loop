@@ -141,19 +141,21 @@ src/claude_code_codex_review_loop/
 
 遷移関数は`(machine_state, event) -> (machine_state, [command])`。GitHub永続化とread-after-write確認の完了をeventとして要求し、gate未通過の遷移を表現できないようにする。
 
-**遷移registry**: states、events、commands、guard条件、terminal / resumable分類を**単一のregistry**として定義し、完全遷移表と遷移図をregistryから導出・照合する。target experienceの「State model」節の図はユーザー向け簡略図として維持し、実装の正本はregistryとする。簡略図が省略している遷移（失敗系からのresume、各状態でのcancel可否、GitHub投稿・確認失敗、preflight失敗）もregistryでは全て定義する。
+**遷移registry**: states、events、commands、guard条件、terminal / resumable分類を**単一のregistry**として定義し、完全遷移表と遷移図をregistryから導出・照合する。共通規則（cancel / failure等）もregistry内で個別ruleへ展開し、**各`(state, event, guard)`に一致するruleは0件または1件**とする（重複はtestでfail。優先順位による解決はしない）。target experienceの「State model」節の図はユーザー向け簡略図として維持し、計画文書はnormativeな期待挙動、実装のcode registryが実行可能な単一の正本であり、表・図はregistryから生成してsnapshot照合する。簡略図が省略している遷移（失敗系からのresume、各状態でのcancel可否、GitHub投稿・確認失敗、preflight失敗）もregistryでは全て定義する。
 
-**MachineState**: 可視の17 stateとは別に、immutableな`MachineState`が復帰先等の付随情報を保持する。典型例は`AWAITING_TOOL_PERMISSION`で、`RUNNING_REVIEW`と`APPLYING_FIXES`のどちらから入ったかをMachineStateが保持し、permission承認eventで元の処理へ戻る。**復帰先をeventの引数として外部から渡す設計は採らない**（不正な状態jumpを防ぐ）。
+**MachineState**: 可視の17 stateとは別に、immutableな`MachineState`が付随情報を保持する: `return_to`（tool permissionからの復帰先）、`recovery_to`（`BLOCKED` / `FAILED`からの安全な再開地点）、`awaiting`（依頼済みで応答待ちの相手）、`pending_record`（永続化の確認待ちrecordのkindとopaque binding）。典型例は`AWAITING_TOOL_PERMISSION`で、`RUNNING_REVIEW`と`APPLYING_FIXES`のどちらから入ったかを`return_to`が保持し、permission承認eventで元の処理へ戻る。**復帰先・再開地点をeventの引数として外部から渡す設計は採らない**（不正な状態jumpを防ぐ）。
 
 **初期・terminal・resume semantics**:
 
-- C-01の開始点はpreflight成功eventによる`RUNNING_REVIEW`への遷移とする。preflight失敗は`FAILED`への遷移としてC-01の入力に含める
+- 開始は`initialize(preflight_event)`の専用APIとする。preflight成功で`RUNNING_REVIEW`へ、失敗は`FAILED`へ（可視の17 stateに「未開始」を追加しない）
 - `MERGED`と`CANCELLED`はterminal。terminal状態からはいかなる処理も開始できない
-- `FAILED` / `BLOCKED` / `REPORT_FAILED` / `MERGE_FAILED` / `WAITING_CI`はresumableとし、明示resume eventと復帰先をregistryで定義する
+- `FAILED` / `BLOCKED` / `REPORT_FAILED` / `MERGE_FAILED` / `WAITING_CI` / `AWAITING_USER_DECISION` / `AWAITING_TOOL_PERMISSION` / `READY_FOR_HUMAN_MERGE`はresumableとし、resume時に許可するeventと復帰先・再発行commandをregistryで定義する（後3者は通常eventがresumeを兼ねる）
+- **`BLOCKED` / `FAILED`からの一律fresh reviewは採らない**。進入時のruleが`recovery_to`を設定し、resume preflight成功でそこへ復帰する。head変更・checkpoint不整合等で安全を証明できない場合のみfresh reviewへfallbackする
 - retry可能な失敗とterminalな失敗をevent / guardで区別する
-- **`MERGING`中のcancelは即`CANCELLED`にしない**。merge結果の照会eventを要求し、GitHub上で結果を確定できない場合は`MERGE_FAILED`として安全停止する（成功と表示しない、二重mergeしない、というtarget experienceの失敗方針から導出）
+- **merge実行は2段階**: 承認検証後の`MERGING`ではまずpreconditions再検証commandのみを発行し、**全条件一致の結果eventを受けて初めて**merge実行commandを発行する。実行後はGitHub照会の結果eventだけが`MERGED` / `MERGE_FAILED`を決める
+- **`MERGING`中のcancel・runtime失敗は即`CANCELLED` / `FAILED`にしない**。merge結果の照会commandを発行し、merge未実行の確認eventでのみ`CANCELLED`、完了確認で`MERGED`、確定できない場合は`MERGE_FAILED`として安全停止する（成功と表示しない、二重mergeしない、というtarget experienceの失敗方針から導出）
 
-**canonical record gateの責務境界**: C-01が持つのは順序制約だけである。(1) agent / user発言の発生 -> (2) canonical record永続化commandの発行 -> (3) 後続層からの**検証済みevidence event**の受領 -> (4) その後にのみ次agent起動commandの発行。GitHubへの投稿はC-05、actor・record chainの検証はC-06の責務であり、C-01はどちらも実装しない。gateの解除は単なるbooleanではなく、将来のverified record（C-06）へ接続できる型付きevidenceで表現する。
+**canonical record gateの責務境界**: C-01が持つのは順序制約だけである。(1) agent / user発言の発生（`PRODUCED` event。registryに列挙された許可stateでのみ受理され、`pending_record`を設定する） -> (2) canonical record永続化commandの発行 -> (3) 後続層からの**検証済みevidence event**（`VERIFIED`）の受領。`pending_record`とkindおよびopaque bindingが一致する場合だけ受理し、不一致・過去evidenceの再利用・対応するPRODUCEDを経ないVERIFIEDは構造化errorで拒否する -> (4) その後にのみ次agent起動commandの発行。`pending_record`保持中は他のsemantic eventを拒否し、partial turnはMachineStateごとcheckpointが引き継ぐ。GitHubへの投稿はC-05、actor・record chain・evidence真正性の検証はC-06、binding値の採番はC-08の責務であり、C-01はbindingの等価比較のみを行う。
 
 **Phase 1のscope限定**: `domain/`のうちPhase 1で実装するのはstates / events / commands / machineと、machineの成立に不可欠な最小のvalue objectのみ。finding ledgerはPhase 10、run ID等のid生成は最初に必要とするPhaseで追加し、Phase 1では空moduleも先行実装も作らない。
 
