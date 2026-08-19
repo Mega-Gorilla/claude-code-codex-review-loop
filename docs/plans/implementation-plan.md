@@ -480,7 +480,7 @@ runtime依存をゼロに保つか、schema検証にlibraryを導入するかを
 | 4 | security policy | C-04 | AC-C04-01〜03 | — |
 | 5 | GitHub transport | C-05 | AC-C05-01〜05 | conversation cursor、comment / review ID、URL、本文hash、idempotency marker |
 | 6 | canonical record検証とcredential隔離 | C-06 | AC-C06-01〜11 | record sequence high-water mark、既知comment ID、permission mode / profile、Permission ID、blockされたtool、要求scope、承認bind情報 |
-| 7 | resume | C-07 | AC-C07-01〜06 | run ID、state、base / observed / approved head SHA、PR lock、coder snapshot |
+| 7 | resume | C-07 | AC-C07-01〜03、AC-C07-05、AC-C07-06 | run ID、state、base / observed / approved head SHA、PR lock、coder snapshot |
 | 8 | active host protocolとstep engine | C-08 | AC-C08-01〜07 | action ID、未完了`HOST_ACTION`、nonce、submit状態 |
 | 9 | Codex fresh runtimeと隔離checkout | C-09 | AC-C09-01〜05 | 隔離checkout、sandbox / network profile、実行したtest / build、dirty status、破棄結果 |
 | 10 | PR mode review loop | C-10 | AC-C10-01〜06。**CLI経由のdogfooding開始** | round、finding ledgerとresolution、coder実行前後HEAD、push後head |
