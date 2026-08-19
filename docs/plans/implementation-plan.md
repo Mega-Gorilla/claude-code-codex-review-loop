@@ -106,15 +106,34 @@ engine.advance(run_id) -> 次のいずれか
   TERMINAL      終了state（MERGED / BLOCKED / FAILED / CANCELLED 等）
 ```
 
-主経路の流れは次のとおり。
+主経路の流れは次のとおり。Controllerが起動するのはCodex reviewerだけであり、Claude coderは常にactive host側で動作する。
 
-```text
-1. Skill内のactive Claudeが  cc-review advance --run <id>  を呼ぶ
-2. engineがGitHubとcheckpointからstateを再構築し、次のHOST_ACTIONを返す
-3. active Claudeが自身のcontextでそのactionを実行する
-4. 結果を  cc-review submit --run <id> --action <id> --result <file>  でControllerへ渡す
-5. Controllerがschema検証 -> GitHubへ投稿 -> read-after-write確認 -> checkpoint更新
-6. 1へ戻る
+```mermaid
+sequenceDiagram
+    actor User as ユーザー
+    participant Host as active Claude Code session
+    participant Ctrl as Controller CLI
+    participant GH as GitHub
+    participant Codex as Codex reviewer
+
+    User->>Host: /cc-review pr 512 --repo OWNER/REPO
+    loop 1回のadvanceで1 action
+        Host->>Ctrl: cc-review advance --run id
+        Ctrl->>GH: conversationとcheckpointからstate再構築
+        GH-->>Ctrl: canonical record
+        opt reviewが必要なstate
+            Ctrl->>Codex: fresh read-only subprocessを起動
+            Codex-->>Ctrl: findings
+            Ctrl->>GH: 投稿してread-after-write確認
+        end
+        Ctrl-->>Host: HOST_ACTION / AWAIT_USER / TERMINAL
+        Host->>Host: actionを自身のcontextで実行
+        Host->>Ctrl: cc-review submit --run id --action id --result file
+        Ctrl->>GH: 投稿してread-after-write確認
+        Ctrl->>Ctrl: checkpoint更新
+    end
+    Ctrl-->>Host: TERMINAL または AWAIT_USER
+    Host-->>User: state、次action、GitHub URLを表示
 ```
 
 engineは1回のadvanceで1つのactionだけを返し、その間に状態を進めない。actionの結果がGitHubへ永続化され確認されるまで、次のactionは決まらない（Section 5.3のgate）。
@@ -216,24 +235,67 @@ src/claude_code_codex_review_loop/
 
 ### 5.1 依存グラフ
 
-```text
-  C-01 domain          C-02 process
-     |    \             /    |    \
-     |     \           /     |     \
-     |      C-03 transport   |      C-13 plugin / wrapper
-     |       /     |          \      |
-     |      /   C-04 security   \    |
-     |     /      /      \       \   |
-     C-05 state  /        C-07 codex runtime
-          \     /             /
-           C-06 host protocol
-                |      \
-           C-08 PR mode  \
-             /     \      \
-        C-09 protocols  C-10 qualification / reporter
-             |               |
-           C-12 issue      C-11 merge gate
+矢印は構築順（依存される側 → 依存する側）を示す。各nodeの2行目はSection 11の実装Phase。
+
+```mermaid
+flowchart TD
+    subgraph L1["基盤"]
+        C01["C-01 domain state machine<br/>Phase 1"]
+        C02["C-02 process abstraction<br/>Phase 2"]
+    end
+
+    subgraph L2["永続化と境界"]
+        C03["C-03 GitHub transport<br/>Phase 3"]
+        C04["C-04 trust / permission / credential<br/>Phase 4"]
+        C05["C-05 checkpoint / resume / retention<br/>Phase 5, 12"]
+    end
+
+    subgraph L3["実行基盤"]
+        C06["C-06 active host protocol / step engine<br/>Phase 6"]
+        C07["C-07 Codex fresh reviewer runtime<br/>Phase 7"]
+    end
+
+    subgraph L4["workflow"]
+        C08["C-08 PR mode review loop<br/>Phase 8"]
+        C09["C-09 decision / clarification / follow-up<br/>Phase 9"]
+        C10["C-10 qualification / final reporter<br/>Phase 10"]
+        C11["C-11 human merge gate<br/>Phase 11"]
+        C12["C-12 Issue mode / handoff<br/>Phase 13"]
+    end
+
+    subgraph L5["配布"]
+        C13["C-13 Plugin配布 / 任意wrapper<br/>Phase 14"]
+    end
+
+    C01 --> C03
+    C02 --> C03
+    C02 --> C04
+    C03 --> C04
+    C01 --> C05
+    C03 --> C05
+    C04 --> C05
+    C01 --> C06
+    C03 --> C06
+    C05 --> C06
+    C02 --> C07
+    C04 --> C07
+    C06 --> C07
+    C06 --> C08
+    C07 --> C08
+    C06 --> C09
+    C08 --> C09
+    C05 --> C10
+    C07 --> C10
+    C08 --> C10
+    C04 --> C11
+    C10 --> C11
+    C08 --> C12
+    C09 --> C12
+    C02 --> C13
+    C06 --> C13
 ```
+
+Phase 15のrelease acceptanceは全componentを対象とするため、図には含めていない。
 
 ## 6. Component定義
 
