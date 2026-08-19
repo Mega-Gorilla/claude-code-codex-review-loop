@@ -234,7 +234,7 @@ MVPでは、`AWAITING_USER_DECISION`または`READY_FOR_HUMAN_MERGE`に対する
 
 ### 5.4 Controller最小化と既存実装の再利用
 
-**Status: Proposed implementation direction。再利用範囲の見直しをD-030として[implementation plan](implementation-plan.md) Section 8へ提示中**
+**Status: 再利用範囲はD-030へ置き換え済み。以下の表は事前承認ではなく、component単位の選択移植評価の入力として扱う（[implementation plan](implementation-plan.md) Section 10が現行の判定）**
 
 新しい会話databaseやLLM付きControllerを作らず、既存リポジトリのGitHub comment transport、public renderer、round metadata、resume処理、`discuss` modeの個別発言投稿を共通のGitHub conversation transportへ一般化する。
 
@@ -638,11 +638,13 @@ SSH切断中に予期しないnative permission promptが先に表示された�
 
 各fresh Codex reviewには現在headの完全なdiff、前headからの差分、過去findingとdisposition、Claudeの対応、clarification、ユーザーdecision、test / CIを渡す。session memoryは引き継がないが、GitHub canonical conversationとfinding ledgerによってPR内のreview contextを再構築する。GitHubへ確認できない内部memoryは次roundの根拠にしない。
 
-### Open intervention questions
+### Decided: merge承認の入力形式
 
-- merge承認を固定commandで補助するか、明示確認付き自然言語だけにするか
+merge承認は、既存の対話型Claude Code sessionでの自然言語入力と明示確認を主経路とし、head SHAとmerge methodを指定する固定commandを補助・復旧経路として併用する（D-028）。固定commandは対話gateを置き換えない。
 
-D-028として推奨案とdecision briefを[implementation plan](implementation-plan.md) Section 8へ提示している。ユーザーの明示回答後に`Decided`とする。
+### Decided: ユーザー判断を受理する主体
+
+GitHub上のユーザー判断を受理できる主体は、repository / user設定で明示したGitHub loginのallowlistと完全一致する場合に限る。`authorAssociation`とrepository permissionは補助条件とし、単独では承認根拠にしない（D-031）。allowlistが未設定または取得できない場合は、補助条件へfallbackせず判断を受理しない。
 
 ## 9. Roles and permission boundary
 
@@ -891,11 +893,9 @@ final reportはApproved follow-up候補ごとにCodex評価、Issue draftまた�
 | Temp paths | `%TEMP%`, `%LOCALAPPDATA%` | `/tmp`, XDG/cache directory |
 | Long-running session | terminalを維持 | 対応`tmux` wrapper内は切断後も継続。wrapper外はGitHub checkpointからresume |
 
-### Open platform questions
+### Decided: PowerShellの検証範囲
 
-- Windows Store版とMSI版PowerShellの両方を正式検証するか
-
-D-029として推奨案とdecision briefを[implementation plan](implementation-plan.md) Section 8へ提示している。ユーザーの明示回答後に`Decided`とする。
+MVPの正式検証対象は、公式MSI installerで配布されるPowerShell 7とする（`Microsoft.PowerShell` winget packageによる導入を含む）。Windows Store版は未検証riskとして明記し、必要になった時点でCodex確認後、別Issue作成の許可を改めて求める（D-029）。
 
 ## 13. MVP boundary
 
@@ -952,7 +952,7 @@ D-029として推奨案とdecision briefを[implementation plan](implementation-
 
 ## 14. Resolved roadmap questions
 
-完成イメージ合意で列挙したQ-001～Q-012はD-016～D-026によって解決済みである。Section 8のmerge承認入力形式とSection 12のPowerShell検証範囲は、[implementation plan](implementation-plan.md) Section 8がD-028とD-029として推奨案を提示しており、ユーザー判断待ちである。残る実装詳細も同文書で検証・決定する。
+完成イメージ合意で列挙したQ-001～Q-012はD-016～D-026によって解決済みである。Section 8のmerge承認入力形式とSection 12のPowerShell検証範囲は、D-028とD-029として解決済みである。残る実装詳細は[implementation plan](implementation-plan.md)で検証・決定する。
 
 ## 15. Decision log
 
@@ -985,9 +985,10 @@ D-029として推奨案とdecision briefを[implementation plan](implementation-
 | D-025 | 2026-08-17 | 対応環境のClaude CodeではAuto modeを通常の実装・test・build・read-only Web調査・feature branchへのcommit / pushに使用し、非対応時は限定permission profileへfallbackする。tool permissionとworkflow承認を分離し、例外blockは`AWAITING_TOOL_PERMISSION`で標準permission設定後に明示resumeする。Codexは各roundをfresh sessionで実行し、GitHub contextを再構築したexact-head隔離checkout内でtest・build・再現・Web調査を許可するが、実repositoryとGitHubへの永続変更権限を持たない | Decided | 完成イメージ合意 |
 | D-026 | 2026-08-17 | Claude Code Pluginを正式配布単位とし、Skillと薄いplatform wrapperをversion管理する。Controllerは任意repositoryから呼べるinstall済みCLI packageとし、repo-local Skillは開発・test、user-level単体Skillはfallbackに限定する。MCP serverとしての実装・配布は行わない | Decided | 完成イメージ合意 |
 | D-027 | 2026-08-18 | 本repositoryのIssue #2を親roadmapとし、target experience、implementation plan、子Issueをここから参照する。implementation planは`docs/plans/implementation-plan.md`として作成する | Decided | PR #1 merge後のroadmap整備 |
-| D-028 | 2026-08-18 | merge承認は自然言語＋明示確認を主経路とし、head SHAとmerge methodを引数で渡す固定commandを併用する。承認のbind対象を推論ではなく検証で確定し、headless経路とSSH resumeでも同一形式を使えるようにする | Proposed: ユーザー判断待ち | implementation plan Section 8 |
-| D-029 | 2026-08-18 | MVPの正式検証対象をMSI installer配布のPowerShell 7とし、Windows Store版は未検証と明記してApproved follow-up候補として扱う | Proposed: ユーザー判断待ち | implementation plan Section 8 |
-| D-030 | 2026-08-18 | GitHub canonical conversation transportの公開interfaceを新設し、Section 5.4の再利用表は事前承認ではなくcomponent単位の再利用判定へ置き換える。algorithmとtestの選択移植余地は残す | Proposed: ユーザー判断待ち | implementation plan Section 8 |
+| D-028 | 2026-08-19 | merge承認は、既存の対話型Claude Code sessionでの自然言語入力＋明示確認を主経路とし、head SHAとmerge methodを指定する固定commandを補助・復旧経路として併用する | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
+| D-029 | 2026-08-19 | MVPの正式検証対象は公式MSI installerで配布されるPowerShell 7（`Microsoft.PowerShell` winget packageによる導入を含む）とする。Windows Store版は未検証riskとして明記し、必要になった時点でCodex確認後に別Issue作成の許可を改めて求める | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
+| D-030 | 2026-08-19 | GitHub canonical conversation transportは新しい公開interfaceを設計し、参考実装を一括移植・一括破棄せず、実績あるalgorithmとtestをcomponent単位で評価して、出典・license・理由・testを記録したうえで選択移植する | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
+| D-031 | 2026-08-19 | GitHub上のユーザー判断を受理できる主体は、repository / user設定で明示したGitHub login allowlistとの完全一致を必須とする。`authorAssociation`とrepository permissionは補助条件とし、単独では承認根拠にしない | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
 
 ## 16. Agreement checklist
 
