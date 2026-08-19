@@ -141,20 +141,21 @@ src/claude_code_codex_review_loop/
 
 遷移関数は`(machine_state, event) -> (machine_state, [command])`。GitHub永続化とread-after-write確認の完了をeventとして要求し、gate未通過の遷移を表現できないようにする。
 
-**遷移registry**: states、events、commands、guard条件、terminal / resumable分類を**単一のregistry**として定義し、完全遷移表と遷移図をregistryから導出・照合する。guardは自由なpredicateではなく**有限のtyped discriminator**（`awaiting`値、`pending_record`一致、`return_to` / `recovery_to`の有無）に限定し、共通規則（cancel / failure等）もregistry内で個別ruleへ展開して、**到達可能なMachineState付随値の各組合せ × 各eventに一致するruleは0件または1件**とする（overlapはdiscriminator全値の展開で機械的に検査しfail。優先順位による解決はしない）。target experienceの「State model」節の図はユーザー向け簡略図として維持し、計画文書はnormativeな期待挙動、実装のcode registryが実行可能な単一の正本であり、表・図はregistryから生成してsnapshot照合する。簡略図が省略している遷移（失敗系からのresume、各状態でのcancel可否、GitHub投稿・確認失敗、preflight失敗）もregistryでは全て定義する。
+**遷移registry**: states、events、commands、guard条件、terminal / resumable分類を**単一のregistry**として定義し、完全遷移表と遷移図をregistryから導出・照合する。guardは自由なpredicateではなく**有限のtyped discriminator**（`awaiting`値、`pending_record`一致、`progress`値、`blocked_continuation`のreason、`cancelling` / `return_to` / `recovery_to`の有無）に限定し、共通規則（cancel / failure等）もregistry内で個別ruleへ展開して、**到達可能なMachineState付随値の各組合せ × 各eventに一致するruleは0件または1件**とする（overlapはdiscriminator全値の展開で機械的に検査しfail。優先順位による解決はしない）。target experienceの「State model」節の図はユーザー向け簡略図として維持し、計画文書はnormativeな期待挙動、実装のcode registryが実行可能な単一の正本であり、表・図はregistryから生成してsnapshot照合する。簡略図が省略している遷移（失敗系からのresume、各状態でのcancel可否、GitHub投稿・確認失敗、preflight失敗）もregistryでは全て定義する。
 
-**MachineState**: 可視の17 stateとは別に、immutableな`MachineState`が付随情報を保持する: `return_to`（tool permissionからの復帰先）、`recovery_to`（`EV_RUN_FAILED`で入った`FAILED`の安全な再開地点）、`blocked_continuation`（上限到達で入った`BLOCKED`の本来の継続処理 = CONTINUE時のstate・command列・awaitingをregistryから保存した有限typed値。resume時にこの完全な継続だけを1回再現し、stateから推測したcommandは使わない。`recovery_to`とは排他）、`awaiting`（発行済みcommandに対応する「次に受理してよい応答」の有限typed discriminator。応答eventはguard一致でのみ受理・消費され、順序を飛ばした応答・消費済み応答の再入力は構造化errorで拒否される）、`pending_record`（永続化の確認待ちrecordのkindとopaque binding）。典型例は`AWAITING_TOOL_PERMISSION`で、`RUNNING_REVIEW`と`APPLYING_FIXES`のどちらから入ったかを`return_to`が保持し、permission承認eventで元の処理へ戻る。**復帰先・再開地点をeventの引数として外部から渡す設計は採らない**（不正な状態jumpを防ぐ）。
+**MachineState**: 可視の17 stateとは別に、immutableな`MachineState`が付随情報を保持する: `return_to`（tool permissionからの復帰先）、`recovery_to`（`EV_RUN_FAILED`で入った`FAILED`の安全な再開地点）、`blocked_continuation`（上限到達で入った`BLOCKED`の本来の継続処理と停止理由 = CONTINUE時のstate・command列・awaitingをregistryから保存し、reason / budget / counter snapshot / fingerprintを付す有限typed値。再現はSection「BLOCKEDの解消gate」の検証後に1回だけ行い、stateから推測したcommandは使わない。`recovery_to`とは排他）、`cancelling`（進行中のcancel attemptへのopaque binding。保持中はbinding一致の停止完了eventと失敗event以外の全semantic eventを拒否する）、`awaiting`（発行済みcommandに対応する「次に受理してよい応答」の有限typed discriminator。応答eventはguard一致でのみ受理・消費され、順序を飛ばした応答・消費済み応答の再入力は構造化errorで拒否される）、`pending_record`（永続化の確認待ちrecordのkindとopaque binding）。典型例は`AWAITING_TOOL_PERMISSION`で、`RUNNING_REVIEW`と`APPLYING_FIXES`のどちらから入ったかを`return_to`が保持し、permission承認eventで元の処理へ戻る。**復帰先・再開地点をeventの引数として外部から渡す設計は採らない**（不正な状態jumpを防ぐ）。
 
 **初期・terminal・resume semantics**:
 
 - 開始は`initialize(preflight_event)`の専用APIとする。preflight成功で`RUNNING_REVIEW`へ、失敗は`FAILED`へ（可視の17 stateに「未開始」を追加しない）
 - `MERGED`と`CANCELLED`はterminal。terminal状態からはいかなる処理も開始できない
 - `FAILED` / `BLOCKED` / `REPORT_FAILED` / `MERGE_FAILED` / `WAITING_CI` / `AWAITING_USER_DECISION` / `AWAITING_TOOL_PERMISSION` / `READY_FOR_HUMAN_MERGE`はresumableとし、resume時に許可するeventと復帰先・再発行commandをregistryで定義する（後3者は通常eventがresumeを兼ねる）
-- **`BLOCKED` / `FAILED`からの一律fresh reviewは採らない**。進入時のruleが`recovery_to`を設定し（`pending_record` / `awaiting`は変更せず引き継ぐ）、resume preflight成功でそこへ復帰する。head変更・checkpoint不整合等で安全を証明できない場合のみfresh reviewへfallbackする
-- **resume actionは優先順位で決める**: (1) `pending_record`があれば同一bindingの冪等な永続化確認のみを再開（次agentを起動しない）、(2) `awaiting`があれば対応するcommandの再発行・結果照会、(3) どちらも無い場合だけ`recovery_to`の駆動commandを発行する。`BLOCKED` / `FAILED`滞在中の失敗は既存のrecovery情報を上書きしない
+- **一律fresh reviewは採らない**。`EV_RUN_FAILED`で入る`FAILED`は`recovery_to`（進入元state。`pending_record` / `awaiting` / `cancelling`は変更せず引き継ぐ）を、上限到達で入る`BLOCKED`は`blocked_continuation`を設定する（両者は排他）。head変更・checkpoint不整合等で安全を証明できない場合のみfresh reviewへfallbackする
+- **`FAILED`のresumeは優先順位で決める**: (0) `cancelling`があれば停止commandの再発行のみ（停止・checkpoint完了が最優先）、(1) `pending_record`があれば同一bindingの冪等な永続化確認のみを再開（次agentを起動しない）、(2) `awaiting`があれば対応するcommandの再発行・結果照会、(3) いずれも無い場合だけ`recovery_to`の駆動command（値ごとに全数定義）を発行する。resumable state滞在中の失敗は既存の付随値を上書きしない
+- **`BLOCKED`のresumeは停止理由の解消gateを通す**: 同一条件での単純resumeは継続を再現せず`BLOCKED`を維持し、commandを発行しない。limit設定の引き上げ検証（`LIMIT_REACHED`）または膠着を解消するcanonical recordの確認（`NO_PROGRESS`）を表すtyped eventだけが、保存された本来の継続を1回再現する。head変更等はfallbackとして継続を破棄しfresh reviewへ入る
 - retry可能な失敗とterminalな失敗をevent / guardで区別する
-- **cancelは2系統・停止完了gate**: いずれの経路でも、`CANCELLED`へはactive processの停止とcheckpoint保存の完了event（`EV_CANCELLATION_COMPLETED`）を受けて初めて遷移する（intent検証は真正性の保証であり、process停止の保証ではない）。通常の対話cancelはcancel intentのcanonical検証後、同一stateに留まり停止command（`CMD_HALT_RUN`）だけを発行して完了eventを待つ。Ctrl+C等の緊急停止はC-03 / C-08が停止・checkpointを行い完了eventを直接入力する（`MERGING`中の割込みのみeventを入力せずcheckpointし、resumeで照会を再開する）。resumeは直前の安全なcheckpointから新しいrunとして開始する
-- **bounded-progressの境界**: 上限・膠着の判定結果は、**同じbounded loopをもう1回継続する遷移だけ**が持つ`progress` discriminator（`CONTINUE` / `LIMIT_REACHED` / `NO_PROGRESS`）として入力する。どの遷移がどのbudget（review round / clarification turn / decision resubmit）を消費するかはregistryのdataとして明示する。`CONTINUE`の場合のみcommandを発行し、上限到達時は`BLOCKED`へ遷移して（`blocked_continuation`を保存）agent commandを一切発行しない。**loopを終了する結果は上限turnで得られたものでも常に処理する**（5回目のclarificationで得た合意、上限時のASK_USER / PROCEED verdict等）
+- **cancelは2系統・停止完了gate**: いずれの経路でも、`CANCELLED`へはactive processの停止とcheckpoint保存の完了event（`EV_CANCELLATION_COMPLETED`）を受けて初めて遷移する（intent検証は真正性の保証であり、process停止の保証ではない）。通常の対話cancelはcancel intentのcanonical検証後、同一stateに留まり`cancelling`（attempt binding）を設定して停止command（`CMD_HALT_RUN(binding)`）だけを発行し、**binding一致の完了event**を待つ（過去attemptの遅延・重複完了は拒否。cancel中はstale pendingのVERIFIEDを含む全semantic継続を拒否し、resumeでも停止完了が最優先）。Ctrl+C等の緊急停止はC-03 / C-08が停止・checkpointを行い、run / checkpointへのbindを検証した完了eventを直接入力する（`MERGING`中の割込みのみeventを入力せずcheckpointし、resumeで照会を再開する）。resumeは直前の安全なcheckpointから新しいrunとして開始する
+- **bounded-progressの境界**: 上限・膠着の判定結果は、**同じbounded loopをもう1回継続する遷移だけ**が持つ`progress` discriminator（`CONTINUE` / `LIMIT_REACHED` / `NO_PROGRESS`）として入力する。budgetは`REVIEW_ROUND`（counterは新しいfix roundの開始で1回だけ増加し、同一roundの完了では二重計上しない）と`CLARIFICATION_TURN`（1 turn = 質問／再提出とCodex回答の一往復。**5回目のturn開始は許可し、6回目の開始を停止する**。REVISE_AND_RESUBMITは同一fingerprintのclarification turnとして**共通の5-turn counter**を消費する）の2つで、消費点・判定点はregistryのdataとして明示する。`CONTINUE`の場合のみcommandを発行し、上限到達時は`BLOCKED`へ遷移して（`blocked_continuation`を保存）agent commandを一切発行しない。**loopを終了する結果は上限turnで得られたものでも常に処理する**
 - **merge実行は2段階**: 承認検証後の`MERGING`ではまずpreconditions再検証commandのみを発行し、**全条件一致の結果eventを受けて初めて**merge実行commandを発行する。実行後はGitHub照会の結果eventだけが`MERGED` / `MERGE_FAILED`を決める
 - **`MERGING`中のcancel・runtime失敗は即`CANCELLED` / `FAILED`にしない**。merge結果の照会commandを発行し、merge未実行の確認eventでのみ`CANCELLED`、完了確認で`MERGED`、確定できない場合は`MERGE_FAILED`として安全停止する（成功と表示しない、二重mergeしない、というtarget experienceの失敗方針から導出）
 
@@ -174,8 +175,9 @@ src/claude_code_codex_review_loop/
 | AC-C01-06 | 待機状態（`AWAITING_TOOL_PERMISSION`等）から、進入元に応じた正しい処理位置へ復帰する。復帰先はMachineStateが保持し、eventから注入できない |
 | AC-C01-07 | `MERGING`中のcancelがmerge結果の照会を経由し、結果を確定できない場合に`CANCELLED`ではなく`MERGE_FAILED`へ遷移する |
 | AC-C01-08 | guardが有限のtyped discriminatorに限定され、到達可能なMachineState付随値ごとに各eventへ一致するruleが0または1件であることをtestで検査する。順序を飛ばした応答（merge実行command発行前の完了event、verdict確認前のbrief / decision record）、消費済み応答の再入力（duplicate preconditions OK）、`awaiting` / binding不一致がnegative testで拒否される |
-| AC-C01-09 | bounded-progress判定が次agent commandの発行前に適用される。budget（review round / clarification turn / decision resubmit）を消費する遷移はregistryのdataとして明示され、上限到達（`LIMIT_REACHED` / `NO_PROGRESS`）の受理後に新しいCodex / host起動commandが一度も発行されず`BLOCKED`へ遷移する。**loopを終了する結果（上限turnのclarification合意、上限時のASK_USER / PROCEED verdict）は正常に処理される**。block -> resume後は保存された本来のcommand列（付随actionを含む）だけが1回再現される |
-| AC-C01-10 | `CANCELLED`へは、active processの停止とcheckpoint保存の完了eventを受けて初めて遷移する。active stateでcancel intentを検証しても、完了event前はterminalにならず、新しいagent commandを発行しない（`MERGING`のみmerge結果の照会を優先する） |
+| AC-C01-09 | bounded-progress判定が次agent commandの発行前に適用される。budget（`REVIEW_ROUND` / `CLARIFICATION_TURN`）の消費点・判定点はregistryのdataとして明示され、roundは二重計上されず（既定3 roundの開始から停止までの系列testで固定）、clarificationは5回目のturn開始が許可され6回目の開始で停止する。同一fingerprintの質問と再提出は共通counterを消費する。上限到達の受理後に新しいCodex / host起動commandが一度も発行されず`BLOCKED`へ遷移し、**loopを終了する結果は正常に処理される** |
+| AC-C01-10 | `CANCELLED`へは、cancel attemptへbindされた停止・checkpoint完了eventを受けて初めて遷移する。完了event前はterminalにならず新しいagent commandを発行しない。cancel中はstale pendingのVERIFIEDを含むsemantic継続が拒否され、停止失敗後のresumeでは停止commandの再発行だけが返る。binding不一致の完了eventは拒否される（`MERGING`のみmerge結果の照会を優先する） |
+| AC-C01-11 | 上限到達の`BLOCKED`は停止理由（reason / budget / counter snapshot / fingerprint）を保持し、同一条件での単純resumeはcommandを発行せず`BLOCKED`を維持する。limit引き上げ検証または膠着解消のcanonical record確認を表すtyped eventだけが、保存された本来のcommand列（付随actionを含む）を1回再現する。reason不一致・消費済み継続への解消eventは拒否される |
 
 ### C-02 agent protocol schemaとcheckpoint envelope
 
@@ -499,7 +501,7 @@ schema検証は、runtime依存をゼロに保ち、必要なschema機能だけ�
 | Phase | 内容 | Component | 完了条件 | 追加するcheckpoint field |
 | --- | --- | --- | --- | --- |
 | 0 | 基盤と品質ゲート | — | CIでlint、type、coverage、size ratchetが動作する。P-001を決定する | — |
-| 1 | domain state machine | C-01 | AC-C01-01〜10 | — |
+| 1 | domain state machine | C-01 | AC-C01-01〜11 | — |
 | 2 | protocol schemaとenvelope | C-02 | AC-C02-01〜03 | envelope schemaとmigration policyを定義（永続化はPhase 5以降） |
 | 3 | process abstraction | C-03 | AC-C03-01、AC-C03-02 | — |
 | 4 | security policy | C-04 | AC-C04-01〜03 | — |
