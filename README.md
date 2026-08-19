@@ -6,7 +6,7 @@ Claude Codeをcoder、Codexをread-only reviewerとして使用し、GitHub Issu
 
 ## Status
 
-現在はarchitecture planning段階です。合意済みの完成イメージを基に、新しいControllerを独立設計します。
+planningは完了し、実装開始前（Phase 0着手前）です。合意済みの[完成イメージ](docs/plans/target-experience.md)と承認済みの[実装計画](docs/plans/implementation-plan.md)に基づき、Phase順に実装します。
 
 ## Planned interface
 
@@ -25,7 +25,7 @@ cc-review issue 123 --repo OWNER/REPO
 - [実装計画](docs/plans/implementation-plan.md)
 - [独立v2として開始する設計判断](docs/decisions/0001-independent-v2.md)
 - [参考実装の調査と独立再実装の選択](docs/decisions/0002-independent-reimplementation.md)
-- [Architecture planning](docs/architecture/README.md)
+- [Architecture](docs/architecture/README.md)
 
 ## License
 

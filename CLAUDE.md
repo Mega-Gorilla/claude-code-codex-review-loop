@@ -87,7 +87,7 @@ CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3
 
 ## Working conventions
 
-- **decision flow**: target behaviorを変える決定はD-NNNとしてdecision logへ追記する。`Open` / `Proposed`を`Decided`へ変更できるのは、GitHub上のユーザーの明示合意recordだけ。implementation planが単独でgold documentのstatusを変えてはならない（過去のレビューで差し戻された）。Phase内で決める技術判断（P-001等）はユーザー判断と区別する。
+- **decision flow**: target behaviorを変える決定はD-NNNとしてdecision logへ追記する。`Open` / `Proposed`を`Decided`へ変更できるのは、GitHub上のユーザーの明示合意recordだけ。implementation planが単独でgold documentのstatusを変えてはならない。Phase内で決める技術判断（P-001等）はユーザー判断と区別する。
 - **開発フロー**: `CONTRIBUTING.md`が正本。Issue → `agent/<topic>` branch → dependency順の小さいPR → Codexレビューでblocking解消 → **ユーザーの明示承認を得てmerge**。レビュー承認はmerge承認ではない。
 - **選択移植**: ADR-0002に従う。`docs/research/reference-implementation-assessment.md`のcomponent別判定が入口。移植PRへ対象file・source commit・理由・適用license・移植後testを記録し、`THIRD_PARTY_FILES`へ登録する。参考実装のrepository識別子とcommit SHAを正式文書へ書かない。
 - **文書language**: 文書・commit messageは日本語（技術用語は英語のまま）。書き方の規約はCONTRIBUTING「文書の書き方」。

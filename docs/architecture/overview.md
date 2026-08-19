@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| Authority | **Draft**。詳細の正本は[implementation plan](../plans/implementation-plan.md) |
+| Authority | **Accepted**（PR #4のユーザー承認とmergeにより確定）。詳細の正本は[implementation plan](../plans/implementation-plan.md) |
 | 対象読者 | 本projectへ初めて参加する開発者 |
 
 最初に読む1ページです。用語は[glossary](../glossary.md)を参照してください。

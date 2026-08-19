@@ -2,7 +2,7 @@
 
 # Contributing
 
-本projectはarchitecture planning段階です。実装は[implementation plan](docs/plans/implementation-plan.md)のPhase順に、子Issue単位で進めます。
+planningは完了しています。実装は[implementation plan](docs/plans/implementation-plan.md)のPhase順に、子Issue（#5〜#22）単位で進めます。
 
 最初に[architecture overview](docs/architecture/overview.md)を読んでください。用語は[glossary](docs/glossary.md)にあります。
 

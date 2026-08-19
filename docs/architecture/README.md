@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Draft** |
+| Status | **Accepted**（PR #4のユーザー承認とmergeにより確定） |
 
 | 文書 | 内容 |
 | --- | --- |
