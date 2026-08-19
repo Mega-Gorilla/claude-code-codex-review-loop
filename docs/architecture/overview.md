@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| Authority | **Draft**。詳細の正本は[implementation plan](../plans/implementation-plan.md) |
+| Authority | **Accepted**（PR #4のユーザー承認とmergeにより確定）。詳細の正本は[implementation plan](../plans/implementation-plan.md) |
 | 対象読者 | 本projectへ初めて参加する開発者 |
 
 最初に読む1ページです。用語は[glossary](../glossary.md)を参照してください。
@@ -20,7 +20,7 @@ GitHubのIssueまたはPRを指定して起動すると、Claude Codeが実装�
 | ユーザー | 実行開始、判断、mergeの明示承認 | — |
 | Controller | 決定論的なstate machine。GitHub投稿、process起動、schema検証、merge実行 | LLMを内包しない。意味的な要約や推奨を作らない |
 | Claude Code（active host） | 実装、test、commit、push、説明、ユーザー入力の構造化 | GitHubへ直接書き込まない。mergeしない |
-| Codex（fresh reviewer） | 隔離checkout内でのreview、test、再現、read-only Web調査 | 実repositoryとGitHubを変更しない |
+| Codex（fresh reviewer / final reporter） | 隔離checkout内でのreview、test、再現、read-only Web調査、承認済みheadのfinal report | 実repositoryとGitHubを変更しない |
 
 ## 主経路: advance / submit
 
@@ -52,7 +52,7 @@ sequenceDiagram
     Host-->>User: state、次action、GitHub URLを表示
 ```
 
-Controllerが直接起動するのはCodex reviewerだけです。Claude coderは主経路では常にactive host側で動作し、会話contextを保ちます。
+主経路でControllerが直接起動するのはCodex reviewerとfinal reporterだけです。Claude coderは主経路では常にactive host側で動作し、会話contextを保ちます（headless復旧経路に限り、ControllerがClaude coder adapterをsubprocessとして起動します）。
 
 ## Component map
 
