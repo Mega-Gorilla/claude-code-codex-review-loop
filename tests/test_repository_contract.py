@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 REPOSITORY_OWNER = "Mega-Gorilla"
@@ -63,9 +62,9 @@ def _declared_spdx(path: str) -> str | None:
 
     text = (ROOT / path).read_text(encoding="utf-8")
     for line in text.splitlines()[:3]:
-        match = re.search(r"SPDX-License-Identifier:\s*(\S+)", line)
+        match = re.search(r"SPDX-License-Identifier:\s*([A-Za-z0-9.+-]+)", line)
         if match:
-            return match.group(1).rstrip("-->").strip()
+            return match.group(1)
     return None
 
 

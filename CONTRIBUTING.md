@@ -16,18 +16,32 @@ planningは完了しています。実装は[implementation plan](docs/plans/imp
 | 外部CLI | `gh`。実装が進んだ段階でClaude CodeとCodexのCLI |
 
 ```powershell
-python -m pip install -e . pytest
+python -m pip install -e ".[dev]"
 ```
+
+開発用依存は`pyproject.toml`の`[project.optional-dependencies].dev`だけで定義します（完全pin）。runtime依存の方針はP-001で決定し、開発用依存とは分離します。
 
 ## 実行するcheck
 
 ```powershell
 python -m pytest -q                 # 全test
+python -m ruff check .              # lint
+python -m mypy                      # type check（src対象、strict）
+python -m coverage run -m pytest -q # coverage計測つきtest
+python -m coverage report           # coverage表示（floorはquality-baseline.toml）
 python -m pytest tests/test_repository_contract.py::test_project_identity_is_consistent -q   # 単体test
 git diff --check origin/main...HEAD # CIと同じwhitespace check
 ```
 
-lintとtype checkはPhase 0で導入します。導入後はここへcommandを追記してください。
+## 品質ゲートの運用
+
+baselineは`quality-baseline.toml`でversion管理します。値を緩める変更（coverage floorの引き下げ、module size上限の引き上げ）は、このfileの変更としてPR diffへ現れます。**PRへ理由の記載を必須とします。**
+
+- **coverage**: branch coverageで計測し、`[coverage].floor`を下回るとCIがfailします。floorは引き上げる方向を推奨します
+- **module size**: git管理下の全`.py`を`[module-size]`へ登録します。未登録・存在しないfileの登録（stale）はCIがfailします。新規fileを追加するPRでは、上限とその根拠をあわせて記載してください。生成fileは現状存在せず、導入時に除外listをbaselineへ追加します
+- **mypy**: 対象は`src`配下でstrictです。対象は広げる方向のみ変更できます。例外が必要な場合は`pyproject.toml`のoverridesへ理由つきで追加し、PRで説明してください
+- **subprocess coverage**: subprocessとして実行したcodeが計測可能であることは`tests/test_quality_gates.py`のtestで担保しています。自動計測（coverageの`patch = ["subprocess"]`）は、実際にsubprocessを起動するcodeが現れるPhase 3で導入します
+- **version整合**: 通常CIで`pyproject.toml`とpackageの`__version__`の一致を検証し、`v*` tagのbuildではtagとpackage versionの不一致をfailにします
 
 CIは`ubuntu-latest`と`windows-latest`のPython 3.11で全testを実行します。testの実行対象を限定する設定は追加しません。test fileの追加漏れが構造的に起こらない状態を保ちます。
 
