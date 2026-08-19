@@ -1,0 +1,338 @@
+{
+  "cases": [
+    {
+      "file": "representative/basic_all_required.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/kind_note.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/with_optional_location.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/location_line_null.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/with_tags.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/empty_tags.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/empty_summary_allowed.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/unicode_summary.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/evidence_null.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/evidence_string.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/resolved_true_with_note.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/resolved_false_without_note.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/with_attachments.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/with_metrics.json",
+      "expect": "accept"
+    },
+    {
+      "file": "malformed/broken_syntax.json",
+      "expect": "reject",
+      "stage": "json"
+    },
+    {
+      "file": "malformed/truncated.json",
+      "expect": "reject",
+      "stage": "json"
+    },
+    {
+      "file": "malformed/not_json_at_all.json",
+      "expect": "reject",
+      "stage": "json"
+    },
+    {
+      "file": "malformed/deeply_nested.json",
+      "expect": "reject",
+      "stage": "json"
+    },
+    {
+      "file": "malformed/root_not_object.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "$"
+    },
+    {
+      "file": "malformed/missing_required_kind.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/wrong_type_blocking.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "blocking"
+    },
+    {
+      "file": "malformed/enum_invalid_kind.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/unexpected_field.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "<unknown#1>"
+    },
+    {
+      "file": "malformed/nested_missing_file.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "location.file"
+    },
+    {
+      "file": "malformed/nested_wrong_type_line.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "location.line"
+    },
+    {
+      "file": "malformed/null_not_allowed_id.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "id"
+    },
+    {
+      "file": "malformed/empty_string_id.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "id"
+    },
+    {
+      "file": "malformed/tags_wrong_item_type.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "tags[0]"
+    },
+    {
+      "file": "malformed/wrong_type_schema_version.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/oversized_summary.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "summary"
+    },
+    {
+      "file": "malformed/crossfield_note_without_resolved.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "resolution_note"
+    },
+    {
+      "file": "malformed/crossfield_resolved_without_note.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "resolution_note"
+    },
+    {
+      "file": "malformed/crossfield_evidence_on_note.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "evidence"
+    },
+    {
+      "file": "malformed/attachments_item_missing_name.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "attachments[0].name"
+    },
+    {
+      "file": "malformed/metrics_wrong_value_type.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "metrics.<key#1>"
+    },
+    {
+      "file": "malformed/unknown_schema_version.json",
+      "expect": "reject",
+      "stage": "version",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/invalid_utf8.json",
+      "expect": "reject",
+      "stage": "utf8"
+    },
+    {
+      "file": "malformed/oversized_input.json",
+      "expect": "reject",
+      "stage": "size"
+    },
+    {
+      "file": "representative/negative_line.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/large_integer_metric.json",
+      "expect": "accept"
+    },
+    {
+      "file": "malformed/float_schema_version_known.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/float_schema_version_unknown.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/bool_schema_version.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/float_location_line.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "location.line"
+    },
+    {
+      "file": "malformed/float_attachment_size.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "attachments[0].size"
+    },
+    {
+      "file": "malformed/float_metrics_value.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "metrics.<key#1>"
+    },
+    {
+      "file": "malformed/unknown_version_with_other_error.json",
+      "expect": "reject",
+      "stage": "version",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/sentinel_unknown_field_name.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "<unknown#1>"
+    },
+    {
+      "file": "malformed/sentinel_nested_unknown_field.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "location.<unknown#1>"
+    },
+    {
+      "file": "malformed/sentinel_map_key.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "metrics.<key#1>"
+    },
+    {
+      "file": "malformed/newline_unknown_field_name.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "<unknown#1>"
+    },
+    {
+      "file": "malformed/long_unknown_field_name.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "<unknown#1>"
+    },
+    {
+      "file": "malformed/metrics_mixed_valid_invalid_keys.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "metrics.<key#2>"
+    },
+    {
+      "file": "malformed/metrics_multiple_invalid_keys.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_paths": [
+        "metrics.<key#1>",
+        "metrics.<key#2>"
+      ]
+    },
+    {
+      "file": "malformed/enum_kind_null.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/enum_kind_number.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/enum_kind_bool.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/enum_kind_array.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/enum_kind_object.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/huge_integer.json",
+      "expect": "reject",
+      "stage": "json"
+    },
+    {
+      "file": "malformed/nan_token.json",
+      "expect": "reject",
+      "stage": "json"
+    },
+    {
+      "file": "malformed/infinity_token.json",
+      "expect": "reject",
+      "stage": "json"
+    }
+  ]
+}

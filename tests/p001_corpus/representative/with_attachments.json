@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "f-009",
+  "summary": "添付つき",
+  "blocking": true,
+  "attachments": [
+    {
+      "name": "repro.log",
+      "size": 2048
+    },
+    {
+      "name": "trace.txt",
+      "size": 512
+    }
+  ]
+}

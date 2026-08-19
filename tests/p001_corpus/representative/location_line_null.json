@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "f-003",
+  "summary": "file全体への指摘",
+  "blocking": false,
+  "location": {
+    "file": "src/app.py",
+    "line": null
+  }
+}

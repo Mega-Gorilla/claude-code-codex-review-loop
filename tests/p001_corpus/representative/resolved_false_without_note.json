@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "f-008",
+  "summary": "未対応",
+  "blocking": true,
+  "resolved": false
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "f-002",
+  "summary": "境界条件",
+  "blocking": true,
+  "location": {
+    "file": "src/app.py",
+    "line": 42
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "f-010",
+  "summary": "負のline番号",
+  "blocking": false,
+  "location": {
+    "file": "a.py",
+    "line": -5
+  }
+}

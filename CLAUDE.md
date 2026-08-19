@@ -18,7 +18,7 @@ planningは完了し（target experienceとimplementation planは承認済み）
 ## Commands
 
 ```powershell
-python -m pip install -e ".[dev]"   # 開発環境の準備（Python >= 3.11）
+python -m pip install -e ".[dev,p001]" -c constraints/p001.txt   # 開発環境の準備（Python >= 3.11）
 python -m pytest -q                 # 全test
 python -m ruff check .              # lint
 python -m mypy                      # type check（src対象、strict）

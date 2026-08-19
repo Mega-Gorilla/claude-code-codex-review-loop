@@ -1,0 +1,7 @@
+# P-001評価（ADR-0003）の再現用constraints。推移依存を含めて固定する。
+# 更新時はADR-0003「再現方法」とtests/test_p001_evaluation.pyの記録も同時に更新する。
+jsonschema==4.26.0
+attrs==25.3.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3

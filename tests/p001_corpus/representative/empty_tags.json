@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "kind": "note",
+  "id": "n-003",
+  "summary": "空のtag list",
+  "blocking": false,
+  "tags": []
+}

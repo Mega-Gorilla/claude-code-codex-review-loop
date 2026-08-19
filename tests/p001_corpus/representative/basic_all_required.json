@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "f-001",
+  "summary": "null参照の可能性",
+  "blocking": true
+}

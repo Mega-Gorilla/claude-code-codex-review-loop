@@ -1,0 +1,7 @@
+{
+  "schema_version": 2,
+  "kind": "note",
+  "id": "n-x",
+  "summary": "未知versionはC-02のversion gateで拒否する",
+  "blocking": false
+}

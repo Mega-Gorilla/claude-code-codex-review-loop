@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "kind": "note",
+  "id": "x",
+  "summary": "s",
+  "blocking": false,
+  "metrics": {
+    "SENTINELghp000": "bad"
+  }
+}
