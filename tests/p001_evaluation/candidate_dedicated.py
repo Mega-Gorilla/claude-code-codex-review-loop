@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from p001_evaluation.common import PublicError
+from p001_evaluation.common import PublicError, is_integer_token, map_key_token, unknown_field_token
 
 
 @dataclass(frozen=True)
@@ -30,10 +30,12 @@ def _check(value: object, spec: Field, path: str, errors: list[PublicError]) -> 
         if not spec.allow_none:
             errors.append(PublicError("null_not_allowed", path))
         return
-    if bool not in spec.types and isinstance(value, bool) and int in spec.types:
-        errors.append(PublicError("type_mismatch", path))
-        return
-    if not isinstance(value, spec.types):
+    if int in spec.types and bool not in spec.types and not isinstance(value, str | list | dict):
+        # integerはJSON integer tokenのみ（common参照）。boolとfloatは型不一致とする。
+        if not is_integer_token(value):
+            errors.append(PublicError("type_mismatch", path))
+            return
+    elif not isinstance(value, spec.types):
         errors.append(PublicError("type_mismatch", path))
         return
     if isinstance(value, str):
@@ -47,8 +49,9 @@ def _check(value: object, spec: Field, path: str, errors: list[PublicError]) -> 
         if spec.fields is not None:
             _check_object(value, spec.fields, path, errors)
         elif spec.values is not None:
+            all_keys = list(value.keys())
             for key, item in value.items():
-                _check(item, spec.values, f"{path}.{key}", errors)
+                _check(item, spec.values, f"{path}.{map_key_token(all_keys, key)}", errors)
     if isinstance(value, list) and spec.items is not None:
         for i, item in enumerate(value):
             _check(item, spec.items, f"{path}[{i}]", errors)
@@ -64,9 +67,9 @@ def _check_object(
                 errors.append(PublicError("required_missing", prefix + name))
             continue
         _check(obj[name], spec, prefix + name, errors)
-    for name in obj:
-        if name not in fields:
-            errors.append(PublicError("unknown_field", prefix + name))
+    unknown = [name for name in obj if name not in fields]
+    for name in unknown:
+        errors.append(PublicError("unknown_field", prefix + unknown_field_token(unknown, name)))
 
 
 SAMPLE_MESSAGE = {

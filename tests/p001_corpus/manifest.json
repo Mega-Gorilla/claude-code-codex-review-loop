@@ -104,7 +104,7 @@
       "file": "malformed/unexpected_field.json",
       "expect": "reject",
       "stage": "schema",
-      "error_path": "severity"
+      "error_path": "<unknown#1>"
     },
     {
       "file": "malformed/nested_missing_file.json",
@@ -176,7 +176,7 @@
       "file": "malformed/metrics_wrong_value_type.json",
       "expect": "reject",
       "stage": "schema",
-      "error_path": "metrics.lines"
+      "error_path": "metrics.<key#1>"
     },
     {
       "file": "malformed/unknown_schema_version.json",
@@ -193,6 +193,86 @@
       "file": "malformed/oversized_input.json",
       "expect": "reject",
       "stage": "size"
+    },
+    {
+      "file": "representative/negative_line.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/large_integer_metric.json",
+      "expect": "accept"
+    },
+    {
+      "file": "malformed/float_schema_version_known.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/float_schema_version_unknown.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/bool_schema_version.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/float_location_line.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "location.line"
+    },
+    {
+      "file": "malformed/float_attachment_size.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "attachments[0].size"
+    },
+    {
+      "file": "malformed/float_metrics_value.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "metrics.<key#1>"
+    },
+    {
+      "file": "malformed/unknown_version_with_other_error.json",
+      "expect": "reject",
+      "stage": "version",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/sentinel_unknown_field_name.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "<unknown#1>"
+    },
+    {
+      "file": "malformed/sentinel_nested_unknown_field.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "location.<unknown#1>"
+    },
+    {
+      "file": "malformed/sentinel_map_key.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "metrics.<key#1>"
+    },
+    {
+      "file": "malformed/newline_unknown_field_name.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "<unknown#1>"
+    },
+    {
+      "file": "malformed/long_unknown_field_name.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "<unknown#1>"
     }
   ]
 }

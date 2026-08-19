@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "x",
+  "summary": "s",
+  "blocking": true,
+  "location": {
+    "file": "a.py",
+    "SENTINELghp000": 1
+  }
+}

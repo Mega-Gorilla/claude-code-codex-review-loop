@@ -16,10 +16,10 @@ planningは完了しています。実装は[implementation plan](docs/plans/imp
 | 外部CLI | `gh`。実装が進んだ段階でClaude CodeとCodexのCLI |
 
 ```powershell
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,p001]" -c constraints/p001.txt
 ```
 
-開発用依存は`pyproject.toml`の`[project.optional-dependencies].dev`だけで定義します（直接依存をexact pin。推移依存は固定しません）。runtime依存の方針はP-001で決定し、開発用依存とは分離します。
+開発用依存は`pyproject.toml`の`[project.optional-dependencies].dev`だけで定義します（直接依存をexact pin。推移依存は固定しません）。`p001` extraはP-001比較（ADR-0003）の再現専用で、`constraints/p001.txt`が推移依存まで固定します。runtime依存はゼロです（ADR-0003）。`p001`なしの環境では全testが通りません（評価testが明示的にfailします）。
 
 ## 実行するcheck
 
