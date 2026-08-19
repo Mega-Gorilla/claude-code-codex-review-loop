@@ -86,4 +86,4 @@ PRでは、対応するcomponent IDとPhaseをPR本文へ記載してくださ�
 - 必須は「必須」、推奨は「推奨」、例は「例」と明示する
 - 受入条件は観測可能な1動作を1項目にする
 - 過去の構成や議論の経緯を、現行architectureの記述として残さない
-- version管理対象fileは先頭3行以内に`SPDX-License-Identifier: Apache-2.0`を置く
+- 本project独自のversion管理対象fileは、先頭3行以内に`SPDX-License-Identifier: Apache-2.0`を置く。選択移植した第三者成果物は元licenseのSPDX表示を保持し、`THIRD_PARTY_FILES`へ登録する

@@ -94,8 +94,8 @@ src/claude_code_codex_review_loop/
                             decision / followup / report / merge / action
   process/                  spawn / terminate / job_object / process_group
   policy/                   redaction / permission_profile / trust_rules
-  transport/                gh / conversation / marker / render / threads / ledger_chain
-  identity/                 actor / allowlist / credentials / fs_permissions
+  transport/                gh / conversation / marker / render / threads
+  identity/                 actor / allowlist / record_chain / credentials / fs_permissions
   runtime/                  checkout / codex / host_active / host_headless / prompt
   workflow/                 engine / actions / pr_mode / issue_mode / clarification /
                             decision / followup / qualification / reporter / merge_gate
@@ -218,9 +218,9 @@ C-05が取得した未検証metadataから、検証済みcanonical recordを生�
 
 この残存riskへは、local checkpointだけで対処する。
 
-- sequence番号のhigh-water markと既知のcomment IDをcheckpointへ保存する
-- checkpointが残っている場合は、high-water markより後のrecordが欠落していることと、既知comment IDの消失を検出する
-- checkpointを失った場合、tail truncationは検出できない残存riskとして受け入れる
+- 確認済みの最大sequence番号（high-water mark `N`）と、既知のcomment IDをcheckpointへ保存する
+- checkpointが残っている場合、**`N`以下の範囲**について欠落を検出する。GitHubから再構築した最大sequenceが`N`より小さい場合、既知comment IDが404になる場合、再構築したsequence集合が`N`までの範囲でgapを持つ場合が対象となる
+- `N`より後のrecordはcheckpointへ記録されていないため、存在したかどうかを判定できない。checkpointを失った場合と同様に、この範囲のtail truncationは検出できない残存riskとして受け入れる
 
 **GitHub comment上にmutableなanchor recordを置く方式は採用しない。** 単一commentを更新する方式はController自身の更新が`updatedAt != createdAt`となり編集検知規則と衝突し、append方式は末尾recordと一緒に削除できるため独立した証拠にならない。どちらもMVPで一意な実装にできない。
 
@@ -246,11 +246,11 @@ artifactとtemp fileは、POSIXでは`0600` / `0700`、Windowsでは作成者の
 | AC-C06-04 | `AWAITING_TOOL_PERMISSION`からのresumeが、停止点の操作だけを再実行する |
 | AC-C06-05 | 両OSで、artifact directoryが作成者以外からアクセスできない |
 | AC-C06-06 | 上表の7条件（不正actor、埋め込みmarker、本文改変、編集、中間削除、並べ替え、既知record消失）を個別に検出して`BLOCKED`にする |
-| AC-C06-07 | checkpointが残っている場合、high-water markより後のrecord欠落を検出して`BLOCKED`にする |
-| AC-C06-08 | checkpointが残っている場合、既知comment IDの消失（404）を検出して`BLOCKED`にする |
-| AC-C06-09 | checkpointを失ったfresh resumeでは、suffix truncationを検出せず正常なconversationとして扱う。この限界をtestで明示する |
+| AC-C06-07 | checkpointのhigh-water mark`N`に対し、GitHubから再構築した最大sequenceが`N`より小さい場合、または`N`までの範囲にgapがある場合に、欠落を検出して`BLOCKED`にする |
+| AC-C06-08 | checkpointが保持する既知comment IDが404になった場合に、削除を検出して`BLOCKED`にする。AC-C06-07がsequenceの連続性を、本ACが個々のrecordの実在を扱う |
+| AC-C06-09 | checkpointを失ったfresh resume、およびhigh-water mark`N`より後のrecordが削除された場合は、truncationを検出せず正常なconversationとして扱う。この限界をtestで明示する |
 | AC-C06-10 | Auto modeの利用可否を検出し、利用できない場合は用途に応じて`acceptEdits`（自動化向け）、`default`（対話向け）、`dontAsk`（事前定義した非対話policy）のいずれかを選択する |
-| AC-C06-11 | tool permissionの許可だけでは、mergeとfollow-up Issue作成が実行されない |
+| AC-C06-11 | tool permissionの許可だけでは、merge、follow-up Issue作成、仕様判断（decision approval）のいずれも実行・代行されない |
 
 ### C-07 resumeとretention
 
@@ -369,6 +369,9 @@ cc-review approve-merge <pr> --repo OWNER/REPO --head <sha> --method <merge|squa
 | AC-C14-04 | PR作成後にvalidationが失敗しても、発見済みPRから再開できる |
 | AC-C14-05 | Issueのタイトル、本文、採用対象commentを実装要件として取得する |
 | AC-C14-06 | Issue側とPR側の両方のhandoff recordを確認してからconversation sourceを切り替える |
+| AC-C14-07 | 既存PRがないIssueから`IMPLEMENT_ISSUE`を実行した場合、新しいPRを1件だけ作成する |
+| AC-C14-08 | 作成したPRのrepository、branch、head SHA、Issue referenceを検証してから両側handoffを確定する |
+| AC-C14-09 | PR作成APIの結果が不明な場合、再作成する前に既存PRを検索し、重複PRを作らない |
 
 ### C-15 Plugin配布と任意wrapper
 
@@ -391,7 +394,7 @@ target experienceのSection 4（DOD）とSection 13（MVP）を、componentとPh
 | Requirement | Component | Phase | Acceptance |
 | --- | --- | --- | --- |
 | DOD-01 | C-09 | 9 | AC-C09-01、AC-C09-04 |
-| DOD-02 | C-06、C-08 | 6、8 | AC-C06-06、AC-C08-07 |
+| DOD-02 | C-05、C-06、C-08 | 5、6、8 | AC-C05-01、AC-C06-06、AC-C08-07 |
 | DOD-03 | C-10 | 10 | AC-C10-01 |
 | DOD-04 | C-10 | 10 | AC-C10-05 |
 | DOD-05 | C-12 | 12 | AC-C12-04 |
@@ -405,7 +408,7 @@ target experienceのSection 4（DOD）とSection 13（MVP）を、componentとPh
 | DOD-13 | C-13 | 13 | AC-C13-09 |
 | DOD-14 | C-13 | 13 | AC-C13-10 |
 | MVP-01 | C-10 | 10 | AC-C10-01 |
-| MVP-02 | C-14 | 15 | AC-C14-01、AC-C14-03、AC-C14-05、AC-C14-06 |
+| MVP-02 | C-14 | 15 | AC-C14-01、AC-C14-03、AC-C14-05〜09 |
 | MVP-03 | C-15 | 16 | AC-C15-01 |
 | MVP-04 | C-15 | 16 | AC-C15-01 |
 | MVP-05 | C-08、C-09 | 8、9 | AC-C08-01、AC-C09-03 |
@@ -421,7 +424,7 @@ target experienceのSection 4（DOD）とSection 13（MVP）を、componentとPh
 | MVP-15 | C-03、C-07 | 3、7 | AC-C03-02、AC-C07-01 |
 | MVP-16 | C-15 | 16 | AC-C15-03 |
 | MVP-17 | C-15 | 16 | AC-C15-04、AC-C15-05、AC-C15-07 |
-| MVP-18 | C-12、C-13 | 12、13 | AC-C12-05、AC-C13-06、AC-C13-10 |
+| MVP-18 | C-12、C-13 | 12、13 | AC-C12-05、AC-C13-06、AC-C13-08、AC-C13-09、AC-C13-10 |
 | MVP-19 | C-12 | 12 | AC-C12-07 |
 | MVP-20 | C-11 | 11 | AC-C11-01、AC-C11-07 |
 | MVP-21 | C-01、C-05、C-06、C-07 | 1、5、6、7 | AC-C01-03、AC-C05-01、AC-C06-06、AC-C07-01 |
@@ -439,7 +442,7 @@ target experienceのSection 4（DOD）とSection 13（MVP）を、componentとPh
 | D-015 | reviewerをturnごとにfresh起動する | C-09 |
 | D-028 | merge承認に固定commandを併用し、3引数を必須にする | C-13 |
 | D-029 | 検証対象をMSI installer配布のPowerShell 7に限定する | C-03、C-15 |
-| D-030 | transportのinterfaceを新設し、再利用はcomponent単位で評価する | C-05 |
+| D-030 | transportのinterfaceを新設し、再利用はcomponent単位で評価する。新しいpublic transport boundaryはraw I/OとrecordのC-05 / C-06にまたがる | C-05、C-06 |
 | D-031 | ユーザー判断の受理をlogin allowlistの完全一致に限る | C-06 |
 
 ## 7. Deviations from target experience
@@ -485,7 +488,7 @@ runtime依存をゼロに保つか、schema検証にlibraryを導入するかを
 | 12 | qualificationとfinal reporter | C-12 | AC-C12-01〜07 | test command / result、GitHub check名 / result / URL、artifact path |
 | 13 | human merge gate | C-13 | AC-C13-01〜10 | merge gate intent、approved head SHA、入力経路、approval comment ID、merge method、API結果、merged commit SHA |
 | 14 | retention、migration、salvage | C-07 | AC-C07-04。全fieldがenvelope schemaと整合し、旧versionがmigrationで読める | 横断検証。新規fieldは追加しない |
-| 15 | Issue modeとhandoff | C-14 | AC-C14-01〜06 | Issue番号、handoff record、conversation source切替状態 |
+| 15 | Issue modeとhandoff | C-14 | AC-C14-01〜09 | Issue番号、handoff record、conversation source切替状態 |
 | 16 | Plugin配布と任意wrapper | C-15 | AC-C15-01〜07 | wrapper session ID、監視pane状態 |
 | 17 | release acceptance | 全体 | 下記scenario matrix（S-1〜S-9） | — |
 
@@ -505,7 +508,7 @@ runtime依存をゼロに保つか、schema検証にlibraryを導入するかを
 | --- | --- | --- | --- |
 | S-1 | Windows、active Skill、PR mode、承認してmerge | `MERGED` | review record、対応summary、final reportの4出力、approval record、merged commit SHAの再確認 |
 | S-2 | Windows、headless CLI、PR mode | `READY_FOR_HUMAN_MERGE` | S-1と同じ種類のrecordが同じ形式で残る（AC-C08-04） |
-| S-3 | Linux/SSH、active Skill、Issue mode | `READY_FOR_HUMAN_MERGE` | Issue / PR双方向のhandoff record、review履歴 |
+| S-3 | Linux/SSH、active Skill、Issue mode（既存PRなし） | `READY_FOR_HUMAN_MERGE` | 新規PRが1件だけ作成されたこと、Issue / PR双方向のhandoff record、review履歴 |
 | S-4 | Linux/SSH、`tmux`内でSSH切断、判断地点へ到達 | `AWAITING_USER_DECISION` | decision briefが投稿・確認済み。processが無期限待機していない |
 | S-5 | S-4から再接続してresume | `READY_FOR_HUMAN_MERGE` | 同一run IDで継続し、重複run・重複commentが無い |
 | S-6 | wrapper未導入環境でPR mode | `READY_FOR_HUMAN_MERGE` | wrapperなしでもS-1と同じrecordが残る |

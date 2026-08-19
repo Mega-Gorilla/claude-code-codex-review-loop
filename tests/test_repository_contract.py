@@ -20,8 +20,9 @@ VERSIONED_SUFFIXES = frozenset(
     {".md", ".py", ".toml", ".yml", ".yaml", ".ps1", ".sh", ".psm1", ".psd1"}
 )
 
-# 選択移植した第三者成果物。ADR-0002のSelective porting policyに従い、
-# path、適用SPDX ID、出典を登録する。登録fileはApache-2.0を強制しない。
+# 選択移植した第三者成果物のpathと、保持する元licenseのSPDX ID。
+# 登録fileはApache-2.0を強制しない。出典、理由、適用license、移植後testは、
+# ADR-0002のSelective porting policyに従い移植PRへ記録する。
 THIRD_PARTY_FILES: dict[str, str] = {}
 
 
