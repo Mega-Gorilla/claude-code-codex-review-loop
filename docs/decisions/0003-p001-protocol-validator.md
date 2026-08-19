@@ -31,6 +31,20 @@ target experienceはCodex出力のschema検証を要求し、implementation plan
 - CIはUbuntu / Windows × Python 3.11で毎回この検証を実行する。初回評価はWindows 11 / Python 3.13.5でも実施した
 - install sizeは`importlib.metadata`のdistribution file合計で測定（上記5 package合計 約2.3 MB）。性能はcorpus全件50回反復の平均（warm、単一機測定）で3.2 ms対4.5 msの参考値であり、決定要因にしない
 
+### 候補2（jsonschema）の保守状態の記録
+
+| 項目 | 値 |
+| --- | --- |
+| 評価日 | 2026-08-19 |
+| 評価version | 4.26.0 |
+| License | MIT（`License-Expression`で確認） |
+| Python対応 | `Requires-Python: >=3.10`（package metadataで確認） |
+| 配布形態 | main packageはpure Python wheel。推移依存`rpds-py`はplatform別のcompiled wheel |
+| 直接依存 | `attrs`、`jsonschema-specifications`、`referencing`、`rpds-py`（評価時の解決versionは「再現方法」節に記録） |
+| primary source | <https://pypi.org/project/jsonschema/>、<https://github.com/python-jsonschema/jsonschema> |
+| release・保守状況 | 評価時点でPyPIの最新releaseは4.26.0であり、repositoryは活発に保守されている。release頻度と最新状況は上記primary sourceで確認する |
+| security advisory確認先 | GitHub Security Advisories（上記repository）およびPyPIのadvisory表示 |
+
 ### Must-have条件（不合格なら点数に関係なく不採用）
 
 Windows / Linuxで同一結果 / representative全受理 / malformed全拒否とstage分類一致 / error path特定 / untrusted入力でcrashしない / 決定性 / license適合 / Python 3.11対応。
