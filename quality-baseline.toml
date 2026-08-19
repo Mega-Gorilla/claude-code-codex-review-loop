@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# 品質ゲートのbaseline。変更は必ずPR diffとして現れる。
+# 値を緩める（floorの引き下げ、上限の引き上げ）場合は、PRへ理由の記載を必須とする。
+# 運用手順はCONTRIBUTING.mdの「品質ゲートの運用」を参照。
+
+[coverage]
+# branch coverageのfloor（%）。これを下回るとCIがfailする。
+floor = 100
+
+[module-size]
+# fileごとの行数上限。git管理下の全.pyは登録必須で、未登録・stale登録はCIがfailする。
+# baselineは登録時点の実測行数とし、headroomを設けない。増加はこのfileの変更として
+# PR diffへ現れるため、理由をPRへ記載する。生成fileは現状存在しない（導入時に除外listを追加）。
+"src/claude_code_codex_review_loop/__init__.py" = 5
+"tests/test_repository_contract.py" = 181
+"tests/test_quality_gates.py" = 116
+"tests/test_version_integrity.py" = 68

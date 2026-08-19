@@ -18,13 +18,16 @@ planningは完了し（target experienceとimplementation planは承認済み）
 ## Commands
 
 ```powershell
-python -m pip install -e . pytest   # 開発環境の準備（Python >= 3.11）
+python -m pip install -e ".[dev]"   # 開発環境の準備（Python >= 3.11）
 python -m pytest -q                 # 全test
+python -m ruff check .              # lint
+python -m mypy                      # type check（src対象、strict）
+python -m coverage run -m pytest -q; python -m coverage combine; python -m coverage report   # coverage（floorはquality-baseline.toml）
 python -m pytest tests/test_repository_contract.py::test_project_identity_is_consistent -q   # 単体test
 git diff --check origin/main...HEAD # CIと同じwhitespace check
 ```
 
-CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3.11で全testと`git diff --check`を実行します。lint（ruff）とtype check（mypy）はPhase 0で導入予定で、導入後は`CONTRIBUTING.md`とこの節へcommandを追記してください。
+CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3.11でlint、type check、coverage付き全test、coverage floor、`git diff --check`を実行します。品質baselineは`quality-baseline.toml`でversion管理し、緩める変更にはPRへの理由記載が必要です（CONTRIBUTING「品質ゲートの運用」）。
 
 ## Repository contract（testが強制する規約）
 
