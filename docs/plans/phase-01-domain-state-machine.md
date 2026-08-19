@@ -21,9 +21,9 @@ target experienceの「State model」節が定義する17 stateと、「User int
 | 実装のcode registry | **実行可能な単一source**。全ruleをdataとして保持する |
 | 生成された遷移表・遷移図 | code registryから導出し、本書の表とのsnapshot照合をtestで行う（AC-C01-01） |
 
-**registryの一意性不変条件**: guardは自由なpredicateではなく、**有限のtyped discriminator**（Section 2の`awaiting`値、`pending_record`のkind / binding一致、`progress`値、`block`のkind / reason、`cancelling` / `return_to` / `recovery_to`の有無）に限定する。到達可能なMachineState付随値の各組合せ × 各eventに対し、一致するruleは**0件または1件**である。共通規則（cancel / failure / progress / integrity等）はregistry内で個別ruleへ展開され、重複・overlapはdiscriminator全値の展開により機械的に検査してfailさせる。優先順位による解決は行わない（AC-C01-08）。
+**registryの一意性不変条件**: guardは自由なpredicateではなく、**有限のtyped discriminator**（Section 2の`awaiting`値、`pending_record`のkind / binding一致、`progress`値、`block`のkind / reason、`cancelling` / `return_to` / `recovery_to` / `deferred_integrity`の有無とbinding一致）に限定する。到達可能なMachineState付随値の各組合せ × 各eventに対し、一致するruleは**0件または1件**である。共通規則（cancel / failure / progress / integrity等）はregistry内で個別ruleへ展開され、重複・overlapはdiscriminator全値の展開により機械的に検査してfailさせる。優先順位による解決は行わない（AC-C01-08）。
 
-**付随値の組合せ不変条件**: `recovery_to`があるのは`FAILED`のみ、`block`があるのは`BLOCKED`とintegrity halt gate中（Section 3.5.1）のみ、`return_to`があるのは`AWAITING_TOOL_PERMISSION`（およびそこからのcancel / failure保全中）のみ。`recovery_to`と`block`は**排他**。各遷移ruleは進入元固有のresume metadata（`recovery_to` / `return_to` / 旧`block`）を明示的に引き継ぐか破棄し、到達可能な全MachineStateでこの不変条件をtestで検査する。
+**付随値の組合せ不変条件**: `recovery_to`があるのは`FAILED`のみ、`block`があるのは`BLOCKED`とintegrity halt gate中（Section 3.5.1）のみ、`return_to`があるのは`AWAITING_TOOL_PERMISSION`（およびそこからのcancel / failure保全中）のみ、`deferred_integrity`があるのは`MERGING`のoutcome段階と`cancelling`中のみ。`recovery_to`と`block`は**排他**。`deferred_integrity`はblock化・terminal監査記録のいずれかで必ず消費され、silentに破棄されない。各遷移ruleは進入元固有のresume metadata（`recovery_to` / `return_to` / 旧`block`）を明示的に引き継ぐか破棄し、到達可能な全MachineStateでこの不変条件をtestで検査する。
 
 ## 2. MachineState
 
@@ -36,6 +36,7 @@ MachineState（frozen）
   recovery_to: State | None          # EV_RUN_FAILEDで入ったFAILEDの安全な再開地点
   block: BlockContext | None         # BLOCKED（またはintegrity halt gate中）の停止理由・解消policy・（あれば）継続
   cancelling: CancelAttempt | None   # 進行中のcancel attempt（停止・checkpoint完了待ち）
+  deferred_integrity: IntegrityEvidenceRef | None  # 検出済みだが処理を保留中のintegrity violation（Section 3.5.1）
   awaiting: Awaiting | None          # 発行済みcommandに対応する「次に受理してよい応答」の期待値
   pending_record: PendingRecord | None  # 永続化の確認待ちrecord
 
@@ -51,6 +52,8 @@ BlockContext（frozen）
   evidence: RecordRef | IntegrityEvidenceRef | None  # EXTERNAL_DEPENDENCYは検出record参照、RECORD_INTEGRITYは違反の記述
 
 IntegrityEvidenceRef（frozen）
+  binding: OpaqueBinding             # violation / block attemptのbinding。C-06が生成・検証し、同一違反の再検出は
+                                     # 同じbinding（冪等に同一attempt）、別違反は別bindingになる
   # 参照可能なrecordが存在しない違反（削除・sequence gap）も表現できる一般形。
   # 404 / 欠落sequence位置 / 改変前後のbody hash等をopaqueに保持し、C-01は解釈しない
 
@@ -115,7 +118,7 @@ RecordEvidence（frozen）
 2. 応答eventは、`awaiting`が当該応答を受理する値である場合**のみ**受理され、受理時に`awaiting`を**消費**または次の期待値へ**更新**する
 3. `awaiting`不一致・消費済み再入力・順序飛ばしは**構造化errorで拒否**される
 4. 例外として`awaiting`に関わらず受理されるのは、`EV_RUN_FAILED`（共通規則）、`USER_CANCEL`（Section 3.3）、`EV_CANCELLATION_COMPLETED`（binding guard）、`EV_RECORD_INTEGRITY_VIOLATION_DETECTED`（Section 3.5.1。`MERGING`はawaiting別の専用rule）、resume系のみ
-5. **`cancelling`または`awaiting = HALT_FOR_BLOCK`の保持中**は、対応するhalt完了event（binding一致）と`EV_RUN_FAILED`以外の全semantic eventを拒否する。**この間の`EV_RUN_FAILED`と明示resumeは状態・付随値を維持し、`CMD_HALT_RUN(binding)`の再発行だけを返す**（Section 4.1の横断規則）
+5. **`cancelling`または`awaiting = HALT_FOR_BLOCK`の保持中**は、対応するhalt完了event（binding一致）と`EV_RUN_FAILED`、および`EV_RECORD_INTEGRITY_VIOLATION_DETECTED`（`deferred_integrity`への記録と承認失効のみ行い、状態を変えない。Section 3.5.1）以外の全semantic eventを拒否する。**この間の`EV_RUN_FAILED`と明示resumeは状態・付随値を維持し、`CMD_HALT_RUN(binding)`の再発行だけを返す**（Section 4.1の横断規則）
 
 ## 3. Record体系
 
@@ -196,14 +199,26 @@ RecordEvidence（frozen）
 
 ### 3.5.1 RECORD_INTEGRITYの進入（検出時の安全規則）
 
-`EV_RECORD_INTEGRITY_VIOLATION_DETECTED(evidence: IntegrityEvidenceRef)`はC-06が発する（AC-C06-06〜08: canonical commentの改変・削除・sequence gap）。**進入はstateの種類で分かれ、merge安全とprocess停止を優先する**:
+`EV_RECORD_INTEGRITY_VIOLATION_DETECTED(evidence: IntegrityEvidenceRef)`はC-06が発する（AC-C06-06〜08: canonical commentの改変・削除・sequence gap）。`evidence.binding`がviolation / block attemptのbindingになる（同一違反の再検出は同じbindingで冪等、別違反は別binding）。**受理する全経路で`CMD_INVALIDATE_APPROVALS`（冪等）を即時発行**し、「改変された決定は失効する」契約を遅延させない。進入はstateの種類で分かれ、merge安全とprocess停止を優先する:
 
-1. **`MERGING`でmerge実行後または成否不明（awaiting = `MERGE_OUTCOME(*)`）**: `BLOCKED`にしない。`MERGING`と`awaiting`を維持し`CMD_QUERY_MERGE_OUTCOME`を発行する（**outcome確定が最優先**。integrity対応はoutcome確定後（`MERGED` / `MERGE_FAILED`）にC-06が本eventを再入力して行う）
-2. **`MERGING`のpreconditions段階（awaiting = `MERGE_PRECONDITIONS`）**: mergeを実行せず安全停止する。`BLOCKED`へ遷移し、`block := RECORD_INTEGRITY context`、`CMD_INVALIDATE_APPROVALS`を発行（awaiting破棄により以後の`EV_MERGE_PRECONDITIONS_OK`はguard不一致で拒否される）
-3. **active state（`MERGING`を除く6 state）**: 実行中のCodex / Claude / test processを残さないため、**halt gateを経由**する。状態を維持したまま`block := RECORD_INTEGRITY context`を設定し、`pending_record` / 旧`awaiting`を破棄して`CMD_HALT_RUN(block.binding)`を発行、`awaiting := HALT_FOR_BLOCK`。binding一致の`EV_BLOCK_HALT_COMPLETED`で`BLOCKED`へ遷移する（実行中processが無ければC-08が即時返す）
-4. **resumable state（8 state）**: agent processを伴わないため直接`BLOCKED`へ遷移する（`cancelling`中はlifecycle規則5が優先し、cancel完了後にC-06が再入力する）
+1. **`MERGING`でmerge実行後または成否不明（awaiting = `MERGE_OUTCOME(*)`）**: `BLOCKED`にしない。`MERGING`と`awaiting`を維持し、**`deferred_integrity := evidence`を保存**して`CMD_INVALIDATE_APPROVALS`と`CMD_QUERY_MERGE_OUTCOME`を発行する（**outcome確定が最優先**）。以後のoutcome確定ruleは`deferred_integrity`をguardにSection 3.5.2で処理し、**外部componentによるterminal後の再入力には依存しない**
+2. **`MERGING`のpreconditions段階（awaiting = `MERGE_PRECONDITIONS`）**: mergeを実行せず安全停止する。`BLOCKED`へ遷移し、`block := RECORD_INTEGRITY context`、`CMD_INVALIDATE_APPROVALS`を発行
+3. **active state（`MERGING`を除く6 state）**: **halt gateを経由**する。状態を維持したまま`block := RECORD_INTEGRITY context`を設定し、`pending_record` / 旧`awaiting`を破棄して`CMD_INVALIDATE_APPROVALS`と`CMD_HALT_RUN(block.binding)`を発行、`awaiting := HALT_FOR_BLOCK`。binding一致の`EV_BLOCK_HALT_COMPLETED`で`BLOCKED`へ遷移する
+4. **resumable state（8 state、`cancelling`なし）**: agent processを伴わないため直接`BLOCKED`へ遷移し、`CMD_INVALIDATE_APPROVALS`を発行する
+5. **`cancelling`中（stateを問わず）**: 状態と停止処理を変えず、**`deferred_integrity := evidence`の記録と`CMD_INVALIDATE_APPROVALS`のみ**を行う。処理はSection 3.5.2のcancel完了ruleが引き継ぐ
 
-**いずれの進入でも、`recovery_to` / `return_to` / 旧`block`を破棄**し、付随値の組合せ不変条件（Section 1）を保つ。解消・fallbackで`BLOCKED`を出るruleも、消費済み`block`と不要なresume metadataを確実に消去する。
+**いずれの進入でも、`recovery_to` / `return_to` / 旧`block`を破棄**し（1と5は現在の処理を維持するため破棄せず`deferred_integrity`のみ追加）、付随値の組合せ不変条件（Section 1）を保つ。`deferred_integrity`保持中に同一bindingの再検出が来た場合は冪等に維持し、別bindingの新violationは`CMD_RECORD_INTEGRITY_INCIDENT`で即時監査記録して先着の`deferred_integrity`を維持する。
+
+### 3.5.2 deferred_integrityの終端処理（検出済み違反をsilentに失わない）
+
+`deferred_integrity`保持中のoutcome / cancel確定ruleは、通常のruleとguardで分離され、次を一意に決める。
+
+- **merge完了（`EV_MERGE_CONFIRMED`、deferredあり）**: mergeは実際に完了しているため`MERGED`を偽らない。`MERGED`へ遷移し、**`CMD_RECORD_INTEGRITY_INCIDENT(evidence)`（差分提示と監査記録。C-06 / C-07）と`CMD_INVALIDATE_APPROVALS`をterminal遷移のcommand列に含めて**発行する（terminal後のevent再入力に依存しない）
+- **merge未実行確認・不明（`EV_MERGE_NOT_EXECUTED_CONFIRMED`（failure起点）/ `EV_MERGE_OUTCOME_UNKNOWN`、deferredあり）**: `MERGE_FAILED`ではなく**`BLOCKED`（`block := RECORD_INTEGRITY context`、binding = deferred evidence）**へ遷移し、`CMD_RECORD_INTEGRITY_INCIDENT`を発行する。これにより`MERGE_FAILED`の通常resume（`EV_RESUME_SAME_HEAD_VALIDATED`）でintegrity gateを迂回できない
+- **cancel起点のmerge未実行確認（deferredあり）**: ユーザーのcancel意思を尊重して`CANCELLED`へ遷移するが、**`CMD_RECORD_INTEGRITY_INCIDENT`と`CMD_INVALIDATE_APPROVALS`を伴い**、検出済み違反を監査記録へ残す（新runのpreflight / chain検証が違反に直面する）
+- **cancel停止完了（`EV_CANCELLATION_COMPLETED`、deferredあり）**: 同上 — `CANCELLED`へ遷移するが、incident記録と承認失効を伴う。**検出済みintegrityを破棄して無条件に`CANCELLED`へ進むことはない**
+
+`deferred_integrity`はこれらのruleで必ず消費される（block化またはterminal監査記録）。
 
 ### 3.6 cancelの2系統（いずれも停止完了後にのみCANCELLEDへ入る）
 
@@ -227,7 +242,7 @@ cancel中の安全規則: `cancelling`保持中はbinding一致の完了eventと
 | `EV_HEAD_CHANGED_EXTERNALLY` | 外部からのhead更新を検出 | C-07 |
 | `EV_CANCELLATION_COMPLETED` | cancel時のprocess停止とcheckpoint保存の完了（binding付き） | C-08 |
 | `EV_BLOCK_HALT_COMPLETED` | integrity halt gateのprocess停止とcheckpoint保存の完了（`block.binding`一致） | C-08 |
-| `EV_RECORD_INTEGRITY_VIOLATION_DETECTED` | canonical commentの改変・削除・sequence gapの検出（`IntegrityEvidenceRef`付き） | C-06 |
+| `EV_RECORD_INTEGRITY_VIOLATION_DETECTED` | canonical commentの改変・削除・sequence gapの検出（violation bindingを含む`IntegrityEvidenceRef`付き） | C-06 |
 | `EV_BLOCK_RESOLVED_LIMIT_RAISED` | limit設定がsnapshot超に引き上げられたことの検証（`BlockResolutionEvidence`） | C-10 / C-11 |
 | `EV_BLOCK_RESOLVED_INTERVENTION` | user-input record `BLOCK_INTERVENTION`のcanonical検証（`BlockResolutionEvidence`） | C-06 / C-11 |
 | `EV_INTEGRITY_RESTORED_VALIDATED` | canonical chainの整合性復元と同一chainの再検証（`BlockResolutionEvidence`） | C-06 / C-07 |
@@ -247,7 +262,8 @@ cancel中の安全規則: `cancelling`保持中はbinding一致の完了eventと
 | `CMD_HALT_RUN(binding)` | active process treeの停止とcheckpoint保存（cancel attemptまたはblock attemptへbind） | C-03 / C-08 |
 | `CMD_VERIFY_MERGE_PRECONDITIONS` / `CMD_QUERY_MERGE_OUTCOME` | merge直前再検証 / 結果照会 | C-13 |
 | `CMD_EXECUTE_MERGE` | **`awaiting = MERGE_PRECONDITIONS`の消費を伴うSection 5の#34でのみ発行される**merge実行 | C-13 |
-| `CMD_INVALIDATE_APPROVALS` | review / merge承認の失効 | C-07 |
+| `CMD_INVALIDATE_APPROVALS` | review / merge承認の失効（**冪等**であることをC-07へ要求する） | C-07 |
+| `CMD_RECORD_INTEGRITY_INCIDENT(evidence)` | integrity violationの差分提示と監査記録 | C-06 / C-07 |
 
 commandは記述のみでC-01は実行しない。command列の順序は決定論的で、条件分岐の意味は無い。
 
@@ -339,23 +355,27 @@ commandは記述のみでC-01は実行しない。command列の順序は決定�
 | 34 | `MERGING` | `EV_MERGE_PRECONDITIONS_OK` | awaiting = `MERGE_PRECONDITIONS` | `MERGING` | **`CMD_EXECUTE_MERGE`（この経路でのみ発行）**; awaiting := `MERGE_OUTCOME(EXECUTE)` |
 | 35 | `MERGING` | `EV_MERGE_PRECONDITION_MISMATCH` | awaiting = `MERGE_PRECONDITIONS` | `MERGE_FAILED` | — |
 | 36 | `MERGING` | `EV_HEAD_CHANGED_EXTERNALLY` | awaiting = `MERGE_PRECONDITIONS` | `RUNNING_REVIEW` | `CMD_INVALIDATE_APPROVALS`、`CMD_REQUEST_CODEX_REVIEW(CODE_REVIEW)`; awaiting := `CODEX(CODE_REVIEW)` |
-| 37 | `MERGING` | `EV_MERGE_CONFIRMED` | awaiting = `MERGE_OUTCOME(*)` | `MERGED` | — |
-| 38 | `MERGING` | `EV_MERGE_NOT_EXECUTED_CONFIRMED` | awaiting = `MERGE_OUTCOME(CANCEL)` | `CANCELLED` | — |
-| 39 | `MERGING` | `EV_MERGE_NOT_EXECUTED_CONFIRMED` | awaiting = `MERGE_OUTCOME(FAILURE)` | `MERGE_FAILED` | — |
-| 40 | `MERGING` | `EV_MERGE_OUTCOME_UNKNOWN` | awaiting = `MERGE_OUTCOME(*)` | `MERGE_FAILED` | — |
+| 37 | `MERGING` | `EV_MERGE_CONFIRMED` | awaiting = `MERGE_OUTCOME(*)`、deferredなし | `MERGED` | — |
+| 38 | `MERGING` | `EV_MERGE_NOT_EXECUTED_CONFIRMED` | awaiting = `MERGE_OUTCOME(CANCEL)`、deferredなし | `CANCELLED` | — |
+| 39 | `MERGING` | `EV_MERGE_NOT_EXECUTED_CONFIRMED` | awaiting = `MERGE_OUTCOME(FAILURE)`、deferredなし | `MERGE_FAILED` | — |
+| 40 | `MERGING` | `EV_MERGE_OUTCOME_UNKNOWN` | awaiting = `MERGE_OUTCOME(*)`、deferredなし | `MERGE_FAILED` | — |
 | 41 | `MERGING` | `EV_USER_CANCEL_VERIFIED` | evidence検証済み | `MERGING` | `CMD_QUERY_MERGE_OUTCOME`; awaiting := `MERGE_OUTCOME(CANCEL)` |
 | 42 | `MERGING` | `EV_RUN_FAILED` | — | `MERGING` | `CMD_QUERY_MERGE_OUTCOME`; awaiting := `MERGE_OUTCOME(FAILURE)` |
 | 43 | `APPLYING_FIXES` | `EV_EXTERNAL_DEPENDENCY_VERIFIED` | evidence一致 | `BLOCKED` | —（`block := EXTERNAL_DEPENDENCY context`、continuation = (APPLYING_FIXES, APPLY_FINDINGS依頼, `HOST(APPLY_FINDINGS)`)） |
 | 44 | `MERGING` | `EV_RECORD_INTEGRITY_VIOLATION_DETECTED` | awaiting = `MERGE_PRECONDITIONS` | `BLOCKED` | `CMD_INVALIDATE_APPROVALS`（`block := RECORD_INTEGRITY context`。merge未実行で安全停止） |
-| 45 | `MERGING` | `EV_RECORD_INTEGRITY_VIOLATION_DETECTED` | awaiting = `MERGE_OUTCOME(*)` | `MERGING` | `CMD_QUERY_MERGE_OUTCOME`（awaiting維持。**outcome確定が最優先**。integrity対応は確定後にC-06が再入力） |
+| 45 | `MERGING` | `EV_RECORD_INTEGRITY_VIOLATION_DETECTED` | awaiting = `MERGE_OUTCOME(*)` | `MERGING` | `CMD_INVALIDATE_APPROVALS`、`CMD_QUERY_MERGE_OUTCOME`（awaiting維持。**deferred_integrity := evidence**。outcome確定はSection 3.5.2のdeferred付きruleが処理） |
+| 46 | `MERGING` | `EV_MERGE_CONFIRMED` | awaiting = `MERGE_OUTCOME(*)`、**deferredあり** | `MERGED` | `CMD_RECORD_INTEGRITY_INCIDENT(evidence)`、`CMD_INVALIDATE_APPROVALS`（mergeの完了は偽らず、監査記録と失効を伴って終了） |
+| 47 | `MERGING` | `EV_MERGE_NOT_EXECUTED_CONFIRMED` | awaiting = `MERGE_OUTCOME(CANCEL)`、**deferredあり** | `CANCELLED` | `CMD_RECORD_INTEGRITY_INCIDENT(evidence)`、`CMD_INVALIDATE_APPROVALS` |
+| 48 | `MERGING` | `EV_MERGE_NOT_EXECUTED_CONFIRMED` | awaiting = `MERGE_OUTCOME(FAILURE)`、**deferredあり** | `BLOCKED` | `CMD_RECORD_INTEGRITY_INCIDENT(evidence)`（`block := RECORD_INTEGRITY context`（binding = deferred evidence）。`MERGE_FAILED`の通常resumeでintegrity gateを迂回させない） |
+| 49 | `MERGING` | `EV_MERGE_OUTCOME_UNKNOWN` | awaiting = `MERGE_OUTCOME(*)`、**deferredあり** | `BLOCKED` | `CMD_RECORD_INTEGRITY_INCIDENT(evidence)`（同上） |
 
 **共通規則**（registry内で個別ruleへ展開）:
 
 - **progress共通規則**: budget表の5 eventで`LIMIT_REACHED` / `NO_PROGRESS` -> `BLOCKED`（`block := PROGRESS context`）、commandなし
-- **integrity共通規則**（Section 3.5.1）: `EV_RECORD_INTEGRITY_VIOLATION_DETECTED`は、active state（`MERGING`除く6 state）では状態維持 + `block`設定 + pending / 旧awaiting破棄 + `CMD_HALT_RUN`（awaiting := `HALT_FOR_BLOCK`）。resumable stateでは直接`BLOCKED`。いずれも`recovery_to` / `return_to` / 旧`block`を破棄。`MERGING`は#44 / #45。`cancelling`中はlifecycle規則5が優先
+- **integrity共通規則**（Section 3.5.1）: `EV_RECORD_INTEGRITY_VIOLATION_DETECTED`は**全経路で`CMD_INVALIDATE_APPROVALS`（冪等）を即時発行**する。active state（`MERGING`除く6 state）では状態維持 + `block`設定 + pending / 旧awaiting破棄 + `CMD_HALT_RUN`（awaiting := `HALT_FOR_BLOCK`）。resumable state（`cancelling`なし）では直接`BLOCKED`。いずれも`recovery_to` / `return_to` / 旧`block`を破棄。`MERGING`は#44 / #45。`cancelling`中は`deferred_integrity`への記録と失効のみ（状態不変）
 - `EV_BLOCK_HALT_COMPLETED`: awaiting = `HALT_FOR_BLOCK`かつ`block.binding`一致で`BLOCKED`へ（不一致は構造化error）
 - `EV_USER_CANCEL_VERIFIED`: terminalと`MERGING`（#41）を除く全stateで同一state維持、`cancelling`設定 + `CMD_HALT_RUN(binding)`のみ、awaiting := `HALT_FOR_CANCEL`
-- `EV_CANCELLATION_COMPLETED`: terminalと`MERGING`を除く全stateから`CANCELLED`へ（binding guard。全付随値破棄）
+- `EV_CANCELLATION_COMPLETED`: terminalと`MERGING`を除く全stateから`CANCELLED`へ（binding guard）。**`deferred_integrity`保持中は`CMD_RECORD_INTEGRITY_INCIDENT(evidence)`と`CMD_INVALIDATE_APPROVALS`を伴い、検出済み違反を破棄せず監査記録へ残す**（Section 3.5.2）。その他の付随値は破棄
 - `EV_RUN_FAILED`: terminal・`MERGING`（#42）・resumable state・halt gate中（横断規則）を除くactive stateから`FAILED`へ（`recovery_to` := 進入元。pending / awaiting / cancelling引継）
 - resumable state + `EV_RUN_FAILED`: 同一state維持・全付随値保持
 - terminalは全event拒否。未定義`(state, event, guard値)`は構造化errorで拒否（AC-C01-02）
@@ -377,7 +397,7 @@ commandは記述のみでC-01は実行しない。command列の順序は決定�
 - **awaiting順序**: `CMD_EXECUTE_MERGE`は#34のみ、順序飛ばし・重複・不一致拒否
 - **bounded-progress**（AC-C01-09）: budget対応のregistry導出、3 round系列（二重計上なし）、5回目許可・6回目停止、共通counter、loop終了結果の処理
 - **block解消gate**（AC-C01-11）: 単純resumeのcommandなし維持（3 kind）。`BlockResolutionEvidence`の完全一致。**同じtargetへの別intervention record（1回目のみ受理）/ 別blockを指すrecord（target不一致で拒否）/ 同一recordのreplay（record規約で拒否）を分けて検査**。`BLOCK_INTERVENTION`の2経路同値性
-- **integrity**（AC-C01-12）: `MERGING`の3つのawaiting値それぞれでの検出系列（preconditions段階 -> 安全停止 + 承認失効、outcome段階 -> 照会維持で`MERGED` / `MERGE_FAILED`確定、EXECUTE後にoutcome情報を失わない）。active 6 stateでhalt gate経由（`EV_BLOCK_HALT_COMPLETED`まで`BLOCKED`にならない）。resumable stateで直接`BLOCKED`。進入時の`recovery_to` / `return_to` / 旧`block`破棄。**generic fallbackで未修復chainからfresh reviewを起動できない**こと（専用evidenceのみが出口）
+- **integrity**（AC-C01-12）: `MERGING`の3つのawaiting値それぞれで、検出から終端までの**end-to-end系列**を検査する — preconditions段階は安全停止 + 承認失効、outcome段階は`deferred_integrity`保存 + 照会維持のうえ、`EV_MERGE_CONFIRMED`（-> `MERGED` + incident記録 + 失効）/ failure起点の未実行確認・不明（-> `BLOCKED`。`MERGE_FAILED`経由の通常resumeでgateを迂回できない）/ cancel起点の未実行確認（-> `CANCELLED` + incident記録）の全分岐で**同じevidenceが最終状態または安全停止まで保持される**こと。`cancelling`中の検出 -> `EV_CANCELLATION_COMPLETED`の系列で違反が破棄されず監査記録されること。**受理する全経路で`CMD_INVALIDATE_APPROVALS`が即時発行される**こと。active 6 stateでhalt gate経由（`EV_BLOCK_HALT_COMPLETED`まで`BLOCKED`にならない）。resumable stateで直接`BLOCKED`。進入時の`recovery_to` / `return_to` / 旧`block`破棄。**generic fallbackで未修復chainからfresh reviewを起動できない**こと（専用evidenceのみが出口）。**404 / sequence gap / hash mismatchの各種別で、同一違反の再検出が同じbindingとして冪等に扱われ、別違反が別attemptになる**こと
 - **cancel / 緊急停止**（AC-C01-10）: 完了event前のterminal化禁止、`cancelling`中のstale pending拒否、全8 resumable stateのcancel -> halt失敗 -> resumeでhalt再発行のみ、binding不一致完了event拒否、`MERGING`照会経由
 - **preflight NG**: resume系event拒否（新runの`initialize`のみ）
 - user-input record 6種の2経路同値性、resume系列end-to-end、decision flow会話順序系列
@@ -393,3 +413,4 @@ commandは記述のみでC-01は実行しない。command列の順序は決定�
 7. **integrityの検出時安全**（round 7）: `MERGING`ではoutcome確定を最優先し、preconditions段階では承認失効付きで安全停止。active stateではhalt gate（`HALT_FOR_BLOCK`）でprocess停止完了後にのみ`BLOCKED`へ入る
 8. **cancelの2系統・停止完了gate・attempt binding**（round 2〜6）: `USER_CANCEL` record bindingの再利用、横断resume規則
 9. **preflight NGの復帰**（round 6）: resume系event拒否、新runの`initialize`のみ
+10. **deferred_integrityと即時失効**（round 8）: outcome段階・cancel中に検出したintegrity violationは`deferred_integrity`としてMachineStateに保持し、terminal後の再入力に依存せずoutcome / cancel確定ruleが必ず消費する（block化またはterminal監査記録 + 承認失効）。violation bindingは`IntegrityEvidenceRef`にC-06が持たせ、同一違反の再検出は冪等。`CMD_INVALIDATE_APPROVALS`（冪等）は検出を受理する全経路で即時発行する
