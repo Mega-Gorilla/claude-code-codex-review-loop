@@ -153,13 +153,14 @@ src/claude_code_codex_review_loop/
 - **`BLOCKED` / `FAILED`からの一律fresh reviewは採らない**。進入時のruleが`recovery_to`を設定し（`pending_record` / `awaiting`は変更せず引き継ぐ）、resume preflight成功でそこへ復帰する。head変更・checkpoint不整合等で安全を証明できない場合のみfresh reviewへfallbackする
 - **resume actionは優先順位で決める**: (1) `pending_record`があれば同一bindingの冪等な永続化確認のみを再開（次agentを起動しない）、(2) `awaiting`があれば対応するcommandの再発行・結果照会、(3) どちらも無い場合だけ`recovery_to`の駆動commandを発行する。`BLOCKED` / `FAILED`滞在中の失敗は既存のrecovery情報を上書きしない
 - retry可能な失敗とterminalな失敗をevent / guardで区別する
-- **cancelは2系統**: 通常の対話cancelはユーザーのcancel intentをcanonical recordとして検証した後にのみ`CANCELLED`へ遷移する。Ctrl+C等の緊急停止はC-01のeventではなく、C-08がrunを停止しC-07がMachineStateをそのままcheckpointする
+- **cancelは2系統**: 通常の対話cancelはユーザーのcancel intentをcanonical recordとして検証した後にのみ`CANCELLED`へ遷移する。Ctrl+C等の緊急停止は、C-03 / C-08によるprocess tree停止とcheckpoint保存の完了をtyped event（`EV_INTERRUPT_CANCELLATION_COMPLETED`）としてC-01へ入力し、`CANCELLED`へ遷移する（`MERGING`中の割込みのみeventを入力せずcheckpointし、resumeで照会を再開する）。resumeは直前の安全なcheckpointから新しいrunとして開始する
+- **bounded-progressの境界**: round上限・no-progress・clarification / decision上限の判定結果は、次のCodex / host commandを発行するVERIFIED eventの`progress` discriminator（`CONTINUE` / `LIMIT_REACHED` / `NO_PROGRESS`）として入力する。`CONTINUE`の場合のみcommandを発行し、上限到達時は`BLOCKED`へ遷移してagent commandを一切発行しない（record確認 -> 判定 -> 次agentの境界）
 - **merge実行は2段階**: 承認検証後の`MERGING`ではまずpreconditions再検証commandのみを発行し、**全条件一致の結果eventを受けて初めて**merge実行commandを発行する。実行後はGitHub照会の結果eventだけが`MERGED` / `MERGE_FAILED`を決める
 - **`MERGING`中のcancel・runtime失敗は即`CANCELLED` / `FAILED`にしない**。merge結果の照会commandを発行し、merge未実行の確認eventでのみ`CANCELLED`、完了確認で`MERGED`、確定できない場合は`MERGE_FAILED`として安全停止する（成功と表示しない、二重mergeしない、というtarget experienceの失敗方針から導出）
 
 **canonical record gateの責務境界**: C-01が持つのは順序制約だけである。(1) agent / user発言の発生（`PRODUCED` event。registryに列挙された許可stateでのみ受理され、`pending_record`を設定する） -> (2) canonical record永続化commandの発行 -> (3) 後続層からの**検証済みevidence event**（`VERIFIED`）の受領。`pending_record`とkindおよびopaque bindingが一致する場合だけ受理し、不一致・過去evidenceの再利用・対応するPRODUCEDを経ないVERIFIEDは構造化errorで拒否する -> (4) その後にのみ次agent起動commandの発行。`pending_record`保持中は他のsemantic eventを拒否し、partial turnはMachineStateごとcheckpointが引き継ぐ。永続化commandは冪等（既投稿なら確認のみ）であることをC-05へ要求する。GitHubへの投稿はC-05、actor・record chain・evidence真正性の検証はC-06、binding値の採番はC-08の責務であり、C-01はbindingの等価比較のみを行う。
 
-**外部recordの直接受理**: ユーザーがGitHubへ直接記入したrecord（判断回答、gateへの質問・変更要求・merge承認、cancel intent）は既に永続化済みであり、`PRODUCED -> 永続化 -> VERIFIED`を通さない（再投稿すると二重投稿になる）。C-05が既存commentを観測し、C-06がcomment ID・body hash・actor（allowlist完全一致、D-031）・対象headを検証したtyped external evidenceを、C-01は`awaiting`（`USER_INPUT`系）と受理stateの一致でのみ直接受理する。同一commentの再利用はC-06 / C-07が拒否する。
+**user-input recordの2経路**: ユーザー入力record（判断回答、gateへの質問・変更要求・merge承認、cancel intent）は2経路を持つ。主経路のPowerShell / Skill入力はC-08がintentへ構造化し、内部recordと同じ`PRODUCED -> 冪等な永続化 -> VERIFIED`でGitHubへ転記・確認する（bindingはC-08採番。evidenceはactor / input route / head / intentを保持）。GitHubへの直接commentは既に永続化済みであり再投稿しない — C-05が観測し、C-06がcomment ID・body hash・actor（allowlist完全一致、D-031）・対象headを検証したtyped external evidenceを、C-01は`awaiting`（`USER_INPUT`系）と受理stateの一致でのみ直接受理する（bindingはC-06がcomment参照から導出。同一commentの再利用はC-06 / C-07が拒否）。両経路は同一のsemantic eventへ合流する。
 
 **Phase 1のscope限定**: `domain/`のうちPhase 1で実装するのはstates / events / commands / machineと、machineの成立に不可欠な最小のvalue objectのみ。finding ledgerはPhase 10、run ID等のid生成は最初に必要とするPhaseで追加し、Phase 1では空moduleも先行実装も作らない。
 
@@ -173,6 +174,7 @@ src/claude_code_codex_review_loop/
 | AC-C01-06 | 待機状態（`AWAITING_TOOL_PERMISSION`等）から、進入元に応じた正しい処理位置へ復帰する。復帰先はMachineStateが保持し、eventから注入できない |
 | AC-C01-07 | `MERGING`中のcancelがmerge結果の照会を経由し、結果を確定できない場合に`CANCELLED`ではなく`MERGE_FAILED`へ遷移する |
 | AC-C01-08 | guardが有限のtyped discriminatorに限定され、到達可能なMachineState付随値ごとに各eventへ一致するruleが0または1件であることをtestで検査する。順序を飛ばした応答（merge実行command発行前の完了event、verdict確認前のbrief / decision record）、消費済み応答の再入力（duplicate preconditions OK）、`awaiting` / binding不一致がnegative testで拒否される |
+| AC-C01-09 | bounded-progress判定が次agent commandの発行前に適用される。最終review round・clarification 5 turn上限・decision resubmit上限の系列testで、上限到達（`LIMIT_REACHED` / `NO_PROGRESS`）の受理後に新しいCodex / host起動commandが一度も発行されず`BLOCKED`へ遷移する |
 
 ### C-02 agent protocol schemaとcheckpoint envelope
 
@@ -496,7 +498,7 @@ schema検証は、runtime依存をゼロに保ち、必要なschema機能だけ�
 | Phase | 内容 | Component | 完了条件 | 追加するcheckpoint field |
 | --- | --- | --- | --- | --- |
 | 0 | 基盤と品質ゲート | — | CIでlint、type、coverage、size ratchetが動作する。P-001を決定する | — |
-| 1 | domain state machine | C-01 | AC-C01-01〜08 | — |
+| 1 | domain state machine | C-01 | AC-C01-01〜09 | — |
 | 2 | protocol schemaとenvelope | C-02 | AC-C02-01〜03 | envelope schemaとmigration policyを定義（永続化はPhase 5以降） |
 | 3 | process abstraction | C-03 | AC-C03-01、AC-C03-02 | — |
 | 4 | security policy | C-04 | AC-C04-01〜03 | — |
