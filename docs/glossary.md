@@ -2,6 +2,10 @@
 
 # Glossary
 
+| Field | Value |
+| --- | --- |
+| Status | **Draft** |
+
 本projectの文書で使う用語を定義します。各文書は独自用語の初出時にここへlinkします。
 
 ## 実行の単位

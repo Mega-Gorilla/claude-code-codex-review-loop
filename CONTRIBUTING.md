@@ -75,7 +75,7 @@ PRでは、対応するcomponent IDとPhaseをPR本文へ記載してくださ�
 | 参考実装の調査結果 | [reference implementation assessment](docs/research/reference-implementation-assessment.md) |
 | 表示例 | `docs/examples/`。要件は正本へ書く |
 | 用語を追加する | [glossary](docs/glossary.md) |
-| version管理対象fileを追加する | `tests/test_repository_contract.py`のpath listへ追加する。追加しないとCIが落ちる |
+| version管理対象fileを追加する | 先頭3行以内にSPDX表示を置く。検査対象はgit管理下のfileから自動discoveryするため、path listの手動更新は不要 |
 
 ## 文書の書き方
 

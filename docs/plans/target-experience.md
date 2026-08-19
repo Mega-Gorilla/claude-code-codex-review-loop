@@ -112,7 +112,7 @@
 - Codex reviewerはwrite credentialを持たない隔離checkout、専用sandbox、Web検索設定を使用し、可能な検証をsandbox内で完結させる。CodexのLLM approval reviewを使う場合もsandboxとhard denyを拡張しない
 - Claude Code Pluginを正式配布単位とし、Skillと薄いplatform wrapperをversion管理する。Controllerは任意repositoryから呼び出せるinstall済みCLI packageとし、repo-local Skillは開発・test、user-level単体Skillはfallbackに限定する
 - ControllerをMCPとして実装・配布しない
-- 既存のGitHub comment transport、public renderer、round metadata、resume、`discuss` transcriptを再利用し、Controllerの実装を最小化する
+- Controllerの実装は責務の限定によって最小化する。参考実装からの再利用は一括移植せず、component単位で評価して選択移植する（D-030）
 
 ## 4. 完了の定義
 

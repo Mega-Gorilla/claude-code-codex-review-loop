@@ -103,7 +103,9 @@ src/claude_code_codex_review_loop/
   cli.py                    console entry point `cc-review`
 ```
 
-`policy`は純粋関数として評価だけを行い、GitHubからactor情報を取得しない。actorの解決とcredential隔離は`identity`が担う。これによりtransportがredactionを利用しつつ、identityがtransportを利用する一方向の依存になる。
+`policy`は純粋関数として評価だけを行い、GitHubからactor情報を取得しない。`transport`は未検証のmetadataを取得・投稿するI/Oに限定する。actorの解決、record chainの検証、検証済みcanonical recordの生成は`identity`が担う。これによりtransportがredactionを利用しつつ、identityがtransportを利用する一方向の依存になる。
+
+**C-07以降のcomponentは、C-06が検証したcanonical recordだけを入力にする。** C-05が返す未検証metadataをworkflowの判断根拠にしない。
 
 `plugin/`にはSKILL.mdと薄いlauncherだけを置く。`wrappers/`には任意wrapperを置き、wrapperなしでcore loopが動作することを設計条件とする。
 
@@ -115,8 +117,8 @@ src/claude_code_codex_review_loop/
 | C-02 | agent protocol schemaとcheckpoint envelope | agent入出力とcheckpoint envelopeのschema、validation、versioning、migration | C-01 | 2 |
 | C-03 | process abstraction | 子process treeの起動・停止・timeoutのOS抽象 | なし | 3 |
 | C-04 | security policy | redaction規則、permission profile、trust ruleの純粋な評価 | C-02 | 4 |
-| C-05 | GitHub transport | canonical recordの投稿、read-after-write確認、producer認証、thread操作 | C-01、C-02、C-03、C-04 | 5 |
-| C-06 | actor認証とcredential隔離 | GitHub actorの解決とallowlist照合、agentごとの到達可能範囲、OS別file権限 | C-03、C-04、C-05 | 6 |
+| C-05 | GitHub transport | 未検証のGitHub metadataの取得、投稿、read-after-write確認、thread操作 | C-01、C-02、C-03、C-04 | 5 |
+| C-06 | canonical record検証とcredential隔離 | actor解決、allowlist照合、record chain検証、検証済みcanonical recordの生成、agentごとの到達可能範囲、OS別file権限 | C-03、C-04、C-05 | 6 |
 | C-07 | resumeとretention | GitHubからのstate再構築、artifactの保持と削除 | C-02、C-05、C-06 | 7、14 |
 | C-08 | active host protocolとstep engine | Section 2のprotocol。advance / submitの境界 | C-02、C-05、C-07 | 8 |
 | C-09 | Codex fresh runtimeと隔離checkout | turnごとのread-only subprocessとexact head checkout | C-03、C-06、C-08 | 9 |
@@ -179,22 +181,51 @@ GitHubへ問い合わせずに評価できる純粋なpolicyだけを持つ。re
 
 投稿後にcomment / review ID、URL、本文hash、対象head SHAを取得できるまでturnをcompletedにしない。timeout時は成否を推測せず、idempotency markerで検索してから再投稿する。取得は`--json`境界、投稿本文はfile経由、投稿前にC-04のredactionを適用する。
 
-**producer認証と編集耐性**: markerの存在だけを根拠にrecordを復元しない。
+**このcomponentは認証を行わない。** 取得したmetadataは未検証として上位へ渡し、canonical recordとしての受理可否はC-06が判定する。
 
-- canonical workflow recordとして受理できるGitHub actorを設定で明示する。actor情報を取得できない、または一致しない場合はfail closedとする
-- 予約markerはControllerだけが付加する。agent生成本文に含まれる予約markerは投稿前に除去またはescapeする
-- 検証対象へcomment ID、author login、created / updated timestamp、repository、Issue / PR番号、run ID、turn / action ID、対象head SHA、payload hashを含める
-- 後続recordが直前recordのhashを参照するchainを持たせる。hashを同一comment内に置くだけでは、comment全体を書き換えられた場合の真正性を示せない
-- 不整合を検出した場合はsilent repairせず`BLOCKED`とする
+予約markerはControllerだけが付加する。agent生成本文に含まれる予約markerは投稿前に除去またはescapeする。取得時はcomment ID、author login、created / updated timestamp、repository、Issue / PR番号、body、payloadを、加工せずC-06へ渡す。
 
 | ID | 受入条件 |
 | --- | --- |
 | AC-C05-01 | 投稿→再取得→hash一致→ID記録がfake `gh`で検証できる |
 | AC-C05-02 | timeout後の再投稿で重複commentが発生しない |
 | AC-C05-03 | review threadの取得、解決状態の判定、line findingへのreplyが動作する。thread不可時はcomment URL付きconversation commentへfallbackする |
-| AC-C05-04 | allowlist外authorの偽marker、agent本文へ埋め込まれた予約marker、本文とmarkerの同時編集、record削除、順序入れ替え、sidecar欠落・差替えを、fresh resumeで検出して停止する |
+| AC-C05-04 | agent生成本文へ埋め込まれた予約markerが、投稿前に除去またはescapeされる |
+| AC-C05-05 | 取得結果が未検証metadataとして返り、このcomponent単独ではcanonical recordを確定しない |
 
-### C-06 actor認証とcredential隔離
+### C-06 canonical record検証とcredential隔離
+
+C-05が取得した未検証metadataから、検証済みcanonical recordを生成する唯一のcomponentとする。
+
+#### record検証のthreat modelと保証範囲
+
+守る対象は、書込権限を持つ第三者およびagent自身による、canonical recordの偽装・改変・欠落である。
+
+検出できる条件を個別に定義する。
+
+| 条件 | 検出方法 |
+| --- | --- |
+| 許可されていないactorによるrecord投稿 | actor loginがallowlistと完全一致しない |
+| agent本文へ埋め込まれた予約marker | Controller以外が付加したmarkerとして拒否する |
+| record本文の改変 | payload hashの不一致 |
+| record内容の編集 | `updatedAt`が`createdAt`と異なる |
+| 中間recordの削除 | sequence番号のgap |
+| recordの並べ替え | 直前recordのhash参照chainの不一致 |
+| 既知recordの消失 | checkpointが保持するcomment IDがGitHubで404になる |
+
+**保証しない範囲**: local checkpointを失ったfresh processが、GitHub commentだけを入力に**末尾から連続するrecordの削除（suffix truncation）**を検出することは、本設計では保証しない。hash chainは残存部分の整合性しか示さず、「その後にrecordが存在した」という情報が外部に無いためである。
+
+この残存riskへは次で対処する。
+
+- sequence番号のhigh-water markをcheckpointへ保存し、checkpointが残っている限りtail削除を検出する
+- Controllerが管理するanchor recordへ最新sequenceを記録し、anchorが残っている限り検出する
+- checkpointとanchorの両方が失われた場合は、tail truncationを検出できない残存riskとして受け入れる
+
+保証を強めるためにGitHub外の永続化先を追加する選択肢は、MVP scope外とする。必要になった時点でD-010のdecision flowへ接続する。
+
+不整合を検出した場合はsilent repairせず`BLOCKED`とし、差分を提示する。
+
+#### ユーザー判断の受理
 
 ユーザー決定として受理するcommentは、設定したGitHub loginのallowlistと完全一致する場合に限る（D-031）。`authorAssociation`とrepository permissionは補助条件とし、単独の判定根拠にしない。allowlistが未設定または取得できない場合はfail closedとし、bot accountを受理しない。受理したcommentのbody hashを記録し、編集・削除で決定を失効させる。承認はintent、repository、Issue / PR番号、head SHA、merge method、candidate fingerprintへbindする。
 
@@ -211,6 +242,10 @@ artifactとtemp fileは、POSIXでは`0600` / `0700`、Windowsでは作成者の
 | AC-C06-03 | reviewer環境からのGitHub mutation、実repository書込、GitHub write credentialへの到達が、いずれも失敗する |
 | AC-C06-04 | `AWAITING_TOOL_PERMISSION`からのresumeが、停止点の操作だけを再実行する |
 | AC-C06-05 | 両OSで、artifact directoryが作成者以外からアクセスできない |
+| AC-C06-06 | 上表の7条件（不正actor、埋め込みmarker、本文改変、編集、中間削除、並べ替え、既知record消失）を個別に検出して`BLOCKED`にする |
+| AC-C06-07 | checkpointまたはanchorが残っている場合に、tail truncationを検出する。両方を失った場合に検出できないことをtestで明示する |
+| AC-C06-08 | Auto modeの検出と`acceptEdits` -> `default` -> `dontAsk`のfallbackが動作する |
+| AC-C06-09 | tool permissionの許可だけでは、mergeとfollow-up Issue作成が実行されない |
 
 ### C-07 resumeとretention
 
@@ -222,6 +257,8 @@ resumeはGitHub canonical conversationからstateを再構築し、local checkpo
 | AC-C07-02 | 質問のみ投稿済みのpartial turnで、質問が重複投稿されない |
 | AC-C07-03 | 外部からheadが更新された場合に旧承認が失効する |
 | AC-C07-04 | cleanupがactive / lock保持中のrunを削除しない。dry-runで対象を確認できる |
+| AC-C07-05 | GitHub recordとlocal artifactが、いずれもapproved head SHAへbindされている |
+| AC-C07-06 | resume時に、GitHub commentへ直接入力されたユーザー回答を取得する。comment投稿はtriggerにならない |
 
 ### C-08 active host protocolとstep engine
 
@@ -258,6 +295,8 @@ review / fixの最大roundを設定可能とし既定3。承認は対象head SHA
 | AC-C10-02 | round上限到達で`BLOCKED`へ遷移する |
 | AC-C10-03 | 同一PRへの同時runが拒否される |
 | AC-C10-04 | 中断後に別processからresumeして継続できる |
+| AC-C10-05 | 全reviewerが同一head・同一roundで承認したことを記録し、異なるheadの承認を混在させない |
+| AC-C10-06 | coder snapshotを記録し、coderによるhead更新と外部からのhead更新を区別する |
 
 ### C-11 decision / clarification / follow-up
 
@@ -269,6 +308,9 @@ clarification counterはGitHub上の`run ID + fingerprint + turn` metadataから
 | AC-C11-02 | 同一topic判定がhead変更をまたいで維持される |
 | AC-C11-03 | 許可のない候補がIssue化されない |
 | AC-C11-04 | Issue本文の意味的変更後に旧許可が失効する |
+| AC-C11-05 | 候補が最大3件へdeduplicateされ、候補ごとのCodex verdictが記録される |
+| AC-C11-06 | 許可された候補について、作成したIssue URLが元conversationへ記録される |
+| AC-C11-07 | `ASK_USER` / `PROCEED_WITH_RECORD` / `REVISE_AND_RESUBMIT`の各verdictで、期待するstate遷移になる |
 
 ### C-12 qualificationとfinal reporter
 
@@ -279,6 +321,10 @@ CI pendingは設定可能なbounded foreground wait（既定20分・30秒間隔�
 | AC-C12-01 | CI timeout時に`WAITING_CI`のcheckpointが残り、明示resumeで再開できる |
 | AC-C12-02 | 同一JSONから同一Markdownが再現される |
 | AC-C12-03 | report生成失敗時に、review承認を保持したまま`REPORT_FAILED`へ遷移する |
+| AC-C12-04 | approved headでlocal final testとrequired CIの両方がsuccessでなければ、次のstateへ進まない |
+| AC-C12-05 | final reportが、変更内容、test結果、review履歴、残存riskをすべて含む |
+| AC-C12-06 | final reportが、follow-up候補ごとのCodex評価、permission状態、作成済みIssue URLを含む |
+| AC-C12-07 | PR comment、local JSON、local Markdown、terminal summaryの4出力が同一JSONから生成される |
 
 ### C-13 human merge gate
 
@@ -297,6 +343,10 @@ cc-review approve-merge <pr> --repo OWNER/REPO --head <sha> --method <merge|squa
 | AC-C13-03 | merge API timeout後に二重mergeが発生せず、確認できない場合は成功と表示しない |
 | AC-C13-04 | 許可方式が複数で未設定の場合に、mergeせずユーザー判断を求める |
 | AC-C13-05 | 中断後に別processからresumeして継続できる |
+| AC-C13-06 | `READY_FOR_HUMAN_MERGE`到達時にmergeを実行せず、ユーザー入力を待機する |
+| AC-C13-07 | `QUESTION`で回答を記録してgateを維持し、`REQUEST_CHANGES`で承認を失効して`CHANGES_REQUESTED`へ戻る |
+| AC-C13-08 | approval recordが、repository、PR番号、approved head SHA、merge method、入力経路、comment IDを含む |
+| AC-C13-09 | merge直前に、PR open状態、現在head、review承認、local test、CI、未解決事項、mergeabilityをすべて再取得して照合する |
 
 ### C-14 Issue modeとhandoff
 
@@ -331,16 +381,16 @@ target experienceのSection 4（DOD）とSection 13（MVP）を、componentとPh
 | DOD-01 | C-09 | 9 | AC-C09-01、AC-C09-02 |
 | DOD-02 | C-05 | 5 | AC-C05-01 |
 | DOD-03 | C-10 | 10 | AC-C10-01 |
-| DOD-04 | C-10 | 10 | AC-C10-01 |
-| DOD-05 | C-12 | 12 | AC-C12-01 |
-| DOD-06 | C-12 | 12 | AC-C12-02 |
-| DOD-07 | C-05 | 5 | AC-C05-01、AC-C05-04 |
-| DOD-08 | C-07 | 7 | AC-C07-01、AC-C07-03 |
-| DOD-09 | C-11、C-12 | 11、12 | AC-C11-03、AC-C12-02 |
-| DOD-10 | C-13 | 13 | AC-C13-01 |
-| DOD-11 | C-13 | 13 | AC-C13-01、AC-C13-02 |
-| DOD-12 | C-06、C-13 | 6、13 | AC-C06-01、AC-C13-02 |
-| DOD-13 | C-13 | 13 | AC-C13-02、AC-C13-03 |
+| DOD-04 | C-10 | 10 | AC-C10-05 |
+| DOD-05 | C-12 | 12 | AC-C12-04 |
+| DOD-06 | C-12 | 12 | AC-C12-05 |
+| DOD-07 | C-05、C-06 | 5、6 | AC-C05-01、AC-C06-06 |
+| DOD-08 | C-07 | 7 | AC-C07-05 |
+| DOD-09 | C-11、C-12 | 11、12 | AC-C11-05、AC-C12-06 |
+| DOD-10 | C-13 | 13 | AC-C13-06 |
+| DOD-11 | C-13 | 13 | AC-C13-07 |
+| DOD-12 | C-06、C-13 | 6、13 | AC-C06-01、AC-C13-08 |
+| DOD-13 | C-13 | 13 | AC-C13-09 |
 | DOD-14 | C-13 | 13 | AC-C13-03 |
 | MVP-01 | C-10 | 10 | AC-C10-01 |
 | MVP-02 | C-14 | 15 | AC-C14-01、AC-C14-02 |
@@ -349,25 +399,25 @@ target experienceのSection 4（DOD）とSection 13（MVP）を、componentとPh
 | MVP-05 | C-08、C-09 | 8、9 | AC-C08-01、AC-C09-03 |
 | MVP-06 | C-08 | 8 | AC-C08-04 |
 | MVP-07 | C-06、C-09 | 6、9 | AC-C06-03、AC-C09-01 |
-| MVP-08 | C-06 | 6 | AC-C06-04、AC-C04-02 |
-| MVP-09 | C-06 | 6 | AC-C06-01 |
-| MVP-10 | C-10 | 10 | AC-C10-02 |
-| MVP-11 | C-07、C-10 | 7、10 | AC-C07-03、AC-C10-03 |
-| MVP-12 | C-12 | 12 | AC-C12-01 |
+| MVP-08 | C-06 | 6 | AC-C06-04、AC-C06-08 |
+| MVP-09 | C-06 | 6 | AC-C06-09 |
+| MVP-10 | C-10 | 10 | AC-C10-01、AC-C10-02 |
+| MVP-11 | C-07、C-10 | 7、10 | AC-C07-03、AC-C10-03、AC-C10-06 |
+| MVP-12 | C-12 | 12 | AC-C12-04 |
 | MVP-13 | C-12 | 12 | AC-C12-01 |
 | MVP-14 | C-03 | 3 | AC-C03-01 |
 | MVP-15 | C-03、C-07 | 3、7 | AC-C03-02、AC-C07-01 |
 | MVP-16 | C-15 | 16 | AC-C15-03 |
 | MVP-17 | C-15 | 16 | AC-C15-04、AC-C15-05 |
-| MVP-18 | C-12、C-13 | 12、13 | AC-C12-02、AC-C13-01 |
-| MVP-19 | C-13 | 13 | AC-C13-02、AC-C13-03 |
-| MVP-20 | C-11 | 11 | AC-C11-01 |
-| MVP-21 | C-05 | 5 | AC-C05-01、AC-C05-04 |
-| MVP-22 | C-07 | 7 | AC-C07-01 |
+| MVP-18 | C-12、C-13 | 12、13 | AC-C12-07、AC-C13-06 |
+| MVP-19 | C-13 | 13 | AC-C13-03、AC-C13-09 |
+| MVP-20 | C-11 | 11 | AC-C11-01、AC-C11-07 |
+| MVP-21 | C-05、C-06 | 5、6 | AC-C05-01、AC-C06-06 |
+| MVP-22 | C-07 | 7 | AC-C07-06 |
 | MVP-23 | C-13 | 13 | AC-C13-04 |
-| MVP-24 | C-11 | 11 | AC-C11-03、AC-C11-04 |
+| MVP-24 | C-11 | 11 | AC-C11-03、AC-C11-05、AC-C11-06 |
 | MVP-25 | C-07 | 14 | AC-C07-04 |
-| MVP-26 | C-04、C-06 | 4、6 | AC-C04-01、AC-C04-03 |
+| MVP-26 | C-04、C-06 | 4、6 | AC-C04-01、AC-C04-03、AC-C06-06 |
 
 設計へ影響する決定の対応。決定の全文は[target experience](target-experience.md) Section 14のdecision logにある。
 
@@ -413,25 +463,25 @@ runtime依存をゼロに保つか、schema検証にlibraryを導入するかを
 | 2 | protocol schemaとenvelope | C-02 | AC-C02-01〜03 | envelope schemaとmigration policyを定義（永続化はPhase 5以降） |
 | 3 | process abstraction | C-03 | AC-C03-01、AC-C03-02 | — |
 | 4 | security policy | C-04 | AC-C04-01〜03 | — |
-| 5 | GitHub transport | C-05 | AC-C05-01〜04 | conversation cursor、comment / review ID、URL、本文hash、idempotency marker、record chain |
-| 6 | actor認証とcredential隔離 | C-06 | AC-C06-01〜05 | permission mode / profile、Permission ID、blockされたtool、要求scope、承認bind情報 |
-| 7 | resume | C-07 | AC-C07-01〜03 | run ID、state、base / observed / approved head SHA、PR lock、coder snapshot |
+| 5 | GitHub transport | C-05 | AC-C05-01〜05 | conversation cursor、comment / review ID、URL、本文hash、idempotency marker |
+| 6 | canonical record検証とcredential隔離 | C-06 | AC-C06-01〜09 | record sequence high-water mark、anchor record、permission mode / profile、Permission ID、blockされたtool、要求scope、承認bind情報 |
+| 7 | resume | C-07 | AC-C07-01〜06 | run ID、state、base / observed / approved head SHA、PR lock、coder snapshot |
 | 8 | active host protocolとstep engine | C-08 | AC-C08-01〜06 | action ID、未完了`HOST_ACTION`、nonce、submit状態 |
 | 9 | Codex fresh runtimeと隔離checkout | C-09 | AC-C09-01〜03 | 隔離checkout、sandbox / network profile、実行したtest / build、dirty status、破棄結果 |
-| 10 | PR mode review loop | C-10 | AC-C10-01〜04。**CLI経由のdogfooding開始** | round、finding ledgerとresolution、coder実行前後HEAD、push後head |
-| 11 | decision / clarification / follow-up | C-11 | AC-C11-01〜04 | clarification counter、fingerprint、未解決decision request、follow-up候補と許可record |
-| 12 | qualificationとfinal reporter | C-12 | AC-C12-01〜03 | test command / result、GitHub check名 / result / URL、artifact path |
-| 13 | human merge gate | C-13 | AC-C13-01〜05 | merge gate intent、approved head SHA、入力経路、approval comment ID、merge method、API結果、merged commit SHA |
+| 10 | PR mode review loop | C-10 | AC-C10-01〜06。**CLI経由のdogfooding開始** | round、finding ledgerとresolution、coder実行前後HEAD、push後head |
+| 11 | decision / clarification / follow-up | C-11 | AC-C11-01〜07 | clarification counter、fingerprint、未解決decision request、follow-up候補と許可record |
+| 12 | qualificationとfinal reporter | C-12 | AC-C12-01〜07 | test command / result、GitHub check名 / result / URL、artifact path |
+| 13 | human merge gate | C-13 | AC-C13-01〜09 | merge gate intent、approved head SHA、入力経路、approval comment ID、merge method、API結果、merged commit SHA |
 | 14 | retention、migration、salvage | C-07 | AC-C07-04。全fieldがenvelope schemaと整合し、旧versionがmigrationで読める | 横断検証。新規fieldは追加しない |
 | 15 | Issue modeとhandoff | C-14 | AC-C14-01〜04 | Issue番号、handoff record、conversation source切替状態 |
 | 16 | Plugin配布と任意wrapper | C-15 | AC-C15-01〜06 | wrapper session ID、監視pane状態 |
-| 17 | release acceptance | 全体 | 下記scenario matrix | — |
+| 17 | release acceptance | 全体 | 下記scenario matrix（S-1〜S-9） | — |
 
 ### 順序の根拠
 
 - Phase 0が先行するのは、lintとtype gateを後から入れると既存code全体の修正が必要になるため
 - Phase 2のschemaがtransportより前なのは、checkpoint envelopeとagent protocolの所有者を1箇所に固定し、後続Phaseがそれぞれ独自形式を持つのを防ぐため
-- Phase 4のsecurity policyがtransportより前なのは、transportが投稿前redactionを利用するため。actorの解決はGitHubを必要とするためPhase 6へ分離し、循環依存を避ける
+- Phase 4のsecurity policyがtransportより前なのは、transportが投稿前redactionを利用するため。actorの解決とrecord検証はGitHub metadataを必要とするためPhase 6へ置く。Phase 5の成果物は未検証metadataを扱うI/Oであり、canonical recordとしての受理判定はPhase 6で成立する。Phase 7以降のcomponentは検証済みrecordだけを入力にする
 - Phase 8のactive host protocolがPR modeより前なのは、Section 2の制御構造が全workflowの前提であり、後から反転すると全workflowを書き直すことになるため
 - checkpoint fieldは、それを利用するPhaseと同じPhaseで追加する。Phase 14は新規fieldを追加せず、retention、schema整合性、migration、salvageの横断検証に充てる
 - dogfoodingとユーザー操作を伴うPhase 8、10、13は、中断後に別processからresumeする受入testを完了条件に含める。同一process内のresumeだけでは、新しいClaude Code sessionからの再開を保証できない
@@ -439,19 +489,21 @@ runtime依存をゼロに保つか、schema検証にlibraryを導入するかを
 
 ### Phase 17 release acceptance
 
-| ID | Scenario | 期待する終了state |
-| --- | --- | --- |
-| S-1 | Windows、active Skill、PR mode、承認してmerge | `MERGED` |
-| S-2 | Windows、headless CLI、PR mode | `READY_FOR_HUMAN_MERGE` |
-| S-3 | Linux/SSH、active Skill、Issue mode | `READY_FOR_HUMAN_MERGE` |
-| S-4 | Linux/SSH、`tmux`内でSSH切断、判断地点へ到達 | `AWAITING_USER_DECISION` |
-| S-5 | S-4から再接続してresume | `READY_FOR_HUMAN_MERGE` |
-| S-6 | wrapper未導入環境でPR mode | `READY_FOR_HUMAN_MERGE` |
-| S-7 | `tmux`外で切断しprocess終了、再接続してresume | 再開後にS-3と同じ地点 |
+| ID | Scenario | 期待する終了state | 検査するevidence |
+| --- | --- | --- | --- |
+| S-1 | Windows、active Skill、PR mode、承認してmerge | `MERGED` | review record、対応summary、final reportの4出力、approval record、merged commit SHAの再確認 |
+| S-2 | Windows、headless CLI、PR mode | `READY_FOR_HUMAN_MERGE` | S-1と同じ種類のrecordが同じ形式で残る（AC-C08-04） |
+| S-3 | Linux/SSH、active Skill、Issue mode | `READY_FOR_HUMAN_MERGE` | Issue / PR双方向のhandoff record、review履歴 |
+| S-4 | Linux/SSH、`tmux`内でSSH切断、判断地点へ到達 | `AWAITING_USER_DECISION` | decision briefが投稿・確認済み。processが無期限待機していない |
+| S-5 | S-4から再接続してresume | `READY_FOR_HUMAN_MERGE` | 同一run IDで継続し、重複run・重複commentが無い |
+| S-6 | wrapper未導入環境でPR mode | `READY_FOR_HUMAN_MERGE` | wrapperなしでもS-1と同じrecordが残る |
+| S-7 | `tmux`外で切断しprocess終了、再接続してresume | 再開後にS-3と同じ地点 | 最後に確認済みのcheckpointから再開したことが確認できる |
+| S-8 | security negative: allowlist外authorの承認、reviewerからのGitHub mutation、偽record | 進行しない | AC-C06-01、AC-C06-03、AC-C06-06が実環境で成立する |
+| S-9 | failure: CI timeout、report失敗、merge API timeout | `WAITING_CI` / `REPORT_FAILED` / `MERGE_FAILED` | 各stateのcheckpointと、二重merge・成功誤表示が無いこと |
 
 各scenarioで、GitHub上に期待するcanonical recordが残っていることを証跡とする。WindowsのscenarioはMSI installerまたは`Microsoft.PowerShell` winget packageからprovisionした環境で実行し、PowerShellのversionとinstall sourceを証跡へ含める（D-029）。
 
-初回releaseの条件はS-1〜S-7をすべて通すこと。Phase 16までの完了は必要条件であり、十分条件ではない。
+初回releaseの条件はS-1〜S-9をすべて通すこと。Phase 16までの完了は必要条件であり、十分条件ではない。
 
 ## 9. 品質ゲート
 

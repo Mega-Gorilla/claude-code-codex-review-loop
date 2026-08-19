@@ -2,12 +2,16 @@
 
 # Architecture
 
+| Field | Value |
+| --- | --- |
+| Status | **Draft** |
+
 | 文書 | 内容 |
 | --- | --- |
 | [overview.md](overview.md) | 役割、主経路、component map、不変条件の1ページ要約。最初に読む |
 | [implementation plan](../plans/implementation-plan.md) | component定義、依存、Phase、受入条件の正本 |
 
-componentは次の15項目です。責務、依存、Phase、受入条件はimplementation plan Section 5とSection 6を参照してください。
+componentは次の15項目です。一覧と依存とPhaseはimplementation plan Section 4、主要な決定と受入条件はSection 5、実装順序はSection 8を参照してください。
 
 | ID | Component |
 | --- | --- |
@@ -15,9 +19,9 @@ componentは次の15項目です。責務、依存、Phase、受入条件はimpl
 | C-02 | agent protocol schemaとcheckpoint envelope |
 | C-03 | process abstraction（Windows / POSIX） |
 | C-04 | security policy（redaction、permission profile、trust rule） |
-| C-05 | GitHub canonical conversation transport |
-| C-06 | actor認証とcredential隔離 |
-| C-07 | resumeとartifact retention |
+| C-05 | GitHub transport（未検証metadataの取得と投稿） |
+| C-06 | canonical record検証とcredential隔離 |
+| C-07 | resumeとretention |
 | C-08 | active host protocolとstep engine |
 | C-09 | Codex fresh reviewer runtimeと隔離checkout |
 | C-10 | PR mode review loop |

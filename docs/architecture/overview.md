@@ -56,12 +56,12 @@ Controllerが直接起動するのはCodex reviewerだけです。Claude coder�
 
 ## Component map
 
-15 componentの一覧、責務、依存、Phase、受入条件は[implementation plan](../plans/implementation-plan.md) Section 5を参照してください。依存の方向は次のとおりです。
+15 componentの一覧と依存とPhaseは[implementation plan](../plans/implementation-plan.md) Section 4、主要な決定と受入条件はSection 5にあります。依存の方向は次のとおりです。
 
 ```text
 基盤        domain -> protocol schema -> security policy
             process abstraction
-永続化      GitHub transport -> actor認証 / credential隔離 -> resume / retention
+永続化      GitHub transport -> canonical record検証 / credential隔離 -> resume / retention
 実行基盤    active host protocol -> Codex fresh runtime
 workflow    PR mode -> decision / clarification / follow-up
                     -> qualification / final reporter -> human merge gate

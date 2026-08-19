@@ -114,8 +114,8 @@ implementation planの設計原則は本projectの要件から導出していま
 
 | 項目 | 内容 |
 | --- | --- |
-| source slice | `workdir_guard.py`、`workdirs.py`、`checks.py` |
-| 観測事実 | remote検証、PR ref fetch、advertised head照合が存在する。ただし**persistent workdirを同期する方式**であり、review turnごとに作成・破棄するlifecycleではない |
+| source slice | `config.py`（remote検証、`fetch origin`、`+pull/<n>/head` refspec、advertised head照合）、`workdir_guard.py`、`workdirs.py`、`checks.py`（test evidenceの境界検証） |
+| 観測事実 | remote検証、PR ref fetch、advertised head照合は`config.py`にある。`workdir_guard.py` / `workdirs.py` / `checks.py`には該当処理が無く、以前の記載は誤りだった。checkout方式は**persistent workdirを同期する方式**であり、review turnごとに作成・破棄するlifecycleではない |
 | 再利用kernel | remote検証、PR ref fetch、advertised head照合、test evidenceの境界検証 |
 | 再利用しない | persistent workdirの同期方式 |
 | 必要extension | turnごとのcheckout作成・破棄、破棄前dirty stateのevidence記録、credential隔離との統合 |
@@ -165,10 +165,23 @@ implementation planの設計原則は本projectの要件から導出していま
 | 必要extension | exit code、構造化出力、`gh api` statusを根拠にする |
 | 移植時test | 「innocentなtext」corpusで誤分類しないこと |
 
+### 候補なしと判定したcomponent
+
+再利用候補が無いcomponentも、未調査と区別するため明示する。
+
+| Component | 判定 | 理由 |
+| --- | --- | --- |
+| C-01 domain state machine | 該当sourceなし。新規設計 | 参考実装は純粋なstate machineを持たず、状態遷移がorchestrator内へ埋め込まれている |
+| C-04 security policy | 該当sourceなし。新規設計 | redactionとtrust判定が純粋関数として分離されていない。permission構成はP-006に反するため再利用しない |
+| C-08 active host protocolとstep engine | 該当sourceなし。新規設計 | 参考実装のSkill modeはhelperの反復呼び出しで成立しており、`advance / submit`のenvelope binding、nonce、result path払い出しに相当する仕組みが無い |
+| C-10 PR mode review loop | 横断領域として評価 | round管理はorchestrator内にあり、単体で切り出せる形になっていない。finding ledgerの扱いのみC-11の行で評価する |
+| C-13 human merge gate | 該当sourceなし。新規設計 | merge承認のbind、直前再検証、timeout後の照会に相当する処理を確認できなかった |
+| C-15 Plugin配布と任意wrapper | 該当sourceなし。新規設計 | Skill配布はrepository相対pathを前提としており、P-013およびprotocol version交換の要件と異なる |
+
 ### 再利用しないと判定した領域
 
 | 領域 | 理由 |
 | --- | --- |
-| orchestrator | 単一moduleが大規模化し、CLIとSkillで二重実装されている。P-002およびSection 3の制御構造と異なる |
+| orchestrator | 単一moduleが大規模化し、CLIとSkillで二重実装されている。P-002およびimplementation plan Section 2の制御構造と異なる |
 | Skill helper層の投稿経路 | P-004とP-005の両方に反する |
 | permission / sandbox構成 | P-006に反する |

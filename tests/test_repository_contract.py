@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,23 +12,48 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_OWNER = "Mega-Gorilla"
 CURRENT_REPOSITORY = "claude-code-codex-review-loop"
 
-DOCUMENT_PATHS = (
-    "CONTRIBUTING.md",
-    "README.md",
-    "docs/README.md",
-    "docs/glossary.md",
-    "docs/architecture/README.md",
-    "docs/architecture/overview.md",
-    "docs/decisions/0001-independent-v2.md",
-    "docs/decisions/0002-independent-reimplementation.md",
-    "docs/examples/final-report.md",
-    "docs/examples/terminal-experience.md",
-    "docs/plans/implementation-plan.md",
-    "docs/plans/target-experience.md",
-    "docs/research/reference-implementation-assessment.md",
-    "plugin/README.md",
-    "wrappers/README.md",
-)
+# SPDX表示を求めないfile。LICENSEとNOTICEは第三者向けの原文を保つ。
+SPDX_EXEMPT = frozenset({"LICENSE", "NOTICE"})
+
+# SPDX表示を求めるsuffix。
+VERSIONED_SUFFIXES = frozenset({".md", ".py", ".toml", ".yml", ".yaml"})
+
+
+def _tracked_files() -> tuple[str, ...]:
+    """git管理下のfileを列挙する。手動listを持たず、追加漏れを構造的に防ぐ。"""
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):  # pragma: no cover - git不在環境
+        pytest.skip("git ls-files を実行できない")
+    return tuple(line for line in result.stdout.splitlines() if line)
+
+
+def versioned_files() -> tuple[str, ...]:
+    """SPDX表示を求めるversion管理対象file。"""
+
+    return tuple(
+        path
+        for path in _tracked_files()
+        if Path(path).suffix in VERSIONED_SUFFIXES and Path(path).name not in SPDX_EXEMPT
+    )
+
+
+def document_paths() -> tuple[str, ...]:
+    """文書として検査するMarkdown。"""
+
+    return tuple(
+        path
+        for path in _tracked_files()
+        if path.endswith(".md") and Path(path).name not in SPDX_EXEMPT
+    )
+
 
 
 def test_project_identity_is_consistent() -> None:
@@ -83,7 +111,7 @@ def test_only_the_current_repository_is_referenced_for_the_owner() -> None:
     # 参考実装の出典は別ownerのため対象外で、ADR-0002へ限定して記録する。
     reference = re.compile(rf"{REPOSITORY_OWNER}/([\w.-]+)")
 
-    for path in DOCUMENT_PATHS:
+    for path in document_paths():
         text = (ROOT / path).read_text(encoding="utf-8")
         others = sorted(
             {
@@ -96,12 +124,8 @@ def test_only_the_current_repository_is_referenced_for_the_owner() -> None:
 
 
 def test_versioned_project_files_declare_apache_license() -> None:
-    paths = DOCUMENT_PATHS + (
-        ".github/workflows/test.yml",
-        "pyproject.toml",
-        "src/claude_code_codex_review_loop/__init__.py",
-        "tests/test_repository_contract.py",
-    )
+    paths = versioned_files()
+    assert len(paths) >= 15, f"discoveryが機能していない: {len(paths)}件"
 
     for path in paths:
         text = (ROOT / path).read_text(encoding="utf-8")
@@ -121,7 +145,7 @@ def test_cli_naming_is_unified_on_cc_review() -> None:
         re.compile(r"agent_loop"),
     )
 
-    for path in DOCUMENT_PATHS:
+    for path in document_paths():
         text = (ROOT / path).read_text(encoding="utf-8")
         for token in legacy_tokens:
             assert not token.search(text), f"{path}: {token.pattern}"
