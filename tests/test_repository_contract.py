@@ -10,13 +10,19 @@ REPOSITORY_OWNER = "Mega-Gorilla"
 CURRENT_REPOSITORY = "claude-code-codex-review-loop"
 
 DOCUMENT_PATHS = (
+    "CONTRIBUTING.md",
     "README.md",
     "docs/README.md",
+    "docs/glossary.md",
     "docs/architecture/README.md",
+    "docs/architecture/overview.md",
     "docs/decisions/0001-independent-v2.md",
     "docs/decisions/0002-independent-reimplementation.md",
+    "docs/examples/final-report.md",
+    "docs/examples/terminal-experience.md",
     "docs/plans/implementation-plan.md",
     "docs/plans/target-experience.md",
+    "docs/research/reference-implementation-assessment.md",
     "plugin/README.md",
     "wrappers/README.md",
 )
@@ -56,6 +62,20 @@ def test_implementation_plan_derives_from_the_agreed_baseline() -> None:
     assert "Issue #2" in plan
 
 
+def test_documents_declare_their_authority() -> None:
+    """informativeな文書が、要件と取り違えられない表示を持つことを確認する。"""
+
+    informative = {
+        "docs/examples/final-report.md": "Non-normative example",
+        "docs/examples/terminal-experience.md": "Non-normative example",
+        "docs/research/reference-implementation-assessment.md": "Research",
+    }
+
+    for path, marker in informative.items():
+        text = (ROOT / path).read_text(encoding="utf-8")
+        assert marker in text, path
+
+
 def test_only_the_current_repository_is_referenced_for_the_owner() -> None:
     """同一owner配下では本repository以外を正式文書の参照として残さない。"""
 
@@ -76,20 +96,11 @@ def test_only_the_current_repository_is_referenced_for_the_owner() -> None:
 
 
 def test_versioned_project_files_declare_apache_license() -> None:
-    paths = (
-        "README.md",
+    paths = DOCUMENT_PATHS + (
         ".github/workflows/test.yml",
         "pyproject.toml",
-        "docs/README.md",
-        "docs/architecture/README.md",
-        "docs/decisions/0001-independent-v2.md",
-        "docs/decisions/0002-independent-reimplementation.md",
-        "docs/plans/implementation-plan.md",
-        "docs/plans/target-experience.md",
-        "plugin/README.md",
         "src/claude_code_codex_review_loop/__init__.py",
         "tests/test_repository_contract.py",
-        "wrappers/README.md",
     )
 
     for path in paths:

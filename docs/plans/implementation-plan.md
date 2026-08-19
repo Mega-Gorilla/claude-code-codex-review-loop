@@ -10,697 +10,479 @@
 | Owner | Mega-Gorilla |
 | Last updated | 2026-08-19 |
 
-## 1. この文書の目的と範囲
+target experienceが定義した完成状態を、どのcomponent、どの依存、どの順序で作るかを定義する。用語は[glossary](../glossary.md)、全体像は[architecture overview](../architecture/overview.md)を参照。
 
-[target-experience.md](target-experience.md)はユーザーから見た完成状態を定義した合意済みのgold documentである。本書はそれを**どのcomponent、どの依存関係、どの順序で作るか**を定義する。
+本書はcomponentの責務境界とPhaseの正本である。API詳細は各子IssueのPRで設計する。target behaviorを本書で変更しない。変更が必要な場合はdecision briefを提示し、ユーザー合意後にtarget experienceのdecision logへ反映する。
 
-| 文書 | 答える問い |
-| --- | --- |
-| target-experience.md | 何を作るか。操作、表示、停止条件、復旧、最終成果物 |
-| 本書 | どう作るか。設計原則、component、依存、実装順序、品質ゲート |
+## 1. 設計原則
 
-本書の役割は3つある。
+原則はtarget experienceが要求する性質と、それが破れたときの失敗から導出する。参考実装の観測はこれらを補強する材料であり、根拠そのものではない。観測の詳細は[reference implementation assessment](../research/reference-implementation-assessment.md)にある。
 
-1. target-experienceの`Proposed`（implementation planで検証する実装詳細）を確定させる
-2. `Open`（ユーザー判断または技術検証が必要）へ推奨案を提示し、ユーザー合意後の決定を反映する
-3. componentと依存関係を定義し、実装子Issueの発行根拠にする
+| ID | 原則 | 本projectでの必要性 |
+| --- | --- | --- |
+| P-002 | **単一のcore engineを持つ**。active host経路とheadless経路が同じengineを共有し、round orchestrationを二重実装しない | 2つのentry pointが別のorchestrationを持つと、GitHub永続化gateやclarification上限の変更が片方に反映されず、同じ状態遷移が経路によって異なる結果になる |
+| P-003 | error分類をexit code、構造化出力、`gh api`のstatusで行う。出力文字列の部分一致による分類を禁止する | 一時障害の誤判定はretryとstate遷移を直接誤らせる。本projectはreview本文そのものを扱うため、`timeout`や`quota`を論じる文が分類対象へ混入する |
+| P-004 | GitHubからの取得は`--json`の構造境界で行う。出力の行分割で本文を切らない | metadata markerに複数行JSONを格納する。read-after-writeの本文hash照合も本文が壊れれば成り立たない |
+| P-005 | GitHubへ投稿する本文はfile経由で渡す。本文をcommand line引数へ置かない | final reportとdecision briefは長文になる。Windowsのcommand line長制限へ到達すると環境依存で失敗する |
+| P-006 | permission bypass flagをcode上で構築しない。禁止語のcontract testを置く | target experience Section 9が`bypassPermissions`相当をpresetから使用不可にすることをDecidedとしている。構築経路が存在すれば設定次第で有効化され得る |
+| P-007 | canonical recordとユーザー判断の受理を、producerの認証を伴う条件で行う | merge承認、仕様判断、follow-up許可をGitHubから読む。受理条件が緩いと、書込可能な別ユーザーがworkflow authorityを取得できる |
+| P-008 | promptへ埋め込むGitHub由来のtextをfenceし、データであって指示ではないと明示する | Issue本文、comment、review threadはすべて外部入力であり、agentのinstructionとして解釈され得る |
+| P-009 | artifactはrunごとのdirectoryへ、作成者のみがアクセスできる権限で作成する。権限表現をOSごとに定義する | artifactにはprivate repositoryのdiffとreview内容が含まれる。POSIXのmode指定だけではWindowsで保護されない |
+| P-010 | ruffとmypyをPhase 0からCIへ入れる | 後から導入すると既存code全体の修正が必要になり、導入自体が先送りされる |
+| P-011 | testはagent CLIと`gh`をprocess境界でfakeし、live serviceへ接続せず全件実行できる状態を保つ | 実行するとGitHubへ書き込む処理を対象にするため、process境界のfakeがなければCIでの全件実行が成立しない |
+| P-012 | versionとgit tagを最初から運用する | PluginとController CLIはprotocol versionを交換する。versionが実体を持たないとこの機構が機能しない |
+| P-013 | すべてのcodeを`src/`配下のpackageへ置き、`sys.path`操作を禁止する | Controllerは任意repositoryから呼べるinstall済みpackageであることが要件。repository相対pathへ依存すると成立しない |
+| P-014 | subprocess呼び出しはlist形式のargvで行う。`shell=True`、`os.system`、`eval`、`exec`を使用しない | agentへ渡す値にはIssue本文やreview結果が含まれ、shell経由ではinjection面になる |
+| P-015 | 本projectのcodeでcredentialを保持しない。認証は認証済みCLIへ委譲し、agentごとの到達可能範囲をC-06で制御する | 「渡さない」だけではsubprocessが環境変数やhome配下の設定へ到達できる。委譲と隔離は別の設計項目である |
 
-### 本書で決めないこと
+`P-001`（runtime依存の方針）はPhase 0で決定する技術判断であり、原則ではない。Section 7を参照。
 
-- **target behaviorの変更**は行わない。変更が必要な場合はdecision briefとして提示し、ユーザーの明示回答後にtarget-experienceのdecision logへ反映する
-- **ユーザー判断が必要な事項の確定**は行わない。本書が単独で`Open`を`Decided`へ変更することはない
-- **各componentのAPI詳細設計**は行わない。本書はcomponentの責務境界（seam）の位置までを固定し、signature levelの設計は各子IssueのPRで行う
+### P-002の意味
 
-### 用語
+禁止するのは、2つのentry pointがそれぞれround orchestrationを実装することである。entry pointが持ってよいのは、引数解析、session boundaryの受け渡し、表示の3つに限る。state遷移、round管理、GitHub投稿の判断はすべてcore engineに置く。
 
-target-experienceのSection 2と同じ`Decided` / `Proposed` / `Open` / `Superseded`を使用する。本書が導入する実装原則は`P-NNN`、componentは`C-NN`、実装phaseは`Phase N`で参照する。
+## 2. active host protocol
 
-## 2. 設計原則
+本節は他のcomponentの前提になる。
 
-### 2.1 原則の導き方
+### 2.1 制約
 
-本書の設計原則は、target-experienceが要求する性質と、それが破れたときに起きる失敗から導出する。
+Controller CLIはClaude Code sessionの子processとして起動されるため、親のLLM turnを呼び戻せない。TUIへのキー入力注入も禁止されている。したがって「core engineが長時間loopを回し、必要になったらClaudeを呼ぶ」構造は成立しない。その構造はClaudeのsubprocess化（active session契約の違反）かSkill側への再実装（P-002違反）のいずれかになる。
 
-参考実装（[ADR-0002](../decisions/0002-independent-reimplementation.md)に出典を記録）の調査結果は、**同種の設計でどの失敗が実際に起きるかを示す傍証**として併記する。原則の正当性は本projectの要件から自立して説明し、外部の評価を根拠にしない。
+### 2.2 制御の反転
 
-傍証として参照するaudit文書について、次の点を明示する。
-
-| 項目 | 内容 |
-| --- | --- |
-| 所在 | 参考実装repository内の文書 |
-| Auditor表記 | Anthropic Claude（Claude Code） |
-| 対象 | 現行より前の時点のcommit（本repositoryはADR-0002により、参考実装のcommit識別子を正式な参照として記録しない） |
-| 現行との乖離 | audit本文が最大moduleとして挙げる規模に対し、本調査時点の作業copyでは同moduleが1.5倍以上へ増加していた |
-
-したがってこのauditは独立した第三者保証ではなく、対象commitも現行から乖離している。総合gradeを保証として扱わず、**個別に再現確認できた観測事実だけ**を引用する。
-
-### 2.2 原則
-
-| ID | 原則 | 本projectでの必要性 | 傍証（参考実装で観測された失敗） |
-| --- | --- | --- | --- |
-| P-002 | **単一のcore engineを持つ**。active host経路とheadless経路が同じengineを共有し、round orchestrationを二重実装しない | target-experienceはSkill主経路とheadless CLI補助経路の両方を要求する（D-014）。両者が別のorchestrationを持つと、GitHub永続化gate（Section 5.3）やclarification上限（D-011）の変更が片方に反映されず、同じ状態遷移が経路によって異なる結果になる | CLI用とSkill用でround orchestrationが二重実装され、protocol変更のたびに両方へ反映する必要が生じていた |
-| P-003 | error分類をexit code、構造化出力、`gh api`のstatusで行う。出力文字列の部分一致による分類を禁止する | 一時障害の誤判定はretryとstate遷移を直接誤らせる。本projectはreview本文そのものを扱うため、`timeout`や`quota`を論じるreview文が分類対象へ混入する | `quota` / `timeout` / `overloaded`等の語をfree-textから拾って一時障害と判定していた。HTTP statusも`"404"`の部分一致で判定していた |
-| P-004 | GitHubからの取得は必ず`--json`の構造境界で行う。出力の行分割で本文を切らない | metadata markerに複数行JSONを格納するため、行分割前提の取得では成立しない。read-after-writeの本文hash照合も本文が壊れれば成り立たない | comment本文を`--jq '.[].body'`で取得して改行分割しており、複数行bodyが1行ずつ別fragmentになっていた |
-| P-005 | GitHubへ投稿する本文はfile経由で渡す。本文をcommand line引数へ置かない | final reportとdecision briefは長文になる。Windowsのcommand line長制限へ到達すると、投稿が環境依存で失敗する | Skill helper層が`--body`直渡しだった（coreの投稿関数は既にfile経由を使用しており、これはhelper層固有の問題） |
-| P-006 | permission bypass flagをcode上で構築しない。禁止語のcontract testを置く | target-experience Section 9は`bypassPermissions`と`--dangerously-skip-permissions`相当をpresetから使用不可にすることをDecidedとしている。code上に構築経路が存在すれば、設定や分岐次第で有効化され得る | skill modeがbypass flagを無条件付与し、文書上の「bypassはopt-in」という説明と実挙動が矛盾していた |
-| P-007 | ユーザー決定として受理するGitHub commentを、設定されたGitHub loginのallowlistで制限する | 本projectはmerge承認、仕様判断、follow-up Issue許可をGitHub commentから読む。受理条件が緩いと、書込可能な別ユーザーがworkflow authorityを取得できる。詳細はSection 6のC-04 | 本文末尾の署名行だけで「人間の要求」と判定しており、書込可能repositoryでは誰でも詐称できた |
-| P-008 | promptへ埋め込むGitHub由来のtextをfenceし、データであって指示ではないと明示する | Issue本文、comment、review threadはすべて外部入力であり、そのままagentのinstructionとして解釈され得る | Issue本文やcommentを区切りなくpromptへ埋め込んでいた |
-| P-009 | artifactはrunごとのdirectoryへ、作成者のみがアクセスできる権限で作成する。予測可能な共有pathを使わない。権限表現をOSごとに定義する | artifactにはprivate repositoryのdiffとreview内容が含まれる。POSIXのmode指定だけではWindowsで保護されない | 予測可能な`/tmp`配下のpathへdefault umaskでagent responseを書いていた |
-| P-010 | ruffとmypyをPhase 0からCIへ入れる | 後から導入すると既存code全体の修正が必要になり、導入自体が先送りされる | 2万行規模に達した時点でlint / type gateを持たなかった |
-| P-011 | testはagent CLIと`gh`をprocess境界でfakeし、live external service・agent CLI・GitHubへ接続せず全件実行できる状態を保つ（test isolationの要件であり、Section 8のruntime依存方針とは別の論点） | 本projectのtestは、実行するとGitHubへ書き込む処理を対象にする。process境界のfakeがなければ、CIでの全件実行が成立しない | agent CLIと`gh`をprocess境界でfakeすることで、外部依存なしに全testが動作していた |
-| P-012 | versionとgit tagを最初から運用する | PluginとController CLIはprotocol versionを交換する（D-026）。versionが実体を持たないとこの機構が機能しない | 400 commit以上にわたりversionが固定でtagもなかった |
-| P-013 | すべてのcodeを`src/`配下のpackageへ置き、`sys.path`操作を禁止する。外部へはconsole entry pointで公開する | Controllerは任意repositoryから呼べるinstall済みpackageであることが要件（D-026）。repository相対pathへ依存すると成立しない | helper群がpackage外にあり、`sys.path.insert`でpackage内部のprivate関数を参照していた |
-| P-014 | subprocess呼び出しは必ずlist形式のargvで行う。`shell=True`、`os.system`、`eval`、`exec`を使用しない | agentへ渡す値にはIssue本文やreview結果が含まれ、shell経由ではinjection面になる | 全subprocess呼び出しがlist形式で、shell injection面が存在しなかった |
-| P-015 | 本projectのcodeでcredentialを保持しない。認証は認証済みCLIへ委譲し、agentごとの到達可能範囲をSection 6のC-04で明示的に制御する | 「渡さない」だけではsubprocessが環境変数やhome配下の設定へ到達できる。委譲と隔離は別の設計項目である | state fileやlogへ秘密情報が入らない設計だった |
-
-`P-001`は依存方針に関する技術判断であり、原則表へは含めない。Section 8のとおりPhase 0のprototype比較とCodex reviewで決定し、重大なtrade-offが判明した場合だけユーザーへ確認する。
-
-### 2.3 P-002の意味
-
-target-experienceは、対話型Claude Code Skillを主経路、`cc-review` headless CLIを補助・復旧経路と定めている（D-014）。2つのentry pointが存在すること自体は要件である。
-
-本書が禁止するのは、**2つのentry pointがそれぞれround orchestrationを実装すること**である。entry pointが持ってよいのは、引数解析、session boundaryの受け渡し、表示の3つに限る。state遷移、round管理、GitHub投稿の判断はすべてcore engineに置く。
-
-## 3. active host protocol
-
-本節はP-002を実現するための制御構造を定義する。**本書で最も後戻りの大きい設計であり、他のcomponentはこの前提の上に構築する。**
-
-### 3.1 制約
-
-D-014は、既存の対話型Claude Code sessionがcontextを維持したままhost / coderを担当することを要件としている。ここから2つの制約が導かれる。
-
-1. Controller CLIはClaude Code sessionの**子process**として起動される。親のLLM turnを後から呼び戻して作業させることはできない
-2. ControllerからTUIへのキー入力注入は禁止されている（D-003で維持）
-
-したがって「core engineが長時間loopを回し、必要になったらClaudeを呼ぶ」構造は成立しない。その構造を採ると、Claudeをfresh subprocess化してactive sessionのcontextを失うか、Skill側へ別のorchestrationを実装してP-002へ違反するかのいずれかになる。
-
-### 3.2 制御の反転
-
-core engineを、**resume可能なstep engine**として定義する。engineはClaudeを起動しない。次に何をすべきかを返し、呼び出し側が実行する。
+core engineをresume可能なstep engineとして定義する。engineはClaudeを起動しない。次に何をすべきかを返し、呼び出し側が実行する。
 
 ```text
-engine.advance(run_id) -> 次のいずれか
-
-  HOST_ACTION   active hostが実行すべき作業（構造化）
-  AWAIT_USER    ユーザー入力待ち（AWAITING_USER_DECISION / READY_FOR_HUMAN_MERGE 等）
-  TERMINAL      終了state（MERGED / BLOCKED / FAILED / CANCELLED 等）
+engine.advance(run_id) -> HOST_ACTION | AWAIT_USER | TERMINAL
 ```
 
-主経路の流れは次のとおり。Controllerが起動するのはCodex reviewerだけであり、Claude coderは常にactive host側で動作する。
+主経路の流れは[architecture overview](../architecture/overview.md)のsequence図を参照。engineは1回のadvanceで1 actionだけを返し、結果がGitHubへ永続化され確認されるまで次のactionを決めない。
 
-```mermaid
-sequenceDiagram
-    actor User as ユーザー
-    participant Host as active Claude Code session
-    participant Ctrl as Controller CLI
-    participant GH as GitHub
-    participant Codex as Codex reviewer
+### 2.3 HOST_ACTIONの種類
 
-    User->>Host: /cc-review pr 512 --repo OWNER/REPO
-    loop 1回のadvanceで1 action
-        Host->>Ctrl: cc-review advance --run id
-        Ctrl->>GH: conversationとcheckpointからstate再構築
-        GH-->>Ctrl: canonical record
-        opt reviewが必要なstate
-            Ctrl->>Codex: fresh read-only subprocessを起動
-            Codex-->>Ctrl: findings
-            Ctrl->>GH: 投稿してread-after-write確認
-        end
-        Ctrl-->>Host: HOST_ACTION / AWAIT_USER / TERMINAL
-        Host->>Host: actionを自身のcontextで実行
-        Host->>Ctrl: cc-review submit --run id --action id --result file
-        Ctrl->>GH: 投稿してread-after-write確認
-        Ctrl->>Ctrl: checkpoint更新
-    end
-    Ctrl-->>Host: TERMINAL または AWAIT_USER
-    Host-->>User: state、次action、GitHub URLを表示
-```
-
-engineは1回のadvanceで1つのactionだけを返し、その間に状態を進めない。actionの結果がGitHubへ永続化され確認されるまで、次のactionは決まらない（Section 5.3のgate）。
-
-### 3.3 HOST_ACTIONの種類
-
-初期案。Phase 6で確定する。
+初期案。Phase 8で確定する。
 
 | Action | active hostが行うこと |
 | --- | --- |
 | `APPLY_FINDINGS` | blocking findingを評価し、修正・test・commit・pushする |
 | `ASK_CLARIFICATION` | Codex findingへの質問文を作成する |
 | `ANSWER_CLARIFICATION` | Codexからの確認要求へ回答を作成する |
-| `DRAFT_DECISION_REQUEST` | 判断が必要な理由、候補、推奨をdraftする（D-010） |
+| `DRAFT_DECISION_REQUEST` | 判断が必要な理由、候補、推奨をdraftする |
 | `DRAFT_DECISION_BRIEF` | Codex verdictを反映した最終briefを作成する |
-| `DRAFT_FOLLOWUP_CANDIDATES` | 重複確認済みのfollow-up候補を最大3件draftする（D-024） |
-| `STRUCTURE_USER_INTENT` | merge gateのユーザー入力を4 intentへ構造化する（D-013） |
+| `DRAFT_FOLLOWUP_CANDIDATES` | 重複確認済みのfollow-up候補を最大3件draftする |
+| `STRUCTURE_USER_INTENT` | merge gateのユーザー入力を4 intentへ構造化する |
 | `RUN_LOCAL_TESTS` | 対象headでlocal testを実行し結果を返す |
-| `IMPLEMENT_ISSUE` | Issue要件から実装しPRを作成する（Issue mode） |
+| `IMPLEMENT_ISSUE` | Issue要件から実装しPRを作成する |
 
-### 3.4 agentごとの起動主体
+### 2.4 agentごとの起動主体
 
 | Agent | 起動主体 | 理由 |
 | --- | --- | --- |
-| Claude coder（主経路） | 起動しない。active hostがHOST_ACTIONを実行する | active sessionのcontext維持がD-014の要件 |
+| Claude coder（主経路） | 起動しない。active hostがHOST_ACTIONを実行する | active sessionのcontext維持が要件 |
 | Claude coder（headless経路） | Controllerがsubprocessとして起動するadapter | 対話sessionが存在しない復旧経路のため。engineから見たinterfaceは主経路と同一 |
-| Codex reviewer / final reporter | Controllerがfresh subprocessとして起動する | read-onlyであり親contextを必要としない。D-015がfresh sessionを要求する |
+| Codex reviewer / final reporter | Controllerがfresh subprocessとして起動する | read-onlyであり親contextを必要としない |
 
-headless adapterとactive host adapterは別実装とし、engineは両者を同じ`HOST_ACTION`の実行者として扱う。engineにどちらの経路かを分岐させない。
-
-### 3.5 受入条件
-
-- 同一の対話sessionのcontextを維持したまま、複数roundを進行できる
-- 主経路でClaude subprocessを起動しない
-- TUIへのキー入力注入を行わない
-- 同一runに対し、advance / submitを繰り返す以外の制御経路が存在しない
-- headless経路と主経路が同じengine・同じstate遷移を通ることを、両経路の同一シナリオtestで確認できる
-
-## 4. 層構造とpackage layout
-
-### 4.1 層
-
-| 層 | 責務 | 副作用 | 依存 |
-| --- | --- | --- | --- |
-| domain | state machine、event、command、ledger | なし（純粋関数） | なし |
-| schema | agent入出力の定義と検証 | なし | なし |
-| process | subprocess起動・停止のOS抽象 | process | なし |
-| transport | GitHub canonical conversationの投稿・取得・検証 | GitHub | domain、schema、process |
-| security | trust判定、permission profile、credential隔離 | 環境変数、filesystem | process |
-| runtime | 隔離checkout、Codex runtime、host adapter | process、filesystem | process、security |
-| workflow | step engineと各protocol | transport、runtime経由のみ | 全層 |
-| state | checkpoint、resume、artifact retention | filesystem | domain、transport、security |
-| entrypoint | 引数解析、session boundary、表示 | 標準入出力 | workflow |
-
-domain層は副作用を持たず、`transition(state, event) -> (state, [command])`の形で次に行うべきことをcommandとして**記述する**。commandの**実行**はworkflow層が行う。これによりstate遷移の全経路を純粋関数のtestで網羅できる。
-
-### 4.2 package layout
+## 3. Package layout
 
 ```text
 src/claude_code_codex_review_loop/
-  __init__.py
   errors.py                 構造化error分類（P-003）
   config.py                 repository設定 -> user設定 -> 組込み既定値
   domain/                   states / events / commands / machine / ledger / ids
-  schema/                   validate / review / decision / followup / report / merge
+  schema/                   validate / registry / migrate / envelope / review /
+                            decision / followup / report / merge / action
   process/                  spawn / terminate / job_object / process_group
-  transport/                gh / conversation / render / metadata / threads
-  security/                 trust / permission / credentials / fs_permissions
+  policy/                   redaction / permission_profile / trust_rules
+  transport/                gh / conversation / marker / render / threads / ledger_chain
+  identity/                 actor / allowlist / credentials / fs_permissions
   runtime/                  checkout / codex / host_active / host_headless / prompt
   workflow/                 engine / actions / pr_mode / issue_mode / clarification /
                             decision / followup / qualification / reporter / merge_gate
-  state/                    checkpoint / resume / retention
+  state/                    resume / retention / salvage
   cli.py                    console entry point `cc-review`
 ```
 
-`plugin/`にはSKILL.mdと薄いlauncherだけを置く。workflow判断を持たず、install済みCLIをprotocol version交換のうえ呼び出す（D-026）。
+`policy`は純粋関数として評価だけを行い、GitHubからactor情報を取得しない。actorの解決とcredential隔離は`identity`が担う。これによりtransportがredactionを利用しつつ、identityがtransportを利用する一方向の依存になる。
 
-`wrappers/`にはWindows Terminalと`tmux`の任意wrapperを置く。wrapperなしでcore loopが動作することを設計条件とする（D-017）。
+`plugin/`にはSKILL.mdと薄いlauncherだけを置く。`wrappers/`には任意wrapperを置き、wrapperなしでcore loopが動作することを設計条件とする。
 
-## 5. Component一覧
+## 4. Component
 
-`docs/architecture/README.md`が挙げていた10項目に対し、Section 3の制御構造とSection 6のsecurity要件を反映して13 componentへ再編する。順序矛盾の原因になっていた2項目を前段と後段へ分割し、横断的なsecurity境界を独立componentとして追加した。
-
-| ID | Component | architecture項目 | 依存 | Phase |
+| ID | Component | 責務 | 依存 | Phase |
 | --- | --- | --- | --- | --- |
-| C-01 | domain state machine、event、command | 1 | なし | 1 |
-| C-02 | process abstraction（Windows / POSIX） | 10（前段） | なし | 2 |
-| C-03 | GitHub canonical conversation transport | 2 | C-01、C-02 | 3 |
-| C-04 | trust、permission、credential境界 | 新規（横断） | C-02、C-03 | 4 |
-| C-05 | checkpoint、resume、artifact retention | 9 | C-01、C-03、C-04 | 5、12 |
-| C-06 | active host protocolとstep engine | 3（前段） | C-01、C-03、C-05 | 6 |
-| C-07 | Codex fresh reviewer runtimeと隔離checkout | 4 | C-02、C-04、C-06 | 7 |
-| C-08 | PR mode review loop | 5（前段） | C-06、C-07 | 8 |
-| C-09 | decision / clarification / follow-up protocol | 6 | C-06、C-08 | 9 |
-| C-10 | test・CI qualificationとfinal reporter | 7 | C-05、C-07、C-08 | 10 |
-| C-11 | human merge gate | 8 | C-04、C-10 | 11 |
-| C-12 | Issue modeとIssue-to-PR handoff | 5（後段） | C-08、C-09 | 13 |
-| C-13 | Plugin配布と任意wrapper | 3（後段）、10（後段） | C-02、C-06 | 14 |
+| C-01 | domain state machine | 17 stateと全遷移を副作用のない関数で表現する | なし | 1 |
+| C-02 | agent protocol schemaとcheckpoint envelope | agent入出力とcheckpoint envelopeのschema、validation、versioning、migration | C-01 | 2 |
+| C-03 | process abstraction | 子process treeの起動・停止・timeoutのOS抽象 | なし | 3 |
+| C-04 | security policy | redaction規則、permission profile、trust ruleの純粋な評価 | C-02 | 4 |
+| C-05 | GitHub transport | canonical recordの投稿、read-after-write確認、producer認証、thread操作 | C-01、C-02、C-03、C-04 | 5 |
+| C-06 | actor認証とcredential隔離 | GitHub actorの解決とallowlist照合、agentごとの到達可能範囲、OS別file権限 | C-03、C-04、C-05 | 6 |
+| C-07 | resumeとretention | GitHubからのstate再構築、artifactの保持と削除 | C-02、C-05、C-06 | 7、14 |
+| C-08 | active host protocolとstep engine | Section 2のprotocol。advance / submitの境界 | C-02、C-05、C-07 | 8 |
+| C-09 | Codex fresh runtimeと隔離checkout | turnごとのread-only subprocessとexact head checkout | C-03、C-06、C-08 | 9 |
+| C-10 | PR mode review loop | review→fix→re-reviewのround管理 | C-08、C-09 | 10 |
+| C-11 | decision / clarification / follow-up | 判断フロー、clarification上限、follow-up許可gate | C-08、C-10 | 11 |
+| C-12 | qualificationとfinal reporter | local testとCIの確認、final reportの生成 | C-07、C-09、C-10 | 12 |
+| C-13 | human merge gate | 対話gateと明示承認後のgated merge | C-06、C-12 | 13 |
+| C-14 | Issue modeとhandoff | Issue要件の取得、既存PR再利用、双方向handoff | C-10、C-11 | 15 |
+| C-15 | Plugin配布と任意wrapper | version付きPlugin、監視 / 継続wrapper | C-03、C-08 | 16 |
 
-### 5.1 依存グラフ
+依存図は[architecture overview](../architecture/overview.md)にある。
 
-矢印は構築順（依存される側 → 依存する側）を示す。各nodeの2行目はSection 11の実装Phase。
+## 5. Componentの主要な決定と受入条件
 
-```mermaid
-flowchart TD
-    subgraph L1["基盤"]
-        C01["C-01 domain state machine<br/>Phase 1"]
-        C02["C-02 process abstraction<br/>Phase 2"]
-    end
+受入条件はIDで参照する。節番号は参照に使わない。
 
-    subgraph L2["永続化と境界"]
-        C03["C-03 GitHub transport<br/>Phase 3"]
-        C04["C-04 trust / permission / credential<br/>Phase 4"]
-        C05["C-05 checkpoint / resume / retention<br/>Phase 5, 12"]
-    end
+### C-01 domain state machine
 
-    subgraph L3["実行基盤"]
-        C06["C-06 active host protocol / step engine<br/>Phase 6"]
-        C07["C-07 Codex fresh reviewer runtime<br/>Phase 7"]
-    end
+遷移関数は`(state, event) -> (state, [command])`。GitHub永続化とread-after-write確認の完了をeventとして要求し、gate未通過の遷移を表現できないようにする。
 
-    subgraph L4["workflow"]
-        C08["C-08 PR mode review loop<br/>Phase 8"]
-        C09["C-09 decision / clarification / follow-up<br/>Phase 9"]
-        C10["C-10 qualification / final reporter<br/>Phase 10"]
-        C11["C-11 human merge gate<br/>Phase 11"]
-        C12["C-12 Issue mode / handoff<br/>Phase 13"]
-    end
+| ID | 受入条件 |
+| --- | --- |
+| AC-C01-01 | 17 stateすべてが到達可能で、遷移表と遷移図をdata drivenで照合できる |
+| AC-C01-02 | 未定義遷移と到達不能stateをtestが検出する |
 
-    subgraph L5["配布"]
-        C13["C-13 Plugin配布 / 任意wrapper<br/>Phase 14"]
-    end
+### C-02 agent protocol schemaとcheckpoint envelope
 
-    C01 --> C03
-    C02 --> C03
-    C02 --> C04
-    C03 --> C04
-    C01 --> C05
-    C03 --> C05
-    C04 --> C05
-    C01 --> C06
-    C03 --> C06
-    C05 --> C06
-    C02 --> C07
-    C04 --> C07
-    C06 --> C07
-    C06 --> C08
-    C07 --> C08
-    C06 --> C09
-    C08 --> C09
-    C05 --> C10
-    C07 --> C10
-    C08 --> C10
-    C04 --> C11
-    C10 --> C11
-    C08 --> C12
-    C09 --> C12
-    C02 --> C13
-    C06 --> C13
-```
+agentとの構造化protocolとcheckpoint envelopeの**単一の所有者**とする。schemaをtransportや各workflowへ分散させない。
 
-Phase 15のrelease acceptanceは全componentを対象とするため、図には含めていない。
+所有するschema: Codex review、coder result、clarification質問 / 回答、decision request / verdict / brief、follow-up候補と評価、final report、merge intentと承認record、`HOST_ACTION` envelopeとsubmit envelope、checkpoint envelope。
 
-## 6. Component定義
+必須: すべてのschemaにschema versionを持たせる。未知versionは推測補完せずvalidation errorとする。normalizationやrepairを行う場合も、**repair後に必ず同じvalidatorを通す**。補完してよい範囲を空白正規化や既定値のような損失のない変換に限定し、意味的fieldの捏造を禁止する。
 
-各componentについて責務、主要な決定、観測可能な受入条件を示す。API詳細は各子IssueのPRで設計する。
+| ID | 受入条件 |
+| --- | --- |
+| AC-C02-01 | 代表schema corpusとmalformed corpusの両方で、未知version、必須field欠落、型不一致、size超過、cross-field違反が区別できるerrorになる |
+| AC-C02-02 | repair経路を通った出力が、repairを経ない出力と同じvalidatorで検証される |
+| AC-C02-03 | 旧versionのenvelopeがmigrationで読める。migrationできないversionはsilentに無視せずerrorになる |
 
-### C-01. domain state machine、event、command
+### C-03 process abstraction
 
-- **責務**: target-experience Section 7の17 stateと全遷移を、副作用のない関数として表現する
-- **主要な決定**: 遷移関数は`(state, event) -> (state, [command])`。GitHub永続化とread-after-write確認の完了をeventとして要求し、gate未通過の遷移を表現できないようにする
-- **受入条件**: 17 stateすべてが到達可能。Section 7の遷移図と遷移表をdata drivenで照合できる。未定義遷移と到達不能stateをtestが検出する
+POSIXはprocess group、WindowsはJob Object相当で子孫を停止する。**Windows側は新規実装**とし、移植元を前提にしない。sleepは標準libraryで行い外部binaryへ依存しない。
 
-### C-02. process abstraction（Windows / POSIX）
+| ID | 受入条件 |
+| --- | --- |
+| AC-C03-01 | 両OSで、timeoutとCtrl+C後に孫processが残らない |
+| AC-C03-02 | Ctrl+C 1回でgraceful cancellation、2回目で強制停止になる |
 
-- **責務**: 子process treeの起動・停止・timeoutをOS差分を吸収して提供する
-- **主要な決定**: WindowsはJob Object相当、POSIXはprocess groupで子孫を確実に停止する。argvはlist形式のみ（P-014）。sleepは標準libraryで行い外部binaryへ依存しない
-- **受入条件**: 両OSのCIで、timeoutとCtrl+C後に孫processが残らないことをtestが確認する。Ctrl+C 1回でgraceful、2回目で強制停止
+### C-04 security policy
 
-### C-03. GitHub canonical conversation transport
+GitHubへ問い合わせずに評価できる純粋なpolicyだけを持つ。redactionは投稿本文、prompt、log、artifactへ共通に適用し、patternを一元管理する。fork PR、allowlist外author、agent設定fileの変更（`CLAUDE.md`、`AGENTS.md`、`.claude/**`、`.codex/**`、`.github/workflows/**`）に対するtrust ruleを、入力データに対する純粋な判定として定義する。
 
-- **責務**: agent発言とユーザー決定をGitHubへ代理投稿し、再取得して一致を確認する（Section 5.3）
-- **主要な決定**: 投稿後にcomment / review ID、URL、本文hash、対象head SHAを取得できるまでturnをcompletedにしない。timeout時は成否を推測せずidempotency markerで検索してから再投稿する
-- **主要な決定**: 取得は`--json`境界（P-004）。投稿本文はfile経由（P-005）。metadata markerは`CC_REVIEW_META`とし、HTML comment内のJSONとして格納する。単一行前提を置かない
-- **主要な決定**: review threadの取得、解決状態の判定、line findingへのreplyを扱う。threadを作成できない場合は元comment URLを含むconversation commentへfallbackする
-- **主要な決定**: 公開用renderは発言者とmodelを明示し、credential redactionを投稿前に適用する
-- **受入条件**: fake `gh`に対し、投稿→再取得→hash一致→ID記録が検証できる。timeout後の再投稿で重複commentが発生しない。canonical commentが改変された場合にsilent repairせず停止する。redaction対象の文字列が投稿本文へ現れないことをtestが確認する
+| ID | 受入条件 |
+| --- | --- |
+| AC-C04-01 | redaction対象文字列が投稿本文、prompt、log、artifactのいずれにも現れない |
+| AC-C04-02 | 禁止flagがargv構築経路に存在しないことをcontract testが検出する |
+| AC-C04-03 | fork PRとagent設定fileの変更に対する判定が、入力データだけで再現できる |
 
-### C-04. trust、permission、credential境界
+### C-05 GitHub transport
 
-target-experience Section 9のsafety behaviorを、agentごとの到達可能範囲として具体化する。
+投稿後にcomment / review ID、URL、本文hash、対象head SHAを取得できるまでturnをcompletedにしない。timeout時は成否を推測せず、idempotency markerで検索してから再投稿する。取得は`--json`境界、投稿本文はfile経由、投稿前にC-04のredactionを適用する。
 
-#### ユーザー本人の識別
+**producer認証と編集耐性**: markerの存在だけを根拠にrecordを復元しない。
 
-- **主要な決定（D-031）**: ユーザー決定として受理するcommentは、repository設定またはuser設定で許可した**GitHub loginのallowlistと完全一致**する場合に限る。`authorAssociation`とrepository permissionは補助条件として使い、単独の判定根拠にしない
-- **主要な決定**: allowlistが未設定、または設定を取得できない場合は、`authorAssociation`やrepository permissionへfallbackせず、ユーザー判断を受理しない（fail closed）
-- **主要な決定**: bot accountからのcommentをユーザー決定として受理しない
-- **主要な決定**: 受理したcommentのbody hashを記録し、編集・削除された場合はその決定を失効させる。allowlistから外れたloginの過去決定も、以後のgate通過根拠にしない
-- **主要な決定**: 承認はintent、repository、Issue / PR番号、head SHA、merge method、candidate fingerprintへbindする
-- **受入条件**: allowlist外のloginが投稿した承認commentがmerge、follow-up Issue作成、仕様判断のいずれにも使われないことをtestが確認する
+- canonical workflow recordとして受理できるGitHub actorを設定で明示する。actor情報を取得できない、または一致しない場合はfail closedとする
+- 予約markerはControllerだけが付加する。agent生成本文に含まれる予約markerは投稿前に除去またはescapeする
+- 検証対象へcomment ID、author login、created / updated timestamp、repository、Issue / PR番号、run ID、turn / action ID、対象head SHA、payload hashを含める
+- 後続recordが直前recordのhashを参照するchainを持たせる。hashを同一comment内に置くだけでは、comment全体を書き換えられた場合の真正性を示せない
+- 不整合を検出した場合はsilent repairせず`BLOCKED`とする
 
-#### Codex reviewerのdurable read-only
+| ID | 受入条件 |
+| --- | --- |
+| AC-C05-01 | 投稿→再取得→hash一致→ID記録がfake `gh`で検証できる |
+| AC-C05-02 | timeout後の再投稿で重複commentが発生しない |
+| AC-C05-03 | review threadの取得、解決状態の判定、line findingへのreplyが動作する。thread不可時はcomment URL付きconversation commentへfallbackする |
+| AC-C05-04 | allowlist外authorの偽marker、agent本文へ埋め込まれた予約marker、本文とmarkerの同時編集、record削除、順序入れ替え、sidecar欠落・差替えを、fresh resumeで検出して停止する |
 
-「write credentialを渡さない」を、到達可能範囲の制御として定義する。
+### C-06 actor認証とcredential隔離
 
-- **主要な決定**: reviewer環境から`GH_TOKEN` / `GITHUB_TOKEN`等のtoken変数を除去する
-- **主要な決定**: `GH_CONFIG_DIR`、HOME相当（`HOME` / `USERPROFILE`）、`XDG_CONFIG_HOME`をreviewer専用の一時領域へ差し替える
-- **主要な決定**: git credential helperを無効化し、`GIT_ASKPASS` / `SSH_ASKPASS`が対話的に資格情報を取得しないようにする
-- **主要な決定**: 隔離checkoutのremoteへpush可能な構成を与えない
-- **受入条件**: reviewer環境からGitHub mutationと実repositoryへの書込を試みるnegative testが、いずれも失敗することを確認する
+ユーザー決定として受理するcommentは、設定したGitHub loginのallowlistと完全一致する場合に限る（D-031）。`authorAssociation`とrepository permissionは補助条件とし、単独の判定根拠にしない。allowlistが未設定または取得できない場合はfail closedとし、bot accountを受理しない。受理したcommentのbody hashを記録し、編集・削除で決定を失効させる。承認はintent、repository、Issue / PR番号、head SHA、merge method、candidate fingerprintへbindする。
 
-#### Claude coderのpermission
+Codex reviewer環境から`GH_TOKEN` / `GITHUB_TOKEN`等のtoken変数を除去し、`GH_CONFIG_DIR`、HOME相当、`XDG_CONFIG_HOME`をreviewer専用の一時領域へ差し替える。git credential helperを無効化し、`GIT_ASKPASS` / `SSH_ASKPASS`が対話的に資格情報を取得しないようにする。隔離checkoutのremoteへpush可能な構成を与えない。
 
-- **主要な決定**: Auto modeの利用可否を検出し、不可の場合は`acceptEdits` -> `default` -> `dontAsk`の順でfallbackする。`bypassPermissions`相当をcode上で構築しない（P-006）
-- **主要な決定**: coderはfeature branchへのpushまで、merge・follow-up Issue作成・deployはController専用とする。tool permissionとworkflow承認を別のauthorityとして扱う
-- **主要な決定**: 例外blockではbypassせず、Permission ID、tool / command、理由、risk、head SHA、resume方法をGitHubへ記録して`AWAITING_TOOL_PERMISSION`へ遷移する。resume時はPermission IDとheadを再検証し、停止した操作だけを再実行する
-- **受入条件**: 禁止flagがargvへ現れないことをcontract testが確認する。`AWAITING_TOOL_PERMISSION`からのresumeが停止点の操作だけを再実行することをtestが確認する
+Claude coderはfeature branchへのpushまで。merge、follow-up Issue作成、deployはController専用とする。例外blockではbypassせず、Permission ID、tool / command、理由、risk、head SHA、resume方法をGitHubへ記録して`AWAITING_TOOL_PERMISSION`へ遷移する。
 
-#### 信頼できない入力
+artifactとtemp fileは、POSIXでは`0600` / `0700`、Windowsでは作成者のみに限定したACLで作成する。
 
-- **主要な決定**: fork PRまたはallowlist外authorのPRでは、agent instructions、hooks、workflow、testの実行を既定拒否する
-- **主要な決定**: `CLAUDE.md`、`AGENTS.md`、`.claude/**`、`.codex/**`、`.github/workflows/**`の変更をreview入力と表示の両方で強調する
-- **主要な決定**: promptへ埋め込むGitHub由来textをfenceする（P-008）
-- **受入条件**: fork PRに対する既定拒否と、agent設定fileの変更検出をtestが確認する
+| ID | 受入条件 |
+| --- | --- |
+| AC-C06-01 | allowlist外loginの承認commentが、merge、follow-up Issue作成、仕様判断のいずれにも使われない |
+| AC-C06-02 | allowlistを取得できない場合に、ユーザー判断を受理しない |
+| AC-C06-03 | reviewer環境からのGitHub mutation、実repository書込、GitHub write credentialへの到達が、いずれも失敗する |
+| AC-C06-04 | `AWAITING_TOOL_PERMISSION`からのresumeが、停止点の操作だけを再実行する |
+| AC-C06-05 | 両OSで、artifact directoryが作成者以外からアクセスできない |
 
-#### file権限
+### C-07 resumeとretention
 
-- **主要な決定**: artifactとtemp fileは、POSIXでは`0600` / `0700`、Windowsでは作成者のみに限定したACLで作成する。権限設定は共通interfaceの背後でOSごとに実装する
-- **受入条件**: 両OSのCIで、artifact directoryが作成者以外からアクセスできないことをtestが確認する
+resumeはGitHub canonical conversationからstateを再構築し、local checkpointはcacheとして照合する。GitHubで確認できないlocal出力を判断根拠にしない。PR lock、coder snapshot、external head updateを保持し、head変更時はreview承認とmerge承認を失効させる。artifactは正常run 30日、`FAILED` / `BLOCKED` / salvage 90日。active / lock保持中のrunを除外したbounded cleanupを起動時と明示commandで行う。
 
-### C-05. checkpoint、resume、artifact retention
+| ID | 受入条件 |
+| --- | --- |
+| AC-C07-01 | 中断後のresumeが同じturn IDから再開する |
+| AC-C07-02 | 質問のみ投稿済みのpartial turnで、質問が重複投稿されない |
+| AC-C07-03 | 外部からheadが更新された場合に旧承認が失効する |
+| AC-C07-04 | cleanupがactive / lock保持中のrunを削除しない。dry-runで対象を確認できる |
 
-- **責務**: Section 10.1のcheckpoint保存、GitHubからのstate再構築、artifactの保持と削除
-- **主要な決定**: resumeはGitHub canonical conversationからstateを再構築し、local checkpointはcacheとして照合する。GitHubで確認できないlocal出力を判断根拠にしない
-- **主要な決定**: PR lock、coder snapshot、external head updateを保存する。head変更時は承認とreview承認を失効させ、fresh reviewへ戻す
-- **主要な決定**: artifactは正常run 30日、`FAILED` / `BLOCKED` / salvage 90日。active / lock保持中のrunを除外したbounded cleanupを起動時と明示commandで行う（D-023）。保存先はrunごとのdirectoryへC-04のfile権限で作成する
-- **受入条件**: 中断後のresumeが同じturn IDから再開する。質問のみ投稿済みのpartial turnで質問が重複投稿されない。外部からheadが更新された場合に旧承認が失効する。cleanupがactive runを削除しない
+### C-08 active host protocolとstep engine
 
-### C-06. active host protocolとstep engine
+Section 2のprotocolを実装する。active host adapterとheadless adapterを別実装とし、engineから見たinterfaceを同一にする。
 
-- **責務**: Section 3で定義したstep engineとHOST_ACTION protocolを実装する
-- **主要な決定**: Section 3.2〜3.4のとおり。engineは1回のadvanceで1 actionだけを返し、結果のGitHub永続化が確認されるまで状態を進めない
-- **主要な決定**: active host adapterとheadless adapterを別実装とし、engineから見たinterfaceを同一にする
-- **受入条件**: Section 3.5のとおり
+**advance / submitの境界**: result pathはControllerがrun directory内に払い出す。呼び出し側から任意pathを受理しない。受理時にcanonical pathがrun directory配下であること、symlink / reparse pointを経由しないこと、所有者権限、size limitを検証する。`HOST_ACTION` envelopeをrun ID、action ID、action kind、repository、Issue / PR番号、expected head SHA、payload hash、schema versionへbindし、submitはこのbindingと一致する場合だけ受理する。submitはone-time nonceで一度だけconsumeし、同一内容の再送は冪等に扱い、内容の異なる重複submitは停止する。
 
-### C-07. Codex fresh reviewer runtimeと隔離checkout
+| ID | 受入条件 |
+| --- | --- |
+| AC-C08-01 | 同一の対話sessionのcontextを維持したまま複数roundを進行できる |
+| AC-C08-02 | 主経路でClaude subprocessを起動せず、TUIへのキー入力注入も行わない |
+| AC-C08-03 | 同一runに対し、advance / submitを繰り返す以外の制御経路が存在しない |
+| AC-C08-04 | headless経路と主経路が、同一シナリオで同じstate遷移を通る |
+| AC-C08-05 | stale action、異なるhead、異なるrun、異なるaction kind、path traversal、symlink経由path、size超過result、hashの異なる重複submitを、いずれも受理せず停止する |
+| AC-C08-06 | 中断後に別processからresumeして継続できる |
 
-- **責務**: review turnごとにfreshなread-only subprocessを起動し、exact headの隔離checkout内でのみ検証させる（D-015、D-025）
-- **主要な決定**: 隔離checkoutは対象headから新規作成し、review後にcheckoutごと破棄する。破棄前のdirty stateをevidenceとして記録する
-- **主要な決定**: session memoryを引き継がず、GitHub canonical conversationとfinding ledgerからcontextを毎回再構築する。渡す入力は現在headの完全diff、前headからの差分、過去findingとdisposition、Claudeの対応、clarification、ユーザー決定、test / CI結果
-- **主要な決定**: 到達可能範囲の制御はC-04に従う
-- **受入条件**: reviewerがrepositoryとGitHubへ永続変更できないことをnegative testが確認する。同一headに対する2回のreviewが、前回session状態に依存しないことを確認する
+### C-09 Codex fresh runtimeと隔離checkout
 
-### C-08. PR mode review loop
+`durable read-only`は「隔離checkout内でのtest / build / 再現に必要な一時書込は許可し、実repositoryとGitHubへの永続変更は禁止する」を意味する。隔離checkoutは対象headから新規作成し、review後に破棄する。破棄前のdirty stateをevidenceとして記録する。session memoryを引き継がず、canonical conversationとfinding ledgerからcontextを毎回再構築する。read-only Web調査を許可するprofileでも、GitHub write credentialへ到達できないようにする。
 
-- **責務**: Section 5.1の22 stepをstep engine上の流れとして実装する
-- **主要な決定**: review / fixの最大roundを設定可能とし既定3。承認は対象head SHAへbindする。PR lockにより同一PRへの同時runを防ぐ
-- **受入条件**: 実PRに対しdry-runでreview→fix→re-reviewが1 round完走する。round上限到達で`BLOCKED`へ遷移する。loop中にheadが外部更新された場合に承認が失効する
+| ID | 受入条件 |
+| --- | --- |
+| AC-C09-01 | 隔離checkout内の一時書込が成功し、review終了後にcheckoutが残らない |
+| AC-C09-02 | reviewerからの実repository書込とGitHub mutationが失敗する |
+| AC-C09-03 | 同一headに対する2回のreviewが、前回session状態に依存しない |
 
-### C-09. decision / clarification / follow-up protocol
+### C-10 PR mode review loop
 
-- **責務**: D-010のユーザー判断フロー、D-011のclarification protocol、D-024のApproved follow-up
-- **主要な決定**: clarification counterはGitHub上の`run ID + finding / decision fingerprint + turn` metadataから再構築し、head SHAだけが変わってもresetしない。review / fixの最大roundとclarification turnを別counterで管理する
-- **主要な決定**: clarification中は対象headを固定し、source変更・commit・pushを行わない。codeを変更した場合はclarificationを終了して新roundとする
-- **主要な決定**: follow-up候補は最大3件、Codex評価は`CREATE_ISSUE` / `SUMMARY_ONLY` / `LINK_EXISTING` / `REVISE_AND_RESUBMIT`。Issue作成はControllerだけが行い、候補ごとのユーザー許可をcandidate fingerprintとIssue本文hashへbindする。許可後に意味的内容が変われば許可を失効させる
-- **主要な決定**: 不許可・未回答・Issue作成失敗はfinal reportへ記録するが、非blockingなためmerge承認を無効化しない
-- **受入条件**: 5 turn上限と5つの早期終了条件を個別にtestできる。同一topic判定がhead変更をまたいで維持される。許可のない候補がIssue化されないことをtestが確認する。Issue本文変更後に旧許可が失効する
+review / fixの最大roundを設定可能とし既定3。承認は対象head SHAへbindする。PR lockにより同一PRへの同時runを防ぐ。
 
-### C-10. test・CI qualificationとfinal reporter
+| ID | 受入条件 |
+| --- | --- |
+| AC-C10-01 | 実PRに対しdry-runでreview→fix→re-reviewが1 round完走する |
+| AC-C10-02 | round上限到達で`BLOCKED`へ遷移する |
+| AC-C10-03 | 同一PRへの同時runが拒否される |
+| AC-C10-04 | 中断後に別processからresumeして継続できる |
 
-- **責務**: 承認headに対するlocal testとGitHub CIの確認、final reportの生成と投稿
-- **主要な決定**: CI pendingは設定可能なbounded foreground wait（既定20分・30秒間隔）とし、上限後は`WAITING_CI`で終了する（D-020）
-- **主要な決定**: final reportはschema検証済みJSONを正とし、Markdown・PR comment・terminal summaryをそこから決定論的にrenderする。言語はrepository設定→user設定→組込み既定（日本語）の順に解決し、未対応値はvalidation errorとする（D-019）
-- **主要な決定**: final reporterはC-07のread-only runtimeで実行し、code実行を原則必要としない
-- **受入条件**: CI timeout時に`WAITING_CI`のcheckpointが残り明示resumeで再開できる。同一JSONから同一Markdownが再現される。report生成失敗時にreview承認を保持したまま`REPORT_FAILED`へ遷移する
+### C-11 decision / clarification / follow-up
 
-### C-11. human merge gate
+clarification counterはGitHub上の`run ID + fingerprint + turn` metadataから再構築し、head SHAだけが変わってもresetしない。review / fixの最大roundとclarification turnを別counterで管理する。clarification中は対象headを固定し、source変更・commit・pushを行わない。follow-up候補は最大3件。Issue作成はControllerだけが行い、候補ごとの許可をcandidate fingerprintとIssue本文hashへbindする。不許可・未回答・作成失敗はfinal reportへ記録するが、非blockingなためmerge承認を無効化しない。
 
-- **責務**: `READY_FOR_HUMAN_MERGE`の対話gateと、明示承認後のgated merge（D-013）
-- **主要な決定**: intentは`QUESTION` / `REQUEST_CHANGES` / `APPROVE_MERGE` / `CANCEL`。曖昧な肯定、過去の承認、別PRへの承認から`APPROVE_MERGE`を推論しない
-- **主要な決定**: 承認はrepository、PR番号、approved head SHA、merge methodへbindし、いずれかが変われば失効する。承認者の識別はC-04のallowlistに従う
-- **主要な決定**: merge直前にPR open状態、現在head、review承認、local test、CI、未解決事項、mergeabilityを再取得して照合する。merge APIがtimeoutまたは不明な結果を返した場合は、再送前にPR stateとmerged commit SHAを照会する。GitHub上でmerge完了を確認できた場合だけ`MERGED`へ遷移する
-- **受入条件**: 曖昧入力が`APPROVE_MERGE`にならない。head変更後に旧承認でmergeできない。merge API timeout後に二重mergeが発生せず、確認できない場合は成功と表示しない
+| ID | 受入条件 |
+| --- | --- |
+| AC-C11-01 | 5 turn上限と5つの早期終了条件を個別にtestできる |
+| AC-C11-02 | 同一topic判定がhead変更をまたいで維持される |
+| AC-C11-03 | 許可のない候補がIssue化されない |
+| AC-C11-04 | Issue本文の意味的変更後に旧許可が失効する |
 
-### C-12. Issue modeとIssue-to-PR handoff
+### C-12 qualificationとfinal reporter
 
-- **責務**: Section 5.2のIssue modeとhandoff
-- **主要な決定**: 既存PRがある場合は新規作成せず、handoffを両側へ冪等に記録してからPR modeへ合流する。PR作成後の失敗でIssue実装をやり直さない。conversation sourceの切替は両側のhandoff record確認後に行う
-- **受入条件**: 既存PR再利用が動作する。handoffの二重投稿が発生しない。PR作成後にvalidationが失敗しても、発見済みPRから再開できる
+CI pendingは設定可能なbounded foreground wait（既定20分・30秒間隔）とし、上限後は`WAITING_CI`で終了する。final reportはschema検証済みJSONを正とし、Markdown・PR comment・terminal summaryをそこから決定論的にrenderする。言語はrepository設定→user設定→組込み既定（日本語）の順に解決し、未対応値はvalidation errorとする。final reporterはC-09のread-only runtimeで実行する。
 
-### C-13. Plugin配布と任意wrapper
+| ID | 受入条件 |
+| --- | --- |
+| AC-C12-01 | CI timeout時に`WAITING_CI`のcheckpointが残り、明示resumeで再開できる |
+| AC-C12-02 | 同一JSONから同一Markdownが再現される |
+| AC-C12-03 | report生成失敗時に、review承認を保持したまま`REPORT_FAILED`へ遷移する |
 
-- **責務**: version付きClaude Code Pluginの配布と、Windows Terminal / `tmux`の任意wrapper
-- **主要な決定**: PluginとCLIはprotocol versionを交換し、非互換時は処理を開始せず更新方法を表示する。対象repositoryはClaude Codeの現在directoryまたは明示`--repo`から解決し、Pluginのinstall directoryと分離する
-- **主要な決定**: wrapperなしでcore loopが動作する。wrapper起動失敗をrunの失敗にしない。同一run IDの監視paneを重複作成しない。`tmux`内のSSH runは切断後もユーザー判断不要な範囲を継続し、安全gateでGitHubへ投稿して終了する
-- **受入条件**: 任意repositoryからSkillを起動できる。protocol version不一致を検出する
-- **受入条件**: wrapperを導入せずPR modeが完走する。wrapperの起動に失敗してもrunが失敗しない
-- **受入条件**: 監視paneは明示要求時だけ起動する。既定では起動しない。同一run IDに対して重複paneを作成しない
-- **受入条件**: `tmux`内で開始したrunがSSH切断後も継続し、ユーザー判断またはmerge判断に到達した時点でGitHubへ資料またはfinal reportを投稿・確認して終了する。processを無期限待機させない
-- **受入条件**: 再接続後に同じSkill commandでresumeでき、同一runの重複起動が拒否される
-- **受入条件**: `tmux`外のSSH runでprocessが終了した場合、最後に確認済みのGitHub checkpointからresumeできる
+### C-13 human merge gate
 
-## 7. Traceability matrix
-
-decisionとcomponentとphaseの対応を示す。実装子Issueはこの表を分割単位の根拠にする。
-
-| Decision | 内容 | Component | Phase |
-| --- | --- | --- | --- |
-| D-001、D-002 | ユーザー起動、自動検知なし | C-06 | 6 |
-| D-003 | TUIキー入力注入の禁止 | C-06 | 6 |
-| D-004 | PowerShellからの操作とlog監視 | C-02、C-13 | 2、14 |
-| D-005 | 無人auto-merge / deployの禁止 | C-04、C-11 | 4、11 |
-| D-007、D-008 | 討議分離、docs分類 | 文書のみ | — |
-| D-009 | Issue modeの要件取得と既存PR再利用 | C-12 | 13 |
-| D-010 | ユーザー判断フロー | C-09 | 9 |
-| D-011 | clarification protocol | C-09 | 9 |
-| D-012 | GitHub canonical conversation | C-03 | 3 |
-| D-013 | merge gateと`MERGED` | C-11 | 11 |
-| D-014 | active Claude sessionをhost / coderとする | C-06 | 6 |
-| D-015 | Codex fresh session | C-07 | 7 |
-| D-016 | 初回releaseにPR / Issue両mode | C-08、C-12 | 8、13、15 |
-| D-017 | 監視paneは明示要求時のみ | C-13 | 14 |
-| D-018 | `tmux`内SSH継続 | C-13 | 14 |
-| D-019 | final report言語の解決順 | C-10 | 10 |
-| D-020 | bounded CI waitと`WAITING_CI` | C-10 | 10 |
-| D-021 | comment回答は明示resume時に取得 | C-05 | 5、12 |
-| D-022 | merge methodの選択 | C-11 | 11 |
-| D-023 | artifact retention | C-05 | 12 |
-| D-024 | Approved follow-upの許可gate | C-09 | 9 |
-| D-025 | Auto modeとpermission分離 | C-04 | 4 |
-| D-026 | Plugin配布とController CLI | C-13 | 14 |
-| D-027 | 親roadmap Issue | 文書のみ | — |
-| D-028 | merge承認の入力形式（自然言語主経路＋固定command） | C-11 | 11 |
-| D-029 | PowerShell検証範囲（MSI installer配布版） | C-02、C-13 | 2、14、15 |
-| D-030 | transportのinterface新設とcomponent単位の選択移植 | C-03 | 3 |
-| D-031 | ユーザー判断を受理する主体のlogin allowlist | C-04 | 4 |
-
-Section 4の完了定義14項目との対応。
-
-| 完了定義 | Component | Phase |
-| --- | --- | --- |
-| 1. Codexがread-onlyでreviewしている | C-07 | 7 |
-| 2. blocking findingがcomment IDとhead SHA付きで永続化 | C-03 | 3 |
-| 3. 修正後の新headが再レビューされる | C-08 | 8 |
-| 4. 全reviewerが同一head・同一roundで承認 | C-08 | 8 |
-| 5. 承認headでfinal testとCIが成功 | C-10 | 10 |
-| 6. final reporterが変更・test・履歴・riskを説明 | C-10 | 10 |
-| 7. 各turnとユーザー決定がGitHubで確認できる | C-03 | 3 |
-| 8. GitHub記録とlocal artifactがapproved headへ結び付く | C-05 | 5、12 |
-| 9. follow-up候補が評価と許可状態付きでreportへ記録 | C-09、C-10 | 9、10 |
-| 10. `READY_FOR_HUMAN_MERGE`でmergeせず待機 | C-11 | 11 |
-| 11. 質問で待機継続、修正依頼で承認無効化 | C-11 | 11 |
-| 12. 明示承認がbind情報付きでGitHubへ記録 | C-04、C-11 | 4、11 |
-| 13. 直前再検証が承認対象と完全一致する場合だけmerge | C-11 | 11 |
-| 14. merge完了とmerged commit SHAを確認して`MERGED` | C-11 | 11 |
-
-target-experience Section 13のMVP inclusionsとの対応。各項目を観測可能な受入testまで落とす。
-
-| MVP inclusion | Component | Phase | 観測可能な受入test |
-| --- | --- | --- | --- |
-| 手動起動のPR mode | C-08 | 8 | 指定PRに対しreview→fix→re-reviewが1 round完走する |
-| 手動起動のIssue modeとhandoff | C-12 | 13 | 既存PRがある場合に新規作成せず合流する。handoffが両側へ1回だけ記録される |
-| version付きPluginからのSkill起動 | C-13 | 14 | 任意repositoryからSkillを起動し、protocol version不一致を検出する |
-| install済みController CLI | C-13 | 14 | repository相対pathへ依存せずconsole entry pointで起動する |
-| active hostとfresh Codex reviewerのpreset | C-06、C-07 | 6、7 | 主経路でClaude subprocessを起動しない。同一headの2回のreviewが前回session状態に依存しない |
-| headless CLIの補助・復旧経路 | C-06 | 6 | 同一シナリオを主経路とheadless経路で実行し、同じstate遷移を通る |
-| exact-head隔離checkoutとcredential分離 | C-04、C-07 | 4、7 | reviewerからのGitHub mutationと実repository書込がいずれも失敗する |
-| Auto modeとpermission fallback、`AWAITING_TOOL_PERMISSION` | C-04 | 4 | 禁止flagがargvへ現れない。resumeが停止点の操作だけを再実行する |
-| workflow承認とtool permissionの分離 | C-04 | 4 | tool permission許可だけではmergeとIssue作成が実行されない |
-| review→fix→re-reviewと最大round | C-08 | 8 | round上限到達で`BLOCKED`へ遷移する |
-| head SHA binding、coder snapshot、PR lock | C-05、C-08 | 5、8 | 外部head更新で承認が失効する。同一PRへの同時runが拒否される |
-| local test gateとGitHub CI確認 | C-10 | 10 | 承認headでtestとCIの両方が成功しない限り次stateへ進まない |
-| bounded CI waitと`WAITING_CI` checkpoint | C-10 | 10 | 上限到達で`WAITING_CI`のcheckpointが残り、明示resumeで再開する |
-| Windows / Linux process abstraction | C-02 | 2 | 両OSでtimeoutとCtrl+C後に孫processが残らない |
-| cancel、timeout、resume | C-02、C-05 | 2、5 | Ctrl+Cの2段階が動作し、last checkpointから再開できる |
-| 明示要求時だけの監視wrapper | C-13 | 14 | 既定では監視paneが起動しない。明示要求時のみ起動し、同一run IDで重複しない |
-| `tmux`継続wrapperとdisconnect preflight | C-13 | 14 | Section 11のscenario S-4 / S-5で検証する |
-| final reporterと`READY_FOR_HUMAN_MERGE` gate | C-10、C-11 | 10、11 | reportがPRへ投稿され、gateでmergeせず待機する |
-| 明示承認後のgated mergeと`MERGED`確認 | C-11 | 11 | 承認と一致するheadだけがmergeされ、merged commit SHAを再取得して確認する |
-| PR comment、local artifact、terminal summary | C-10 | 10 | 同一JSONから同一Markdownとterminal summaryが再現される |
-| ユーザー判断フローと最大5 clarification turns | C-09 | 9 | 5 turn上限と早期終了条件が個別にtestできる |
-| GitHub canonical conversation transport | C-03 | 3 | 投稿→再取得→hash一致。未投稿出力が次工程の入力にならない |
-| comment回答の明示resume取得 | C-05 | 5 | comment投稿がtriggerにならず、明示resume時にのみ取得される |
-| merge methodの設定と未設定時のユーザー判断 | C-11 | 11 | 許可方式が複数で未設定の場合にmergeせず判断を求める |
-| Approved follow-upのdeduplicate・review・許可gate | C-09 | 9 | 許可のない候補がIssue化されない。本文変更で旧許可が失効する |
-| artifact retentionとbounded cleanup | C-05 | 12 | cleanupがactive / lock保持中のrunを削除しない。dry-runで対象を確認できる |
-| credential redactionと基本trust policy | C-03、C-04 | 3、4 | redaction対象が投稿本文へ現れない。fork PRで既定拒否が働く |
-
-## 8. 合意済み決定と技術判断
-
-### 8.1 合意済み決定（D-028〜D-031）
-
-D-028〜D-031は[PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104)でユーザーが明示的に承認済みである。target-experienceのdecision logへ`Decided`として反映済みであり、本書はこれを前提とする。
-
-| ID | 決定 | 反映先 |
-| --- | --- | --- |
-| D-028 | merge承認は、既存の対話型Claude Code sessionでの自然言語入力＋明示確認を主経路とし、head SHAとmerge methodを指定する固定commandを補助・復旧経路として併用する | C-11 / Phase 11 |
-| D-029 | MVPの正式検証対象は公式MSI installerで配布されるPowerShell 7（`Microsoft.PowerShell` winget packageによる導入を含む）。Windows Store版は未検証riskとして明記し、必要時にCodex確認後、別Issue作成の許可を改めて求める | C-02、C-13 / Phase 2、14、15 |
-| D-030 | GitHub canonical conversation transportは新しい公開interfaceを設計し、参考実装を一括移植・一括破棄せず、実績あるalgorithmとtestをcomponent単位で評価して、出典・license・理由・testを記録したうえで選択移植する | C-03 / Phase 3、Section 10 |
-| D-031 | GitHub上のユーザー判断を受理できる主体は、repository / user設定で明示したGitHub login allowlistとの完全一致を必須とする。`authorAssociation`とrepository permissionは補助条件とし、単独では承認根拠にしない | C-04 / Phase 4 |
-
-D-028の固定commandは、repository bindingを欠落させない形とする。
+intentは`QUESTION` / `REQUEST_CHANGES` / `APPROVE_MERGE` / `CANCEL`。曖昧な肯定、過去の承認、別PRへの承認から`APPROVE_MERGE`を推論しない。自然言語＋明示確認を主経路とし、次のcommandを補助・復旧経路として併用する（D-028）。3引数すべてを必須とする。
 
 ```text
 cc-review approve-merge <pr> --repo OWNER/REPO --head <sha> --method <merge|squash|rebase>
 ```
 
-`--repo`、`--head`、`--method`はすべて必須とし、いずれかが欠けた場合はmergeを実行しない。Controllerはこれらの値をmerge直前の再検証結果と照合し、一致しない場合は承認を失効させる。
+承認はrepository、PR番号、approved head SHA、merge methodへbindし、いずれかが変われば失効する。merge直前にPR open状態、現在head、review承認、local test、CI、未解決事項、mergeabilityを再取得して照合する。merge APIがtimeoutまたは不明な結果を返した場合は、再送前にPR stateとmerged commit SHAを照会する。
 
-D-029の検証対象は「公式MSI installerで配布されるPowerShell 7」であり、`winget`は配布形式ではなく導入経路として扱う。CIおよびrelease acceptanceでは、この配布形態のPowerShellを対象とする。
-
-### 8.2 Phase 0で決定する技術判断（P-001: runtime依存の方針）
-
-P-001はユーザー判断事項ではなく、Phase 0でprototypeとCodex reviewにより決定する技術判断とする。重大なtrade-offが判明した場合だけ、改めてユーザーへ確認する。
-
-| 項目 | 内容 |
+| ID | 受入条件 |
 | --- | --- |
-| 判断内容 | runtime依存をゼロに保つか、schema検証にlibraryを導入するか |
-| 制約 | target-experienceはCodex出力のJSON Schema検証を要求する。必要なのは本projectが定義する固定のagent出力形式の検証であり、汎用JSON Schema validatorの自作ではない |
-| 候補1 | 依存ゼロを維持し、対応するschema機能を明示的に限定した専用protocol validatorを実装する |
-| 候補2 | 成熟したvalidator libraryを導入する |
-| 評価軸 | supply chain risk、配布size、Windows / Linux互換性、validationの網羅性、保守cost |
-| 決定方法 | Phase 0で両案のprototypeを作り、上記評価軸と受入testで比較する。結果をCodexがreviewする |
-| 現時点の扱い | 推奨案を確定しない。`pyproject.toml`が現在`dependencies = []`であることは、stub状態の事実であって要件ではない |
+| AC-C13-01 | 曖昧入力が`APPROVE_MERGE`にならない |
+| AC-C13-02 | head変更後に旧承認でmergeできない |
+| AC-C13-03 | merge API timeout後に二重mergeが発生せず、確認できない場合は成功と表示しない |
+| AC-C13-04 | 許可方式が複数で未設定の場合に、mergeせずユーザー判断を求める |
+| AC-C13-05 | 中断後に別processからresumeして継続できる |
 
-## 9. `Proposed`の確定
+### C-14 Issue modeとhandoff
 
-target-experienceの`Proposed`項目について、採用可否を示す。**採用**はtarget-experienceの記述をそのまま実装方針とすることを意味し、記述の変更を伴わない。
+既存PRがある場合は新規作成せず、handoffを両側へ冪等に記録してからPR modeへ合流する。Issue側とPR側のhandoff recordを1つのtransactionとして扱い、片側だけ成立した状態から再開できるようにする。conversation sourceの切替は両側のrecord確認後に行う。
 
-| Section | Proposed内容 | 判定 | 対応component |
+| ID | 受入条件 |
+| --- | --- |
+| AC-C14-01 | 既存PRがある場合に新規作成せず合流する |
+| AC-C14-02 | handoffの二重投稿が発生しない |
+| AC-C14-03 | 片側だけ投稿済みの状態から再開しても重複しない |
+| AC-C14-04 | PR作成後にvalidationが失敗しても、発見済みPRから再開できる |
+
+### C-15 Plugin配布と任意wrapper
+
+PluginとCLIはprotocol versionを交換し、非互換時は処理を開始せず更新方法を表示する。対象repositoryはClaude Codeの現在directoryまたは明示`--repo`から解決し、Pluginのinstall directoryと分離する。
+
+| ID | 受入条件 |
+| --- | --- |
+| AC-C15-01 | 任意repositoryからSkillを起動でき、protocol version不一致を検出する |
+| AC-C15-02 | wrapperを導入せずPR modeが完走し、wrapper起動失敗がrunの失敗にならない |
+| AC-C15-03 | 監視paneは明示要求時だけ起動し、既定では起動しない。同一run IDで重複しない |
+| AC-C15-04 | `tmux`内のrunがSSH切断後も継続し、判断地点でGitHubへ投稿・確認して終了する。無期限待機しない |
+| AC-C15-05 | 再接続後に同じSkill commandでresumeでき、同一runの重複起動が拒否される |
+| AC-C15-06 | `tmux`外でprocessが終了した場合、最後に確認済みのGitHub checkpointからresumeできる |
+
+## 6. Traceability
+
+target experienceのSection 4（DOD）とSection 13（MVP）を、componentとPhaseと受入条件へ対応付ける。
+
+| Requirement | Component | Phase | Acceptance |
 | --- | --- | --- | --- |
-| 3 | 実装順序はPR mode先行 | 採用 | Section 11のPhase構成 |
-| 3 | Skill mode主経路、headless CLIは補助 | 採用（条件付き） | C-06。Section 3の制御反転を前提とする |
-| 3 | terminalへstate、次action、URLを簡潔表示 | 採用 | C-06、C-10 |
-| 3 | Codex logを別paneで観測可能にする | 採用 | C-13 |
-| 3 | review / fix最大3 round | 採用 | C-08 |
-| 3 | review承認後のCI pendingは`WAITING_CI` | 採用 | C-10 |
-| 3 | CI既定20分・30秒間隔 | 採用 | C-10 |
-| 3 | ユーザー判断とmerge gateは対話sessionで受ける | 採用 | C-06、C-11 |
-| 3 | comment回答は次の明示resume時に取得 | 採用 | C-05 |
-| 3 | Codex reviewerはheadごとにfresh subprocess | 採用 | C-07 |
-| 3 | `tmux`内SSH runは切断後も安全gateまで継続 | 採用 | C-13 |
-| 3 | merge methodはrepository設定で選択 | 採用 | C-11 |
-| 3 | artifact保持30日 / 90日 | 採用 | C-05 |
-| 3 | Auto mode推奨とfallback階層 | 採用 | C-04 |
-| 3 | Plugin配布とController CLI package | 採用 | C-13 |
-| 3 | 既存transport再利用でControllerを最小化 | 修正のうえ採用 | D-030により、再利用判定はSection 10のcomponent単位表で行う |
-| 5.1 | PR mode正常系の22 step | 採用 | C-08。各stepを受入条件へ展開する |
-| 6.1〜6.4 | terminal表示 | 採用 | C-06、C-10、C-11。metadata markerは`CC_REVIEW_META`、logは`.cc-review-logs/` |
-| 8 | intervention policyの表 | 採用 | C-01。各行をstate遷移testの受入条件へ落とす |
-| 9 | safety behavior | 採用（具体化） | C-04でallowlist、credential隔離、OS別file権限を追加 |
-| 10.1 | checkpointの保存項目 | 採用 | C-05。schema化しversion管理する |
-| 10.2 | Ctrl+C 1回でgraceful、2回目で強制 | 採用 | C-02 |
-| 10.3 | resume手順 | 採用 | C-05 |
-| 10.5 | merge failureの実装詳細 | 採用 | C-11 |
-| 10.6 | SSH切断時のwrapper実装 | 採用 | C-13 |
-| 10.7 | artifact retentionの実装詳細 | 採用 | C-05 |
-| 11 | final reportの出力4種とreport例 | 採用 | C-10 |
-| 12 | platform差分の実装詳細 | 採用 | C-02、C-13 |
-| 13 | later phases | 採用 | MVP対象外を維持 |
+| DOD-01 | C-09 | 9 | AC-C09-01、AC-C09-02 |
+| DOD-02 | C-05 | 5 | AC-C05-01 |
+| DOD-03 | C-10 | 10 | AC-C10-01 |
+| DOD-04 | C-10 | 10 | AC-C10-01 |
+| DOD-05 | C-12 | 12 | AC-C12-01 |
+| DOD-06 | C-12 | 12 | AC-C12-02 |
+| DOD-07 | C-05 | 5 | AC-C05-01、AC-C05-04 |
+| DOD-08 | C-07 | 7 | AC-C07-01、AC-C07-03 |
+| DOD-09 | C-11、C-12 | 11、12 | AC-C11-03、AC-C12-02 |
+| DOD-10 | C-13 | 13 | AC-C13-01 |
+| DOD-11 | C-13 | 13 | AC-C13-01、AC-C13-02 |
+| DOD-12 | C-06、C-13 | 6、13 | AC-C06-01、AC-C13-02 |
+| DOD-13 | C-13 | 13 | AC-C13-02、AC-C13-03 |
+| DOD-14 | C-13 | 13 | AC-C13-03 |
+| MVP-01 | C-10 | 10 | AC-C10-01 |
+| MVP-02 | C-14 | 15 | AC-C14-01、AC-C14-02 |
+| MVP-03 | C-15 | 16 | AC-C15-01 |
+| MVP-04 | C-15 | 16 | AC-C15-01 |
+| MVP-05 | C-08、C-09 | 8、9 | AC-C08-01、AC-C09-03 |
+| MVP-06 | C-08 | 8 | AC-C08-04 |
+| MVP-07 | C-06、C-09 | 6、9 | AC-C06-03、AC-C09-01 |
+| MVP-08 | C-06 | 6 | AC-C06-04、AC-C04-02 |
+| MVP-09 | C-06 | 6 | AC-C06-01 |
+| MVP-10 | C-10 | 10 | AC-C10-02 |
+| MVP-11 | C-07、C-10 | 7、10 | AC-C07-03、AC-C10-03 |
+| MVP-12 | C-12 | 12 | AC-C12-01 |
+| MVP-13 | C-12 | 12 | AC-C12-01 |
+| MVP-14 | C-03 | 3 | AC-C03-01 |
+| MVP-15 | C-03、C-07 | 3、7 | AC-C03-02、AC-C07-01 |
+| MVP-16 | C-15 | 16 | AC-C15-03 |
+| MVP-17 | C-15 | 16 | AC-C15-04、AC-C15-05 |
+| MVP-18 | C-12、C-13 | 12、13 | AC-C12-02、AC-C13-01 |
+| MVP-19 | C-13 | 13 | AC-C13-02、AC-C13-03 |
+| MVP-20 | C-11 | 11 | AC-C11-01 |
+| MVP-21 | C-05 | 5 | AC-C05-01、AC-C05-04 |
+| MVP-22 | C-07 | 7 | AC-C07-01 |
+| MVP-23 | C-13 | 13 | AC-C13-04 |
+| MVP-24 | C-11 | 11 | AC-C11-03、AC-C11-04 |
+| MVP-25 | C-07 | 14 | AC-C07-04 |
+| MVP-26 | C-04、C-06 | 4、6 | AC-C04-01、AC-C04-03 |
 
-## 10. 参考実装の再利用判定
+設計へ影響する決定の対応。決定の全文は[target experience](target-experience.md) Section 14のdecision logにある。
 
-[ADR-0002](../decisions/0002-independent-reimplementation.md)のSelective porting policyに従い、領域ごとに判定する。**本表は移植の事前承認ではない。** 実際に移植する場合は、対象file、source commit、理由、適用license、移植後testを移植PRへ記録する。
+| Decision | 設計への影響 | Component |
+| --- | --- | --- |
+| D-014 | active sessionをhostとするため、engineをstep engineにする（Section 2） | C-08 |
+| D-015 | reviewerをturnごとにfresh起動する | C-09 |
+| D-028 | merge承認に固定commandを併用し、3引数を必須にする | C-13 |
+| D-029 | 検証対象をMSI installer配布のPowerShell 7に限定する | C-03、C-15 |
+| D-030 | transportのinterfaceを新設し、再利用はcomponent単位で評価する | C-05 |
+| D-031 | ユーザー判断の受理をlogin allowlistの完全一致に限る | C-06 |
 
-| 領域 | 観測事実 | 判定 | 理由 |
+## 7. Deviations from target experience
+
+target experienceの`Proposed`のうち、そのまま採用しないものだけを記載する。ここに無い`Proposed`は記述どおり実装する。
+
+| Section | 内容 | 本書の扱い | 理由 |
 | --- | --- | --- | --- |
-| core comment投稿 | 本文をfile経由で渡す。長大bodyのsidecar分割と上限checkあり。戻り値なしでID / URL / hashを返さない | interfaceは新設、algorithmは選択移植候補 | read-after-writeにID返却が必須。分割と上限checkは要件に合致する |
-| Skill helper層の投稿 | 本文を引数で渡す。IDを返さない | 再利用しない | P-004、P-005の両方に反する |
-| round metadataとresume | GitHub commentからround stateを復元する処理が存在する | 選択移植候補 | 本projectのcanonical state再構築と目的が一致する。metadata形式は`CC_REVIEW_META`へ変更が必要 |
-| 公開用comment render | 発言者とmodelを明示するrenderが存在する | 選択移植候補 | 要件に合致する。decision / clarificationのkind追加が必要 |
-| Issue→PR handoff | 冪等なhandoff処理が存在する | 選択移植候補 | C-12の要件と一致する |
-| 子process停止 | Windows / POSIX差分の扱いが存在する | 選択移植候補 | C-02の要件と一致する |
-| orchestrator | 単一moduleが大規模化し、CLI / Skillで二重実装されている | 再利用しない | P-002に反する。Section 3の制御構造とも異なる |
-| permission / sandbox構成 | bypass flagを無条件付与する経路がある | 再利用しない | P-006に反する |
+| 3 | Skill mode主経路、headless CLIは補助 | 条件付き採用 | Section 2の制御反転を前提とする。両者は同じstep engineを共有する |
+| 5.4 | 参考実装のcapability再利用でControllerを最小化 | 方針変更 | D-030により、再利用はcomponent単位の評価に置き換える。Controller最小化はcodeの再利用ではなく責務の限定で達成する |
+| 9 | safety behavior | 具体化して採用 | login allowlist、credential隔離、OS別file権限をC-04とC-06で追加する |
+| 10.1 | checkpointの保存項目 | 構造を追加して採用 | C-02のversioned envelopeへ格納し、fieldは利用するPhaseで追加する |
 
-## 11. 実装順序
+### Phase 0で決定する技術判断（P-001）
 
-dependency順に16 phaseへ分割する。各phaseを1つの子Issueとし、Issue #2から参照する。1 phaseは複数の小さなPRへ分けてよい。
+runtime依存をゼロに保つか、schema検証にlibraryを導入するかを決める。必要なのは本projectが定義する固定のagent出力形式の検証であり、汎用JSON Schema validatorの自作ではない。
 
-| Phase | 内容 | Component | 完了条件 | そのPhaseで追加するcheckpoint field |
+| 候補 | 内容 |
+| --- | --- |
+| 1 | 依存ゼロを維持し、対応するschema機能を明示的に限定した専用protocol validatorを実装する |
+| 2 | 成熟したvalidator libraryを導入する |
+
+評価軸はsupply chain risk、配布size、Windows / Linux互換性、validationの網羅性、診断品質、malformed入力への耐性、保守cost。Phase 0で代表schema corpusとmalformed corpusを先に定義し、両案のprototypeを比較してCodex reviewを受ける。重大なtrade-offが判明した場合だけユーザーへ確認する。`pyproject.toml`が現在`dependencies = []`であることは、stub状態の事実であって要件ではない。
+
+## 8. 実装順序
+
+各Phaseを1つの子Issueとし、Issue #2から参照する。1 Phaseを複数のPRへ分けてよい。
+
+| Phase | 内容 | Component | 完了条件 | 追加するcheckpoint field |
 | --- | --- | --- | --- | --- |
-| 0 | 基盤: `errors`、`config`、品質ゲート | — | CIでlint、type、coverage、size ratchetが動作する。P-001をprototype比較で決定する | — |
-| 1 | domain state machine | C-01 | 17 stateと全遷移が純粋関数でtestできる | — |
-| 2 | process abstraction | C-02 | 両OSで孫processが残らない。Ctrl+Cの2段階が動作する | — |
-| 3 | GitHub transport | C-03 | 投稿→再取得→hash一致。timeout後の重複投稿なし。thread reply動作 | conversation cursor、comment / review ID、URL、本文hash、idempotency marker |
-| 4 | trust / permission / credential境界 | C-04 | allowlist外の承認が受理されない。reviewerのmutation negative testが失敗する | permission mode / profile、Permission ID、blockされたtool、要求scope |
-| 5 | checkpoint envelopeと最小resume | C-05 | **versioned checkpoint envelopeとmigration policyを確立する。** 中断後に同じturn IDから再開できる | envelope version、run ID、repository、Issue / PR番号、state、base / observed / approved head SHA |
-| 6 | active host protocolとstep engine | C-06 | Section 3.5の受入条件を満たす。**別processからのresume test**を含む | action ID、未完了`HOST_ACTION`、action結果のsubmit状態 |
-| 7 | Codex fresh runtimeと隔離checkout | C-07 | write権限なしでtestを実行しcheckoutを破棄する | reviewer隔離checkout、sandbox / network profile、実行したtest / build、開始前後dirty status、破棄結果 |
-| 8 | PR mode review loop | C-08 | 実PRに対しdry-runで1 round完走。**中断して別processからresumeする受入testを含む**。CLI経由のdogfooding開始 | PR lock、coder snapshot、round、finding ledgerとresolution、coder実行前後HEAD、push後head |
-| 9 | decision / clarification / follow-up | C-09 | 5 turn上限、早期終了、許可gateが個別にtestできる | clarification counter、finding / decision fingerprint、未解決decision request、follow-up candidate ID / fingerprint / 本文hash / Codex verdict / 許可record |
-| 10 | qualificationとfinal reporter | C-10 | CI timeoutで`WAITING_CI`、同一JSONから同一Markdown | test command / cwd / result / duration、GitHub check名 / result / URL、artifactとlogへのpath |
-| 11 | human merge gate | C-11 | 曖昧入力が承認にならない。merge timeout後に二重mergeしない。**中断して別processからresumeする受入testを含む** | merge gate intent、承認対象PR、approved head SHA、入力経路、approval comment ID、merge method、merge API結果、merged commit SHA、再確認結果 |
-| 12 | retention、schema整合性、migration、salvage | C-05 | Section 10.1の全fieldがenvelope schemaと整合する。旧versionのcheckpointがmigrationで読める。cleanupがactive / lock保持中のrunを除外する。salvage artifactが90日保持される | 横断検証。新規fieldの追加はしない |
-| 13 | Issue modeとhandoff | C-12 | 既存PR再利用と冪等handoffが動作する | Issue番号、handoff record、conversation source切替状態 |
-| 14 | Plugin配布と任意wrapper | C-13 | C-13の受入条件をすべて満たす | wrapper session ID、監視pane状態 |
-| 15 | release acceptance | 全体 | 下記scenario matrixをすべて通す | — |
-
-### checkpoint fieldの導入方針
-
-Phase 5で**versioned checkpoint envelope**とmigration policyを確立し、以降のPhaseは自分が使用するfieldを同じPhaseで追加する。fieldを使うPhaseとfieldを保存するPhaseを分離しない。
-
-Phase 12は「初めて完全なcheckpointを作るPhase」ではなく、retention / cleanup、schema整合性、migration、salvageの横断検証を行うPhaseとする。
-
-dogfoodingまたはユーザー操作を伴うPhase（6、8、11）は、**中断後に別processからresumeする受入test**を完了条件に含める。同一process内のresumeだけでは、target-experience Section 10.3が要求する「新しいClaude Code sessionからの再開」を保証できない。
-
-### Phase 15 release acceptance scenario matrix
-
-| ID | Scenario | 期待する終了state | GitHub上の証跡 |
-| --- | --- | --- | --- |
-| S-1 | Windows、active Skill、PR mode、承認してmerge | `MERGED` | review、対応summary、final report、承認record、merged commit SHA |
-| S-2 | Windows、headless CLI、PR mode、gateまで到達 | `READY_FOR_HUMAN_MERGE` | S-1と同じ種類のrecordが、主経路と同じ形式で残る |
-| S-3 | Linux/SSH、active Skill、Issue mode、PR作成からgateまで | `READY_FOR_HUMAN_MERGE` | Issue側とPR側の双方向handoff record、review履歴 |
-| S-4 | Linux/SSH、`tmux`内でSSH切断、ユーザー判断が必要な地点へ到達 | `AWAITING_USER_DECISION` | decision briefがGitHubへ投稿・確認済み。processは無期限待機せず終了 |
-| S-5 | S-4から再接続してresumeし、gateまで到達 | `READY_FOR_HUMAN_MERGE` | 同一run IDで継続し、重複run・重複commentが発生しない |
-| S-6 | wrapper未導入環境でPR mode | `READY_FOR_HUMAN_MERGE` | wrapperなしでもS-1と同じrecordが残る |
-| S-7 | Linux/SSH、`tmux`外で切断しprocess終了、再接続してresume | 再開後にS-3と同じ地点 | 最後に確認済みのGitHub checkpointから再開したことが確認できる |
-
-S-1とS-3で初回releaseのD-016（PR modeとIssue modeの両方）を満たす。S-2で主経路とheadless経路の等価性を、S-4〜S-7でD-018のSSH継続要件を確認する。
-
+| 0 | 基盤と品質ゲート | — | CIでlint、type、coverage、size ratchetが動作する。P-001を決定する | — |
+| 1 | domain state machine | C-01 | AC-C01-01、AC-C01-02 | — |
+| 2 | protocol schemaとenvelope | C-02 | AC-C02-01〜03 | envelope schemaとmigration policyを定義（永続化はPhase 5以降） |
+| 3 | process abstraction | C-03 | AC-C03-01、AC-C03-02 | — |
+| 4 | security policy | C-04 | AC-C04-01〜03 | — |
+| 5 | GitHub transport | C-05 | AC-C05-01〜04 | conversation cursor、comment / review ID、URL、本文hash、idempotency marker、record chain |
+| 6 | actor認証とcredential隔離 | C-06 | AC-C06-01〜05 | permission mode / profile、Permission ID、blockされたtool、要求scope、承認bind情報 |
+| 7 | resume | C-07 | AC-C07-01〜03 | run ID、state、base / observed / approved head SHA、PR lock、coder snapshot |
+| 8 | active host protocolとstep engine | C-08 | AC-C08-01〜06 | action ID、未完了`HOST_ACTION`、nonce、submit状態 |
+| 9 | Codex fresh runtimeと隔離checkout | C-09 | AC-C09-01〜03 | 隔離checkout、sandbox / network profile、実行したtest / build、dirty status、破棄結果 |
+| 10 | PR mode review loop | C-10 | AC-C10-01〜04。**CLI経由のdogfooding開始** | round、finding ledgerとresolution、coder実行前後HEAD、push後head |
+| 11 | decision / clarification / follow-up | C-11 | AC-C11-01〜04 | clarification counter、fingerprint、未解決decision request、follow-up候補と許可record |
+| 12 | qualificationとfinal reporter | C-12 | AC-C12-01〜03 | test command / result、GitHub check名 / result / URL、artifact path |
+| 13 | human merge gate | C-13 | AC-C13-01〜05 | merge gate intent、approved head SHA、入力経路、approval comment ID、merge method、API結果、merged commit SHA |
+| 14 | retention、migration、salvage | C-07 | AC-C07-04。全fieldがenvelope schemaと整合し、旧versionがmigrationで読める | 横断検証。新規fieldは追加しない |
+| 15 | Issue modeとhandoff | C-14 | AC-C14-01〜04 | Issue番号、handoff record、conversation source切替状態 |
+| 16 | Plugin配布と任意wrapper | C-15 | AC-C15-01〜06 | wrapper session ID、監視pane状態 |
+| 17 | release acceptance | 全体 | 下記scenario matrix | — |
 
 ### 順序の根拠
 
-- Phase 0を先行させるのは、lintとtype gateを後から入れると既存code全体の修正が必要になるためである（P-010）
-- Phase 2のprocess abstractionをPhase 7のCodex runtimeより前に置くのは、runtimeがprocess抽象の利用者であり、逆順では抽象がruntime固有の形へ引きずられるためである
-- Phase 4のsecurity境界をagent起動より前に置くのは、credential隔離を後から差し込むと隔離漏れの検出が難しくなるためである
-- Phase 5のcheckpoint / resumeを早い段階に置くのは、後から載せるとstate管理が全workflowへ散らばるためである。Phase 5では最小限（run ID、state、head SHA、GitHub cursor）だけを扱い、Section 10.1の全項目はPhase 12で扱う
-- Phase 6のactive host protocolをPR modeより前に置くのは、Section 3の制御構造が全workflowの前提であり、後から反転すると全workflowを書き直すことになるためである
-- Phase 14のwrapperは、wrapperなしでcore loopが動作することが設計条件であるため後段に置く。ただし初回releaseには含める
+- Phase 0が先行するのは、lintとtype gateを後から入れると既存code全体の修正が必要になるため
+- Phase 2のschemaがtransportより前なのは、checkpoint envelopeとagent protocolの所有者を1箇所に固定し、後続Phaseがそれぞれ独自形式を持つのを防ぐため
+- Phase 4のsecurity policyがtransportより前なのは、transportが投稿前redactionを利用するため。actorの解決はGitHubを必要とするためPhase 6へ分離し、循環依存を避ける
+- Phase 8のactive host protocolがPR modeより前なのは、Section 2の制御構造が全workflowの前提であり、後から反転すると全workflowを書き直すことになるため
+- checkpoint fieldは、それを利用するPhaseと同じPhaseで追加する。Phase 14は新規fieldを追加せず、retention、schema整合性、migration、salvageの横断検証に充てる
+- dogfoodingとユーザー操作を伴うPhase 8、10、13は、中断後に別processからresumeする受入testを完了条件に含める。同一process内のresumeだけでは、新しいClaude Code sessionからの再開を保証できない
+- Phase 16のwrapperが後段なのは、wrapperなしでcore loopが動作することが設計条件であるため。ただし初回releaseには含める
 
-### 初回release条件
+### Phase 17 release acceptance
 
-D-016のとおり、PR modeとIssue modeの両方の受入条件を満たすまで初回releaseとしない。Phase 15のscenario matrix（S-1〜S-7）をすべて通すことをrelease条件とする。Phase 14までの完了は必要条件であり、十分条件ではない。
+| ID | Scenario | 期待する終了state |
+| --- | --- | --- |
+| S-1 | Windows、active Skill、PR mode、承認してmerge | `MERGED` |
+| S-2 | Windows、headless CLI、PR mode | `READY_FOR_HUMAN_MERGE` |
+| S-3 | Linux/SSH、active Skill、Issue mode | `READY_FOR_HUMAN_MERGE` |
+| S-4 | Linux/SSH、`tmux`内でSSH切断、判断地点へ到達 | `AWAITING_USER_DECISION` |
+| S-5 | S-4から再接続してresume | `READY_FOR_HUMAN_MERGE` |
+| S-6 | wrapper未導入環境でPR mode | `READY_FOR_HUMAN_MERGE` |
+| S-7 | `tmux`外で切断しprocess終了、再接続してresume | 再開後にS-3と同じ地点 |
 
-## 12. 品質ゲート
+各scenarioで、GitHub上に期待するcanonical recordが残っていることを証跡とする。WindowsのscenarioはMSI installerまたは`Microsoft.PowerShell` winget packageからprovisionした環境で実行し、PowerShellのversionとinstall sourceを証跡へ含める（D-029）。
+
+初回releaseの条件はS-1〜S-7をすべて通すこと。Phase 16までの完了は必要条件であり、十分条件ではない。
+
+## 9. 品質ゲート
 
 | ゲート | 内容 | 導入 |
 | --- | --- | --- |
-| test | `python -m pytest -q`。live external serviceへ接続せず実行できる。agent CLIと`gh`はprocess境界でfake（P-011） | Phase 0 |
+| test | `python -m pytest -q`。live serviceへ接続せず実行できる（P-011） | Phase 0 |
 | coverage | baselineを測定しratchetする。subprocess coverageを有効化する | Phase 0 |
 | lint | ruff | Phase 0 |
-| type | mypy。段階的にstrictへ寄せる | Phase 0 |
-| module size | 固定行数の即時failではなく、baselineからのratchetとする。責務数、循環依存、複雑度、testabilityと併せてreviewし、例外はPRで根拠とともに認める | Phase 0 |
+| type | mypy。Phase 0で対象package、許容する例外、ratchet方法を記録し、以後は緩めない | Phase 0 |
+| module size | 固定行数の即時failではなくbaselineからのratchet。責務数、循環依存、複雑度、testabilityと併せてreviewし、例外はPRで根拠とともに認める | Phase 0 |
 | CI matrix | Ubuntu / Windows × Python 3.11 | 導入済み |
 | contract test | SPDX表示、repository参照、CLI名称、禁止flag（P-006）、baseline link | 一部導入済み |
 | version | `pyproject.toml`のversionとgit tagを同期する（P-012） | Phase 0 |
 
-CIは常に全testを実行し、test fileの追加漏れが構造的に起こらないようにする。regression testは対象のIssue番号を参照する。
+CIは常に全testを実行する。regression testは対象のIssue番号を参照する。
 
-CIとcontract testは文書の存在と形式を検証するが、本書の要件整合性そのものは検証しない。Section 7のtraceability matrixは、その不足をreviewで補うための対応表である。
+## 10. Riskと未決事項
 
-## 13. Riskと未決事項
-
-| ID | Risk | 影響 | 緩和 |
-| --- | --- | --- | --- |
-| R-01 | Codex / Claude CodeのCLI interfaceが変わる | agent起動が失敗する | runtime層へ隔離し、versionを起動時に確認する。CLI固有の分岐をworkflow層へ漏らさない |
-| R-02 | GitHub APIのrate limitがreview loopの実用性を下げる | 長時間runが停止する | 取得を差分cursorへ限定し、read-after-write以外のpollingを行わない |
-| R-03 | 対象repositoryのCI所要時間がbounded waitを超える | `WAITING_CI`が常態化する | 待機上限をrepository設定で調整可能にする。resumeを軽量に保つ |
-| R-04 | active host protocolのHOST_ACTION粒度が粗すぎる / 細かすぎる | round数が増えるか、hostへ渡す責務が過大になる | Phase 6でPR modeの1 roundを通して粒度を検証してからPhase 8へ進む |
-| R-05 | 単一core engineの制約がSkillとCLIの要求差で崩れる | P-002が形骸化する | entry pointに置いてよい責務を3つへ限定し、両経路の同一シナリオtestで検出する |
-| R-06 | credential隔離がOSまたはCLI versionの差で破れる | reviewerがdurable read-onlyでなくなる | negative testを両OSのCIで常時実行する。隔離手段を1箇所へ集約する |
+| ID | Risk | 緩和 |
+| --- | --- | --- |
+| R-01 | Codex / Claude CodeのCLI interfaceが変わる | runtime層へ隔離し、versionを起動時に確認する。CLI固有の分岐をworkflow層へ漏らさない |
+| R-02 | GitHub APIのrate limitがreview loopの実用性を下げる | 取得を差分cursorへ限定する。C-12のbounded CI waitを除き、恒常的なpollingを行わない |
+| R-03 | 対象repositoryのCI所要時間がbounded waitを超える | 待機上限をrepository設定で調整可能にする。resumeを軽量に保つ |
+| R-04 | HOST_ACTIONの粒度が粗すぎる / 細かすぎる | Phase 8でPR modeの1 roundを通して粒度を検証してからPhase 10へ進む |
+| R-05 | 単一core engineの制約がSkillとCLIの要求差で崩れる | entry pointに置いてよい責務を3つへ限定し、AC-C08-04で検出する |
+| R-06 | credential隔離がOSまたはCLI versionの差で破れる | AC-C06-03を両OSのCIで常時実行する。隔離手段を1箇所へ集約する |
 
 未決事項:
 
-- P-001のruntime依存方針（Phase 0でprototype比較とCodex reviewにより決定）
-- checkpoint envelopeのversioning方式とmigration policyの詳細（Phase 5で決定）
-- coverage floorとmodule size baselineの初期値（Phase 0で測定して決定）
-- HOST_ACTIONの最終的な種類と粒度（Phase 6で決定）
-- protocol versionの表現形式とPlugin / CLIの互換range（Phase 14で決定）
+- P-001のruntime依存方針（Phase 0）
+- checkpoint envelopeのversioning方式とmigration policyの詳細（Phase 2）
+- coverage floorとmodule size baselineの初期値（Phase 0）
+- HOST_ACTIONの最終的な種類と粒度（Phase 8）
+- protocol versionの表現形式と互換range（Phase 16）
