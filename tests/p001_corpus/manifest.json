@@ -273,6 +273,66 @@
       "expect": "reject",
       "stage": "schema",
       "error_path": "<unknown#1>"
+    },
+    {
+      "file": "malformed/metrics_mixed_valid_invalid_keys.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "metrics.<key#2>"
+    },
+    {
+      "file": "malformed/metrics_multiple_invalid_keys.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_paths": [
+        "metrics.<key#1>",
+        "metrics.<key#2>"
+      ]
+    },
+    {
+      "file": "malformed/enum_kind_null.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/enum_kind_number.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/enum_kind_bool.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/enum_kind_array.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/enum_kind_object.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "kind"
+    },
+    {
+      "file": "malformed/huge_integer.json",
+      "expect": "reject",
+      "stage": "json"
+    },
+    {
+      "file": "malformed/nan_token.json",
+      "expect": "reject",
+      "stage": "json"
+    },
+    {
+      "file": "malformed/infinity_token.json",
+      "expect": "reject",
+      "stage": "json"
     }
   ]
 }

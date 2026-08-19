@@ -25,10 +25,12 @@ target experienceはCodex出力のschema検証を要求し、implementation plan
 - **integer意味論**: JSONのinteger tokenのみを整数として許可する。Draft 2020-12は小数部0のnumber（`1.0`）をintegerとして受理するため、この意味論差を放置すると`schema_version: 2.0`が候補2で受理され、未知versionの拒否（AC-C02-01）が破れる。候補2はadapter側でfloatの追加checkを行い意味論を揃えた
 - **stage優先順位**: `size -> utf8 -> json -> version -> schema`の順で確定する。version gateはinteger tokenの場合だけ評価するため、`2.0`はschema（型不一致）、integerの未知versionは他の違反があってもversionで拒否される
 - **dynamic keyのpath正規化**: 未知field名とmap keyはattacker-controlledな文字列であり、公開pathへraw値を含めない。未知fieldは`<unknown#N>`、map keyは`<key#N>`の序数tokenへ正規化し、全pathへ長さ上限（120）と制御文字の除去を共通層で適用する
+- **診断の優先順位**: 同一pathに複数の制約違反が重なる場合（enum fieldへの非文字列等）、`null_not_allowed -> type_mismatch -> その他の値制約`の順で1件へ正規化する。正規化は共通層のcanonicalizerが両候補の出力へ同一に適用する
+- **JSON parse境界**: Pythonのint変換桁数上限（既定4300桁）を超える整数のValueError、深いnestのRecursionError、非標準token（NaN / Infinity）をいずれもinvalid_jsonとして拒否し、例外を外へ漏らさない
 
 ### Corpus
 
-`tests/p001_corpus/`（representative 16件、malformed 36件、`manifest.json`が期待結果を固定）。malformedの期待stageは`size / utf8 / json / version / schema`から**一意**に指定し、schema違反はerror pathの期待値を持つ。次を含む: cross-field違反3種（条件付き必須、依存関係、kind依存の禁止field）、list of object、map、未知schema version（単独および他の違反との複合でversion優先を固定）、integer境界（`1.0` / `2.0` / boolを型不一致、負数・大きな整数を受理）、不正UTF-8のraw bytes、byte size超過（65,536 bytes上限に対する約70KB入力）、深いnest（3,000段）、Unicode、空文字列・空配列の許可/不許可。sentinel（`SENTINELghp000`）はfieldの**値**に加えて**未知field名・nested未知field名・map key**へも埋め込み、改行入りkeyと5,000字のkeyも含む。
+`tests/p001_corpus/`（representative 16件、malformed 46件、`manifest.json`が期待結果を固定）。malformedの期待stageは`size / utf8 / json / version / schema`から**一意**に指定し、schema違反はerror pathの期待値を持つ。次を含む: cross-field違反3種（条件付き必須、依存関係、kind依存の禁止field）、list of object、map、未知schema version（単独および他の違反との複合でversion優先を固定）、integer境界（`1.0` / `2.0` / boolを型不一致、負数・大きな整数を受理）、不正UTF-8のraw bytes、byte size超過（65,536 bytes上限に対する約70KB入力）、深いnest（3,000段）、Unicode、空文字列・空配列の許可/不許可。sentinel（`SENTINELghp000`）はfieldの**値**に加えて**未知field名・nested未知field名・map key**へも埋め込み、改行入りkeyと5,000字のkeyも含む。さらに、複数map keyのerror集合とordinal（valid + invalid、複数invalid）、enum fieldの型境界（null / number / bool / array / object）、JSON parse境界（5,000桁の整数、NaN、-Infinity）を固定する。
 
 ### 再現方法
 
@@ -57,12 +59,12 @@ Windows / Linuxで同一結果 / representative全受理 / malformed全拒否と
 
 ## 結果
 
-**両候補ともmust-haveをすべて満たし、公開resultは全52 caseで完全一致した**（verdict、stage、error code、error pathの集合が同一）。sentinel非漏洩も両候補で成立した。redactionはどちらの案でも達成可能であり、**採用の決定打にはならない**。
+**両候補ともmust-haveをすべて満たし、公開resultは全62 caseで完全一致した**（verdict、stage、error code、error pathの集合が同一）。sentinel非漏洩も両候補で成立した。redactionはどちらの案でも達成可能であり、**採用の決定打にはならない**。
 
 | 評価軸 | 候補1（専用validator） | 候補2（jsonschema） |
 | --- | --- | --- |
 | runtime依存 | 追加なし（第三者runtime依存由来のsupply-chain exposureは0。自前codeの正しさ・保守riskは残る） | 直接1＋推移4、追加install size約2.3 MB。`rpds-py`はplatformごとのcompiled wheel供給に依存 |
-| 実装量（実測） | validator本体136行 | schema定義＋正規化・意味論整合adapter 189行（library本体は別） |
+| 実装量（実測） | validator本体136行 | schema定義＋正規化・意味論整合adapter 199行（library本体は別） |
 | 診断の正規化cost | code / pathを直接生成 | `required` / `additionalProperties`の対象field導出、null許可の判別、**cross-field ruleごとのallOf位置→canonical pathのmapping表**、**dynamic keyのtoken化のためのpath再構築**が必要 |
 | 意味論の整合cost | protocol意味論をそのまま実装 | Draft 2020-12のinteger意味論（`1.0`を受理）がprotocol要件と異なり、**integer位置ごとの追加check**をadapterが恒常的に保守する必要がある |
 | cross-field表現 | ruleを関数として直接記述 | `allOf` + `if/then` + `dependentSchemas`で表現可能だが、rule追加のたびにmapping表の保守を伴う |

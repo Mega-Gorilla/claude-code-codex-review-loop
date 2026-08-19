@@ -58,9 +58,15 @@ def test_candidate_matches_manifest(name: str) -> None:
         if verdict != expected:
             failures.append(f"{case['file']}: 期待{expected}、実際{verdict} {errors}")
             continue
-        want_path = case.get("error_path")
-        if want_path and want_path not in [e.path for e in errors]:
-            failures.append(f"{case['file']}: 期待path {want_path}、実際 {[e.path for e in errors]}")
+        want_paths = case.get("error_paths") or (
+            [case["error_path"]] if "error_path" in case else []
+        )
+        got_paths = [e.path for e in errors]
+        missing = [p for p in want_paths if p not in got_paths]
+        if missing:
+            failures.append(f"{case['file']}: 期待path {want_paths}、実際 {got_paths}")
+        if case.get("error_paths") and len(errors) < len(want_paths):
+            failures.append(f"{case['file']}: error数が期待{len(want_paths)}件未満（{len(errors)}件）")
     assert not failures, "\n".join(failures)
 
 
@@ -126,6 +132,16 @@ def test_public_paths_are_safe(name: str) -> None:
         for e in errors:
             assert len(e.path) <= common.MAX_PATH_LENGTH, f"{case['file']}: {len(e.path)}"
             assert _PATH_SAFE.match(e.path), f"{case['file']}: 不正な文字を含むpath {e.path!r}"
+
+
+@pytest.mark.parametrize("name", sorted(CANDIDATES))
+def test_run_always_returns_verdict_without_raising(name: str) -> None:
+    """must-have: untrusted入力でcrashしない。全caseで例外を送出せずverdictを返す。"""
+
+    for case in _cases():
+        verdict, errors = _run_case(name, case)
+        assert verdict == "accept" or verdict.split(":")[1] in common.STAGES, case["file"]
+        assert isinstance(errors, list)
 
 
 def test_evaluation_dependency_versions_match_adr_record() -> None:

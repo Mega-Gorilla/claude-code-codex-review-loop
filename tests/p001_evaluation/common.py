@@ -16,6 +16,17 @@ stage優先順位:
     したがって`schema_version: 2.0`はversionではなくschema（型不一致）で拒否され、
     `schema_version: 2`（未知のinteger）は他のfieldに違反があってもversionで拒否される。
 
+診断の優先順位:
+    同一pathに複数の制約違反が重なる場合（例: enum fieldへの非文字列）、
+    `null_not_allowed -> type_mismatch -> その他（enum等の値制約）`の優先順位で
+    1件へ正規化する。型が満たされない値に対して値制約を報告しない。
+    正規化は共通層のcanonicalizerが両候補の出力へ同一に適用する。
+
+JSON parse境界:
+    Pythonのint変換桁数上限（既定4300桁）を超える整数はValueErrorとなるため、
+    深いnestのRecursionErrorと同様にinvalid_jsonとして扱う。JSON標準にない
+    token（NaN / Infinity / -Infinity）はparse_constantで拒否し、invalid_jsonとする。
+
 dynamic keyのpath正規化:
     未知field名とmapのkeyはattacker-controlledな文字列であり、公開pathへraw値を
     含めない。未知fieldは`<unknown#N>`（同一階層の未知key名を昇順に並べた1始まりの
@@ -44,6 +55,33 @@ class PublicError:
 
 
 StructuralValidator = Callable[[dict[str, object]], list[PublicError]]
+
+# 同一pathの複数違反を1件へ正規化する際の優先順位（小さいほど優先）
+_CODE_PRIORITY = {"null_not_allowed": 0, "type_mismatch": 1}
+
+
+def canonicalize(errors: list[PublicError]) -> list[PublicError]:
+    """同一pathのerrorを診断優先順位に従って1件へ正規化する（出現順は維持）。"""
+
+    best: dict[str, PublicError] = {}
+    order: list[str] = []
+    for e in errors:
+        if e.path not in best:
+            best[e.path] = e
+            order.append(e.path)
+        elif _CODE_PRIORITY.get(e.code, 99) < _CODE_PRIORITY.get(best[e.path].code, 99):
+            best[e.path] = e
+    return [best[path] for path in order]
+
+
+def _reject_constant(value: str) -> object:
+    raise ValueError(f"非標準のJSON token: {value}")
+
+
+def parse_json(text: str) -> object:
+    """protocolのJSON parse意味論（NaN / Infinity拒否）。失敗はValueError / RecursionError。"""
+
+    return json.loads(text, parse_constant=_reject_constant)
 
 
 def is_integer_token(value: object) -> bool:
@@ -83,15 +121,18 @@ def run(structural: StructuralValidator, raw: bytes) -> tuple[str, list[PublicEr
     except UnicodeDecodeError:
         return "reject:utf8", [PublicError("invalid_utf8", "$")]
     try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, RecursionError):
+        # ValueErrorはJSONDecodeErrorの親であり、整数桁数上限の超過も含めて捕捉する
+        data = parse_json(text)
+    except (ValueError, RecursionError):
         return "reject:json", [PublicError("invalid_json", "$")]
     if not isinstance(data, dict):
         return "reject:schema", [PublicError("root_not_object", "$")]
     version = data.get("schema_version")
     if is_integer_token(version) and version not in KNOWN_SCHEMA_VERSIONS:
         return "reject:version", [PublicError("unknown_version", "schema_version")]
-    errors = [PublicError(e.code, sanitize_path(e.path)) for e in structural(data)]
+    errors = [
+        PublicError(e.code, sanitize_path(e.path)) for e in canonicalize(structural(data))
+    ]
     if errors:
         return "reject:schema", errors
     return "accept", []

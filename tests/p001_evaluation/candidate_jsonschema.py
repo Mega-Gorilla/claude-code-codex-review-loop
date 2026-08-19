@@ -27,7 +27,7 @@ SAMPLE_MESSAGE_SCHEMA: dict[str, object] = {
     "required": ["schema_version", "kind", "id", "summary", "blocking"],
     "properties": {
         "schema_version": {"type": "integer"},
-        "kind": {"enum": ["finding", "note"]},
+        "kind": {"type": "string", "enum": ["finding", "note"]},
         "id": {"type": "string", "minLength": 1},
         "summary": {"type": "string", "maxLength": 10_000},
         "blocking": {"type": "boolean"},
@@ -82,24 +82,34 @@ _CROSS_FIELD_PATHS = {0: "resolution_note", 1: "resolution_note", 2: "evidence"}
 
 _VALIDATOR = jsonschema.Draft202012Validator(SAMPLE_MESSAGE_SCHEMA)
 
+# schema上でmapとして定義された位置（additionalPropertiesがschema dictのproperty）。
+# field名の文字列比較ではなくschema構造から導出する。
+_MAP_PARENTS = {
+    (name,)
+    for name, spec in SAMPLE_MESSAGE_SCHEMA["properties"].items()  # type: ignore[union-attr]
+    if isinstance(spec, dict) and isinstance(spec.get("additionalProperties"), dict)
+}
+
 
 def _instance_path(error: jsonschema.ValidationError, data: dict[str, object]) -> str:
     parts: list[str] = []
-    container: object = data
+    raw: list[object] = []
+    node: object = data
     for p in error.absolute_path:
         if isinstance(p, int):
             parts[-1] = f"{parts[-1]}[{p}]" if parts else f"$[{p}]"
+            raw.append(p)
+            if isinstance(node, list) and 0 <= p < len(node):
+                node = node[p]
+            continue
+        if tuple(raw) in _MAP_PARENTS and isinstance(node, dict):
+            # このsegmentはmapのdynamic key。現在のmap container自身から全keyを取得する
+            parts.append(map_key_token(list(node.keys()), str(p)))
         else:
-            if parts and parts[-1] == "metrics" and isinstance(container, dict):
-                # map keyはtokenへ正規化する
-                inner = container.get("metrics")
-                keys = list(inner.keys()) if isinstance(inner, dict) else [str(p)]
-                parts.append(map_key_token(keys, str(p)))
-                container = inner if isinstance(inner, dict) else {}
-                continue
             parts.append(str(p))
-        if isinstance(container, dict):
-            container = container.get(str(p) if not isinstance(p, int) else "", container)
+        raw.append(str(p))
+        if isinstance(node, dict):
+            node = node.get(str(p))
     return ".".join(parts) if parts else "$"
 
 

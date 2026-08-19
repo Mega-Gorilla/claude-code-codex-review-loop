@@ -8,7 +8,7 @@ corpusはC-02のvalidator regression testへ接続するため恒久的に保持
 import json
 from pathlib import Path
 
-from p001_evaluation.common import MAX_INPUT_BYTES, STAGES
+from p001_evaluation.common import MAX_INPUT_BYTES, STAGES, parse_json
 
 CORPUS = Path(__file__).resolve().parent / "p001_corpus"
 
@@ -27,9 +27,14 @@ def test_manifest_entries_are_well_formed() -> None:
             # 期待stageは一意とする（曖昧な複数分類を許さない）
             assert case["stage"] in STAGES, case
             if case["stage"] in {"version", "schema"}:
-                assert isinstance(case.get("error_path"), str) and case["error_path"], case
+                single = case.get("error_path")
+                multi = case.get("error_paths")
+                assert (isinstance(single, str) and single) or (
+                    isinstance(multi, list) and len(multi) >= 2
+                ), case
+                assert not (single and multi), case
         else:
-            assert "stage" not in case and "error_path" not in case, case
+            assert "stage" not in case and "error_path" not in case and "error_paths" not in case, case
 
 
 def test_all_manifest_files_exist_and_no_orphans() -> None:
@@ -76,8 +81,8 @@ def test_json_stage_cases_decode_but_fail_to_parse() -> None:
             continue
         text = (CORPUS / str(case["file"])).read_text(encoding="utf-8")
         try:
-            json.loads(text)
-        except (json.JSONDecodeError, RecursionError):
+            parse_json(text)  # pipelineと同じparse意味論（NaN / Infinity / 桁数上限を拒否）
+        except (ValueError, RecursionError):
             continue
         raise AssertionError(f"{case['file']} はJSONとして解析できてしまう")
 
@@ -86,6 +91,6 @@ def test_version_and_schema_stage_cases_parse_as_json() -> None:
     for case in _cases():
         if case.get("stage") not in {"version", "schema"}:
             continue
-        json.loads((CORPUS / str(case["file"])).read_text(encoding="utf-8"))
+        parse_json((CORPUS / str(case["file"])).read_text(encoding="utf-8"))
         if case["stage"] == "version":
             assert case["error_path"] == "schema_version", case["file"]
