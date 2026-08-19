@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "f-007",
+  "summary": "対応済みのfinding",
+  "blocking": false,
+  "resolved": true,
+  "resolution_note": "round 2で修正を確認"
+}

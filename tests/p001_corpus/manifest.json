@@ -41,133 +41,158 @@
       "expect": "accept"
     },
     {
-      "file": "representative/future_schema_version.json",
+      "file": "representative/resolved_true_with_note.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/resolved_false_without_note.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/with_attachments.json",
+      "expect": "accept"
+    },
+    {
+      "file": "representative/with_metrics.json",
       "expect": "accept"
     },
     {
       "file": "malformed/broken_syntax.json",
       "expect": "reject",
-      "reasons": [
-        "json"
-      ]
+      "stage": "json"
     },
     {
       "file": "malformed/truncated.json",
       "expect": "reject",
-      "reasons": [
-        "json"
-      ]
+      "stage": "json"
     },
     {
       "file": "malformed/not_json_at_all.json",
       "expect": "reject",
-      "reasons": [
-        "json"
-      ]
+      "stage": "json"
+    },
+    {
+      "file": "malformed/deeply_nested.json",
+      "expect": "reject",
+      "stage": "json"
     },
     {
       "file": "malformed/root_not_object.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "$"
     },
     {
       "file": "malformed/missing_required_kind.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "kind"
     },
     {
       "file": "malformed/wrong_type_blocking.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "blocking"
     },
     {
       "file": "malformed/enum_invalid_kind.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "kind"
     },
     {
       "file": "malformed/unexpected_field.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "severity"
     },
     {
       "file": "malformed/nested_missing_file.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "location.file"
     },
     {
       "file": "malformed/nested_wrong_type_line.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "location.line"
     },
     {
       "file": "malformed/null_not_allowed_id.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "id"
     },
     {
       "file": "malformed/empty_string_id.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "id"
     },
     {
       "file": "malformed/tags_wrong_item_type.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "tags[0]"
     },
     {
       "file": "malformed/wrong_type_schema_version.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "schema_version"
     },
     {
       "file": "malformed/oversized_summary.json",
       "expect": "reject",
-      "reasons": [
-        "schema"
-      ],
+      "stage": "schema",
       "error_path": "summary"
     },
     {
-      "file": "malformed/deeply_nested.json",
+      "file": "malformed/crossfield_note_without_resolved.json",
       "expect": "reject",
-      "reasons": [
-        "json",
-        "schema"
-      ]
+      "stage": "schema",
+      "error_path": "resolution_note"
+    },
+    {
+      "file": "malformed/crossfield_resolved_without_note.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "resolution_note"
+    },
+    {
+      "file": "malformed/crossfield_evidence_on_note.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "evidence"
+    },
+    {
+      "file": "malformed/attachments_item_missing_name.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "attachments[0].name"
+    },
+    {
+      "file": "malformed/metrics_wrong_value_type.json",
+      "expect": "reject",
+      "stage": "schema",
+      "error_path": "metrics.lines"
+    },
+    {
+      "file": "malformed/unknown_schema_version.json",
+      "expect": "reject",
+      "stage": "version",
+      "error_path": "schema_version"
+    },
+    {
+      "file": "malformed/invalid_utf8.json",
+      "expect": "reject",
+      "stage": "utf8"
+    },
+    {
+      "file": "malformed/oversized_input.json",
+      "expect": "reject",
+      "stage": "size"
     }
   ]
 }

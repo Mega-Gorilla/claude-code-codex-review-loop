@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "kind": "note",
+  "kind": "finding",
   "id": "x",
   "summary": "s",
   "blocking": true,
-  "severity": "SENTINELghp000"
+  "resolution_note": "対応した"
 }

@@ -1,52 +1,48 @@
 # SPDX-License-Identifier: Apache-2.0
-"""P-001評価corpus（ADR-0003）の整合を検証する。
+"""P-001評価corpus（ADR-0003）の健全性を検証する。
 
-corpusは将来C-02のvalidator regression testへ接続するため恒久的に保持する。
-このtestはvalidator実装に依存せず、corpusとmanifest自体の健全性だけを検証する。
+corpusはC-02のvalidator regression testへ接続するため恒久的に保持する。
+このtestは候補validatorへ依存せず、corpusとmanifest自体の整合だけを検証する。
 """
 
 import json
 from pathlib import Path
 
+from p001_evaluation.common import MAX_INPUT_BYTES, STAGES
+
 CORPUS = Path(__file__).resolve().parent / "p001_corpus"
-
-VALID_EXPECTS = {"accept", "reject"}
-VALID_REASONS = {"json", "schema"}
-
-
-def _manifest() -> dict[str, object]:
-    with (CORPUS / "manifest.json").open("rb") as handle:
-        return json.load(handle)
 
 
 def _cases() -> list[dict[str, object]]:
-    cases = _manifest()["cases"]
-    assert isinstance(cases, list)
+    with (CORPUS / "manifest.json").open("rb") as handle:
+        cases = json.load(handle)["cases"]
+    assert isinstance(cases, list) and cases
     return cases
 
 
 def test_manifest_entries_are_well_formed() -> None:
     for case in _cases():
-        assert case["expect"] in VALID_EXPECTS, case
+        assert case["expect"] in {"accept", "reject"}, case
         if case["expect"] == "reject":
-            reasons = case.get("reasons")
-            assert isinstance(reasons, list) and reasons, case
-            assert set(reasons) <= VALID_REASONS, case
+            # 期待stageは一意とする（曖昧な複数分類を許さない）
+            assert case["stage"] in STAGES, case
+            if case["stage"] in {"version", "schema"}:
+                assert isinstance(case.get("error_path"), str) and case["error_path"], case
         else:
-            assert "reasons" not in case and "error_path" not in case, case
+            assert "stage" not in case and "error_path" not in case, case
 
 
 def test_all_manifest_files_exist_and_no_orphans() -> None:
     listed = {str(case["file"]) for case in _cases()}
     actual = {
         str(p.relative_to(CORPUS)).replace("\\", "/")
-        for p in CORPUS.rglob("*.json")
-        if p.name != "manifest.json"
+        for p in CORPUS.rglob("*")
+        if p.is_file() and p.name != "manifest.json"
     }
     assert listed == actual, f"manifestとfileの不一致: listedのみ={listed - actual} fileのみ={actual - listed}"
 
 
-def test_representative_cases_parse_as_json_objects() -> None:
+def test_accept_cases_parse_as_json_objects() -> None:
     for case in _cases():
         if case["expect"] != "accept":
             continue
@@ -54,25 +50,42 @@ def test_representative_cases_parse_as_json_objects() -> None:
         assert isinstance(data, dict), case["file"]
 
 
-def test_json_reason_cases_fail_to_parse() -> None:
-    """reasonがjsonのみのcaseは、JSONとして本当に解析できないことを保証する。"""
-
+def test_size_stage_cases_exceed_input_limit() -> None:
     for case in _cases():
-        if case["expect"] != "reject" or case.get("reasons") != ["json"]:
+        if case.get("stage") != "size":
             continue
-        raw = (CORPUS / str(case["file"])).read_text(encoding="utf-8")
+        raw = (CORPUS / str(case["file"])).read_bytes()
+        assert len(raw) > MAX_INPUT_BYTES, case["file"]
+
+
+def test_utf8_stage_cases_fail_to_decode() -> None:
+    for case in _cases():
+        if case.get("stage") != "utf8":
+            continue
+        raw = (CORPUS / str(case["file"])).read_bytes()
         try:
-            json.loads(raw)
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        raise AssertionError(f"{case['file']} はUTF-8として解析できてしまう")
+
+
+def test_json_stage_cases_decode_but_fail_to_parse() -> None:
+    for case in _cases():
+        if case.get("stage") != "json":
+            continue
+        text = (CORPUS / str(case["file"])).read_text(encoding="utf-8")
+        try:
+            json.loads(text)
         except (json.JSONDecodeError, RecursionError):
             continue
         raise AssertionError(f"{case['file']} はJSONとして解析できてしまう")
 
 
-def test_schema_reason_cases_parse_as_json() -> None:
-    """reasonがschemaのみのcaseは、JSON層は通過することを保証する。"""
-
+def test_version_and_schema_stage_cases_parse_as_json() -> None:
     for case in _cases():
-        if case["expect"] != "reject" or case.get("reasons") != ["schema"]:
+        if case.get("stage") not in {"version", "schema"}:
             continue
         json.loads((CORPUS / str(case["file"])).read_text(encoding="utf-8"))
-        assert "error_path" in case, f"{case['file']} はerror_pathの期待値を持つべき"
+        if case["stage"] == "version":
+            assert case["error_path"] == "schema_version", case["file"]

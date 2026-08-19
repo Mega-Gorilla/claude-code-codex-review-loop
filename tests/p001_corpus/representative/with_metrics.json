@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "note",
+  "id": "n-005",
+  "summary": "計測つき",
+  "blocking": false,
+  "metrics": {
+    "files_changed": 3,
+    "lines_added": 120
+  }
+}
