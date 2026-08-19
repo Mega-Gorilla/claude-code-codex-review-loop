@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "kind": "note",
+  "id": "n-002",
+  "summary": "分類つき",
+  "blocking": false,
+  "tags": [
+    "security",
+    "perf"
+  ]
+}

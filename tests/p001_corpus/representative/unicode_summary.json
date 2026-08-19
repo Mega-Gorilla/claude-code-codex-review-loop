@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "f-004",
+  "summary": "改行\nと絵文字🎌とquote\"を含む説明",
+  "blocking": true
+}

@@ -35,7 +35,7 @@ target experienceが定義した完成状態を、どのcomponent、どの依存
 | P-014 | subprocess呼び出しはlist形式のargvで行う。`shell=True`、`os.system`、`eval`、`exec`を使用しない | agentへ渡す値にはIssue本文やreview結果が含まれ、shell経由ではinjection面になる |
 | P-015 | 本projectのcodeでcredentialを保持しない。認証は認証済みCLIへ委譲し、agentごとの到達可能範囲をC-06で制御する | 「渡さない」だけではsubprocessが環境変数やhome配下の設定へ到達できる。委譲と隔離は別の設計項目である |
 
-`P-001`（runtime依存の方針）はPhase 0で決定する技術判断であり、原則ではない。Section 7を参照。
+`P-001`（runtime依存の方針）は[ADR-0003](../decisions/0003-p001-protocol-validator.md)で決定済み: runtime依存ゼロの専用protocol validatorとする。
 
 ### P-002の意味
 
@@ -456,16 +456,9 @@ target experienceの`Proposed`のうち、そのまま採用しないものだ�
 | 9 | safety behavior | 具体化して採用 | login allowlist、credential隔離、OS別file権限をC-04とC-06で追加する |
 | 10.1 | checkpointの保存項目 | 構造を追加して採用 | C-02のversioned envelopeへ格納し、fieldは利用するPhaseで追加する |
 
-### Phase 0で決定する技術判断（P-001）
+### P-001: runtime依存の方針（決定済み）
 
-runtime依存をゼロに保つか、schema検証にlibraryを導入するかを決める。必要なのは本projectが定義する固定のagent出力形式の検証であり、汎用JSON Schema validatorの自作ではない。
-
-| 候補 | 内容 |
-| --- | --- |
-| 1 | 依存ゼロを維持し、対応するschema機能を明示的に限定した専用protocol validatorを実装する |
-| 2 | 成熟したvalidator libraryを導入する |
-
-評価軸はsupply chain risk、配布size、Windows / Linux互換性、validationの網羅性、診断品質、malformed入力への耐性、保守cost。Phase 0で代表schema corpusとmalformed corpusを先に定義し、両案のprototypeを比較してCodex reviewを受ける。重大なtrade-offが判明した場合だけユーザーへ確認する。`pyproject.toml`が現在`dependencies = []`であることは、stub状態の事実であって要件ではない。
+schema検証は、runtime依存をゼロに保ち、必要なschema機能だけを扱う専用protocol validatorとする。比較方法、must-have条件、採用理由、再評価条件、Phase 2への引き継ぎは[ADR-0003](../decisions/0003-p001-protocol-validator.md)に記録した。評価corpusは`tests/p001_corpus/`へ恒久的に保持し、C-02のregression testへ接続する。
 
 ## 8. 実装順序
 
@@ -548,8 +541,8 @@ CIは常に全testを実行する。regression testは対象のIssue番号を参
 
 未決事項:
 
-- P-001のruntime依存方針（Phase 0）
 - checkpoint envelopeのversioning方式とmigration policyの詳細（Phase 2）
-- coverage floorとmodule size baselineの初期値（Phase 0）
 - HOST_ACTIONの最終的な種類と粒度（Phase 8）
 - protocol versionの表現形式と互換range（Phase 16）
+
+解決済み: P-001は[ADR-0003](../decisions/0003-p001-protocol-validator.md)で決定。coverage floorとmodule size baselineの初期値はPhase 0のPR（floor 100、branch coverage採用、実測行数・headroomなし）で決定した。

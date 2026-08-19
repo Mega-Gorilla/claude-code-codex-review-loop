@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "id": "f-006",
+  "summary": "evidenceつき",
+  "blocking": true,
+  "evidence": "stack traceの抜粋"
+}

@@ -1,0 +1,7 @@
+{
+  "schema_version": 2,
+  "kind": "note",
+  "id": "n-005",
+  "summary": "将来versionの入力。構造検証は通し、version gatingは上位層が行う",
+  "blocking": false
+}
