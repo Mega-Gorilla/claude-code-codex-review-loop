@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Draft** |
+| Status | **Accepted**（PR #4のユーザー承認とmergeにより確定） |
 
 本projectの文書で使う用語を定義します。各文書は独自用語の初出時にここへlinkします。
 

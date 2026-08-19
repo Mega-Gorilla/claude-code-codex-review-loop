@@ -31,6 +31,6 @@ componentは次の15項目です。一覧と依存とPhaseはimplementation plan
 | C-14 | Issue modeとIssue-to-PR handoff |
 | C-15 | Plugin配布と任意wrapper |
 
-実装子Issueはimplementation planのレビュー・合意後に発行し、親roadmap Issue #2から参照します。
+実装子Issue #5〜#22は発行済みで、親roadmap Issue #2から参照しています。
 
 このdirectoryには、実装が進んだ段階でcomponent単位の詳細設計や図を追加します。implementation planと重複する記述は置きません。
