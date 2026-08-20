@@ -10,6 +10,7 @@
 | --- | --- |
 | [overview.md](overview.md) | 役割、主経路、component map、不変条件の1ページ要約。最初に読む |
 | [implementation plan](../plans/implementation-plan.md) | component定義、依存、Phase、受入条件の正本 |
+| [c01-state-machine.md](c01-state-machine.md) | C-01の遷移表・遷移図（code registryから生成。手動編集しない） |
 
 componentは次の15項目です。一覧と依存とPhaseはimplementation plan Section 4、主要な決定と受入条件はSection 5、実装順序はSection 8を参照してください。
 
