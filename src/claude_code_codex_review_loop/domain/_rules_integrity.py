@@ -97,6 +97,14 @@ def _detect_halt_gate_effect(ms: MachineState, event: ev.Event) -> tuple[Machine
     )
 
 
+def _detect_blocked_union_effect(ms: MachineState, event: ev.Event) -> tuple[MachineState, tuple[Command, ...]]:
+    """RECORD_INTEGRITY block滞在中の検出: blockのviolation集合へunion（silent lossを作らない）。"""
+    e = cast(ev.RecordIntegrityViolationDetected, event)
+    block = cast(RecordIntegrityBlock, ms.block)
+    merged = RecordIntegrityBlock(violations=canonicalize_integrity(block.violations + (e.evidence,)))
+    return replace(ms, block=merged), _INVALIDATE
+
+
 def _detect_halt_gate_union_effect(ms: MachineState, event: ev.Event) -> tuple[MachineState, tuple[Command, ...]]:
     """halt gate中の追加検出: blockのviolation集合へunion。"""
     e = cast(ev.RecordIntegrityViolationDetected, event)
@@ -198,13 +206,13 @@ DETECTION_RULES: tuple[Rule, ...] = (
     Rule(
         rule_id="I-D7",
         section="integrity",
-        description="RECORD_INTEGRITY block滞在中の検出 -> 冪等維持（別bindingは解消後にC-06が再提示）",
+        description="RECORD_INTEGRITY block滞在中の検出 -> block集合へunion + 即時失効（同一bindingは冪等）",
         match=Match(
             states=frozenset({_S.BLOCKED}),
             event_type=ev.RecordIntegrityViolationDetected,
             block_kinds=frozenset({BlockKind.RECORD_INTEGRITY}),
         ),
-        effect=lambda ms, event: (ms, _INVALIDATE),
+        effect=_detect_blocked_union_effect,
         to_state=_S.BLOCKED.value,
         command_names=("InvalidateApprovals",),
     ),

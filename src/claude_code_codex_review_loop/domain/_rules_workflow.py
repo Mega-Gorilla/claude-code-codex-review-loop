@@ -289,8 +289,13 @@ def _progress_block_rule(
     event_type: type,
     from_states: frozenset[State],
     continuation: BlockedContinuation,
+    entry_commands: tuple[Command, ...] = (),
 ) -> Rule:
-    """上限・膠着の判定でBLOCKEDへ入り、本来の継続を保存してcommandを発行しない。"""
+    """上限・膠着の判定でBLOCKEDへ入り、本来の継続を保存する。
+
+    agent（Codex / host）起動commandは発行しない。entry_commandsは承認失効のような
+    安全側の非agent commandに限る（progress判定の結果で安全semanticsを変えない）。
+    """
     budget = BUDGET_EVENTS[event_type][0]
 
     def effect(ms: MachineState, event: ev.Event) -> tuple[MachineState, tuple[Command, ...]]:
@@ -308,7 +313,7 @@ def _progress_block_rule(
             counter_snapshot=e.report.counter_snapshot,
             fingerprint=e.report.fingerprint,
         )
-        return replace(ms, state=State.BLOCKED, awaiting=None, pending_record=None, block=block), ()
+        return replace(ms, state=State.BLOCKED, awaiting=None, pending_record=None, block=block), entry_commands
 
     return Rule(
         rule_id=rule_id,
@@ -317,7 +322,7 @@ def _progress_block_rule(
         match=Match(states=from_states, event_type=event_type, pending=_MATCHED, progress=_BOUNDED),
         effect=effect,
         to_state=State.BLOCKED.value,
-        command_names=(),
+        command_names=_names(entry_commands),
     )
 
 
@@ -658,10 +663,11 @@ WORKFLOW_RULES: tuple[Rule, ...] = (
     ),
     _progress_block_rule(
         "T-B23",
-        "CI code failureのround上限・膠着 -> BLOCKED（承認失効を含む継続を保存）",
+        "CI code failureのround上限・膠着 -> 承認を即時失効してBLOCKED（継続内の失効は冪等再発行）",
         ev.CiCodeFailureVerified,
         frozenset({_S.WAITING_CI}),
         _CONT_CI_CODE_FAILURE,
+        entry_commands=(InvalidateApprovals(),),
     ),
     _response_rule(
         "T-24",

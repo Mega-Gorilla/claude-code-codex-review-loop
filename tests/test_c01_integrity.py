@@ -181,12 +181,17 @@ class TestI4FailClosed:
             transition(ms, ev.IntegrityRestoredValidated(bad))
 
     def test_intervention_rejected_for_integrity_block(self) -> None:
+        from dataclasses import replace as dc_replace
+
         ms = self._blocked()
         assert isinstance(ms.block, RecordIntegrityBlock)
         with pytest.raises(TransitionRejected):
             transition(ms, ev.RecordProduced(_K.BLOCK_INTERVENTION, binding("bi-1")))
+        with_record = dc_replace(
+            _integrity_resolution(ms.block), record=evidence(_K.BLOCK_INTERVENTION, "bi-1")
+        )
         with pytest.raises(TransitionRejected):
-            transition(ms, ev.BlockResolvedIntervention(_integrity_resolution(ms.block)))
+            transition(ms, ev.BlockResolvedIntervention(with_record))
 
 
 class TestI5UnionNoSilentLoss:
@@ -304,12 +309,20 @@ class TestI8ViolationIdempotency:
         other, _ = transition(ms, ev.RecordIntegrityViolationDetected(violation("v-2", descriptor)))
         assert len(other.deferred_integrity) == 2
 
-    def test_detection_while_integrity_blocked_is_held(self) -> None:
-        """RECORD_INTEGRITY block滞在中の検出は冪等維持（解消後にC-06が再提示する）。"""
+    def test_detection_while_integrity_blocked_unions_into_block(self) -> None:
+        """RECORD_INTEGRITY block滞在中の検出はblock集合へunionされ、silentに失われない。"""
         ms, _ = transition(to_waiting_ci(), _detect("v-1"))
-        held, commands = transition(ms, _detect("v-2"))
-        assert held.block == ms.block  # blockは上書きされない
+        grown, commands = transition(ms, _detect("v-2"))
+        assert isinstance(grown.block, RecordIntegrityBlock)
+        assert [ref.binding.value for ref in grown.block.violations] == ["v-1", "v-2"]
         assert names(commands) == ("InvalidateApprovals",)
+        # 同一bindingの再検出は冪等（最初のevidenceを保持し、上書きしない）
+        same, _ = transition(grown, _detect("v-2"))
+        assert same.block == grown.block
+        # 解消evidenceは拡大後の集合（代表binding）と照合される
+        resolution = _integrity_resolution(grown.block)
+        exited, _ = transition(grown, ev.IntegrityRestoredValidated(resolution))
+        assert exited.state is State.RUNNING_REVIEW
 
     def test_detection_replaces_progress_block(self) -> None:
         """PROGRESS / EXTERNAL block滞在中の検出はRECORD_INTEGRITY blockへ切り替わる（旧blockは破棄）。"""

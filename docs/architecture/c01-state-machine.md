@@ -141,7 +141,7 @@ stateDiagram-v2
 | T-B07 | CHANGES_REQUESTED | ClarificationQuestionVerified | pending = MATCH、progress = LIMIT_REACHED / NO_PROGRESS | BLOCKED | — |
 | T-B11 | APPLYING_FIXES | FixResultVerified | pending = MATCH、progress = LIMIT_REACHED / NO_PROGRESS | BLOCKED | — |
 | T-B19 | REVIEWING_DECISION_REQUEST | VerdictResubmitVerified | pending = MATCH、progress = LIMIT_REACHED / NO_PROGRESS | BLOCKED | — |
-| T-B23 | WAITING_CI | CiCodeFailureVerified | pending = MATCH、progress = LIMIT_REACHED / NO_PROGRESS | BLOCKED | — |
+| T-B23 | WAITING_CI | CiCodeFailureVerified | pending = MATCH、progress = LIMIT_REACHED / NO_PROGRESS | BLOCKED | InvalidateApprovals |
 
 ### decision flow
 

@@ -281,11 +281,17 @@ def events_for(ms: MachineState) -> list[ev.Event]:
             ),
         )
     )
+    from dataclasses import replace as dc_replace
+
+    intervention_record = RecordEvidence(RecordKind.BLOCK_INTERVENTION, _PEND_BINDING, OpaqueRef("r"))
     for resolution in _resolutions(ms):
         events.append(ev.BlockResolvedLimitRaised(resolution))
-        events.append(ev.BlockResolvedIntervention(resolution))
         events.append(ev.IntegrityRestoredValidated(resolution))
         events.append(ev.IntegritySalvageEstablished(resolution))
+        # interventionはBLOCK_INTERVENTION recordのcanonical検証を必ず伴う（構築時検査）
+        if resolution.record is None or resolution.record.kind is not RecordKind.BLOCK_INTERVENTION:
+            resolution = dc_replace(resolution, record=intervention_record)
+        events.append(ev.BlockResolvedIntervention(resolution))
     return events
 
 

@@ -225,8 +225,8 @@ class TestW4BlockedGate:
         with pytest.raises(TransitionRejected):
             transition(ms2, ev.BlockResolvedLimitRaised(self._resolution(block)))
 
-    def test_ci_code_failure_block_replays_invalidate_and_apply(self) -> None:
-        """CI系のblockでは、保存された継続にCMD_INVALIDATE_APPROVALSが含まれ再現される。"""
+    def test_ci_code_failure_block_invalidates_immediately_and_replays(self) -> None:
+        """CI系のblockは進入時に承認を即時失効し、継続内の失効は冪等再発行として再現される。"""
         ms = start()
         ms, _ = produced_verified(
             ms, _K.REVIEW_RESULT, "rv-1", ev.ReviewApprovedVerified(evidence(_K.REVIEW_RESULT, "rv-1"))
@@ -237,7 +237,9 @@ class TestW4BlockedGate:
             "ci-1",
             ev.CiCodeFailureVerified(evidence(_K.CI_CODE_FAILURE, "ci-1"), report(Progress.LIMIT_REACHED)),
         )
-        assert ms.state is State.BLOCKED and commands == ()
+        assert ms.state is State.BLOCKED
+        # 進入時の即時失効（agent起動commandは発行しない）
+        assert names(commands) == ("InvalidateApprovals",)
         block = ms.block
         assert isinstance(block, ProgressBlock)
         ms2, commands = transition(ms, ev.BlockResolvedLimitRaised(self._resolution(block)))
@@ -276,6 +278,7 @@ class TestW4BlockedGate:
         resolution = BlockResolutionEvidence(
             target_block_binding=block.binding,
             head=block.head,
+            record=evidence(_K.BLOCK_INTERVENTION, "bi-x"),
             reason=block.reason,
             budget=block.budget,
             counter_snapshot=block.counter_snapshot,

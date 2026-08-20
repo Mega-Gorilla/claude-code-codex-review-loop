@@ -206,3 +206,20 @@ class TestEventShape:
             ev.CancellationCompleted()
         with pytest.raises(IllegalEventError):
             ev.CancellationCompleted(attempt_binding=binding("a"), emergency_evidence=OpaqueRef("e"))
+
+    def test_intervention_requires_canonical_block_intervention_record(self) -> None:
+        """recordなし・別kindのrecordではintervention解消eventを構築できない（AC-C01-11）。"""
+        from claude_code_codex_review_loop.domain.values import BlockResolutionEvidence
+
+        without_record = BlockResolutionEvidence(target_block_binding=binding("b-1"), head=OpaqueRef("h"))
+        with pytest.raises(IllegalEventError) as no_record:
+            ev.BlockResolvedIntervention(without_record)
+        assert no_record.value.code == "INTERVENTION_RECORD"
+        wrong_kind = BlockResolutionEvidence(
+            target_block_binding=binding("b-1"),
+            head=OpaqueRef("h"),
+            record=RecordEvidence(kind=_K.GATE_ANSWER, binding=binding("x"), ref=OpaqueRef("r")),
+        )
+        with pytest.raises(IllegalEventError) as bad_kind:
+            ev.BlockResolvedIntervention(wrong_kind)
+        assert bad_kind.value.code == "INTERVENTION_RECORD"

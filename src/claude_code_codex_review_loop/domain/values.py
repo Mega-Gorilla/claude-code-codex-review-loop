@@ -399,8 +399,13 @@ NORMAL: NormalProcedure = NormalProcedure()
 
 
 def canonicalize_integrity(refs: tuple[IntegrityEvidenceRef, ...]) -> tuple[IntegrityEvidenceRef, ...]:
-    """binding重複を排除しbinding昇順へ正規化する（同一集合から同一のMachineStateを得る）。"""
-    unique_refs = {ref.binding.value: ref for ref in refs}
+    """binding重複を排除しbinding昇順へ正規化する（同一集合から同一のMachineStateを得る）。
+
+    同一bindingの再検出は最初のevidenceを保持する（冪等。上書きしない）。
+    """
+    unique_refs: dict[str, IntegrityEvidenceRef] = {}
+    for ref in refs:
+        unique_refs.setdefault(ref.binding.value, ref)
     return tuple(unique_refs[key] for key in sorted(unique_refs))
 
 

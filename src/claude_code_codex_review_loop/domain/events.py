@@ -399,9 +399,20 @@ class BlockResolvedLimitRaised:
 
 @dataclass(frozen=True)
 class BlockResolvedIntervention:
-    """BLOCK_INTERVENTION recordのcanonical検証（C-06 / C-11。2経路合流）。"""
+    """BLOCK_INTERVENTION recordのcanonical検証（C-06 / C-11。2経路合流）。
+
+    canonical検証済みのBLOCK_INTERVENTION record自体を必ず伴う（recordなしの解消は
+    構築できない。AC-C01-11のcanonical record gate）。
+    """
 
     resolution: BlockResolutionEvidence
+
+    def __post_init__(self) -> None:
+        record = self.resolution.record
+        if record is None or record.kind is not RecordKind.BLOCK_INTERVENTION:
+            raise IllegalEventError(
+                "INTERVENTION_RECORD", "解消evidenceはBLOCK_INTERVENTION recordのcanonical検証を必ず伴う"
+            )
 
 
 @dataclass(frozen=True)
