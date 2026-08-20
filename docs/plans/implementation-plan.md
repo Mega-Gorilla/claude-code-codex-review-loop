@@ -137,13 +137,36 @@ src/claude_code_codex_review_loop/
 
 ### C-01 domain state machine
 
-遷移関数は`(state, event) -> (state, [command])`。GitHub永続化とread-after-write確認の完了をeventとして要求し、gate未通過の遷移を表現できないようにする。
+高水準の実装計画（不変条件・責務境界・sub-protocol契約・受入test系列）は[Phase 1計画](phase-01-domain-state-machine.md)が定める。**完全遷移・guard排他・到達可能性の正本は、C-01実装のcode registryとproperty / sequence test**であり、生成した遷移表・遷移図を文書へ反映してsnapshot照合する。計画文書は完全遷移表を先に確定しない（文章だけで実装より先に完全性を証明したように見せない）。
+
+遷移関数は`transition(machine_state, event) -> (machine_state, [command])`。開始は`initialize(preflight_event) -> (machine_state, [command])`の専用API（preflight成功で`RUNNING_REVIEW`へ入り、purpose = `CODE_REVIEW`のCodex起動command 1件と対応する応答期待値を返す。失敗で`FAILED`へ入りcommandを返さない。可視の17 stateに「未開始」を追加せず、未開始の`FAILED`はresume不可で新runの`initialize`のみが復帰経路）。GitHub永続化とread-after-write確認の完了をevidence eventとして要求し、gate未通過の遷移を表現できないようにする。commandは記述であり、C-01は実行しない。
+
+**実装方針**: 全遷移ruleを単一のregistryとしてdataで定義し、guardは有限typed discriminatorに限定する。到達可能な組合せ × 各eventに一致するruleは0件または1件で、優先順位による解決はしない（一意性・到達可能性・純粋性はproperty testで機械検証する）。MachineStateは**排他的contextの直和**（進行中の手続き — 通常 / cancel / incident / block — を互いに排他な型で表現し、不正な付随値の組合せを表現不能にする）を第一候補とし、最終的な型はC-01実装PRで確定する。
+
+**sub-protocol契約の要点**（正本はPhase 1計画の節5）:
+
+- **main workflowとbounded progress**: typed purposeのCodex起動。budget（review round / clarification turn）は消費点を明示し、1 turn = 一往復で5回目開始を許可・6回目開始を停止、resubmitは同一fingerprintの共通counter。loop終了結果は上限turnでも処理する。上限到達時は新agent commandを発行せず`BLOCKED`へ入り、本来の継続を保存して、解消の検証（limit引き上げ / 膠着解消record / fallback）後にのみ1回再現する
+- **canonical record persistence**: `PRODUCED -> 冪等な永続化 -> VERIFIED`。単一pending、binding照合、partial turnのcheckpoint再開。user-input recordはPowerShell転記とGitHub直接comment（C-06検証のexternal evidence、再投稿なし）の2経路で同一semantic eventへ合流する
+- **cancellation**: intent検証 -> 停止command -> attempt binding一致の完了event -> `CANCELLED`。停止・checkpoint完了が他のあらゆる再開に先行し、cancel中はstale pendingを含むsemantic継続を拒否する。`MERGING`のみ照会を優先。resumeは新runとして開始
+- **integrityとincident**: 検出の全経路で承認を即時・冪等に失効。`MERGING`ではoutcome確定を最優先し（成否不明をintegrityで上書きしない）、active stateでは停止gate経由でのみ`BLOCKED`へ。検出済みviolationは集合として保持し、全violationが検証済みincident record（canonical record gate通過）へ含まれた後にのみterminalへ遷移する。`RECORD_INTEGRITY`はfail closed（復元 / salvageの専用evidenceのみが出口）
+- **merge transaction**: 承認検証後はpreconditions再検証のみを発行し、一致eventの受領後にのみ実行commandを発行する（発行経路は1つ）。実行後はGitHub照会だけが成否を決め、成否不明は安全停止。head変更は承認失効 + fresh review
+
+**Phase 1のscope限定**: `domain/`のうち実装するのはstates / events / commands / machine（registry・`initialize`・`transition`）と、成立に不可欠な最小のvalue objectのみ。finding ledgerはPhase 10、run ID等のid生成は最初に必要とするPhaseで追加し、Phase 1では空moduleも先行実装も作らない。
 
 | ID | 受入条件 |
 | --- | --- |
-| AC-C01-01 | 17 stateすべてが到達可能で、遷移表と遷移図をdata drivenで照合できる |
-| AC-C01-02 | 未定義遷移と到達不能stateをtestが検出する |
-| AC-C01-03 | 検証済みcanonical recordの永続化eventが無い状態では、次agentを起動するcommandを生成できない |
+| AC-C01-01 | 17 stateすべてが到達可能で、遷移表と遷移図が同一registryから導出され、data drivenで照合できる |
+| AC-C01-02 | 未定義遷移がsilent no-opにならず、構造化されたerrorとして拒否される。全state × event組合せをtable-driven testで検査し、到達不能stateを検出する |
+| AC-C01-03 | 検証済みcanonical recordのevidence eventが無い状態では、次agentを起動するcommandを生成できない。gate解除は型付きevidenceによる |
+| AC-C01-04 | 遷移関数が純粋である: 同一入力から常に同一結果、入力を変更しない、I/O・時刻・乱数・環境変数へ依存しない、command列の順序が決定論的 |
+| AC-C01-05 | terminal状態（`MERGED` / `CANCELLED`）からいかなる処理も開始できない。resumable状態は定義されたresume eventだけで復帰する |
+| AC-C01-06 | 待機状態（`AWAITING_TOOL_PERMISSION`等）から、進入元に応じた正しい処理位置へ復帰する。復帰先はMachineStateが保持し、eventから注入できない |
+| AC-C01-07 | `MERGING`中のcancelがmerge結果の照会を経由し、結果を確定できない場合に`CANCELLED`ではなく`MERGE_FAILED`へ遷移する（検出済みintegrity evidenceを保持する場合の成否不明は`MERGING`に留まり照会のみを継続し、outcome確定までagent / merge commandを発行しない） |
+| AC-C01-08 | guardが有限のtyped discriminatorに限定され、到達可能なMachineState付随値ごとに各eventへ一致するruleが0または1件であることをtestで検査する。順序を飛ばした応答（merge実行command発行前の完了event、verdict確認前のbrief / decision record）、消費済み応答の再入力（preconditions一致eventの重複）、応答期待値 / binding不一致がnegative testで拒否される |
+| AC-C01-09 | bounded-progress判定が次agent commandの発行前に適用される。budget（review round / clarification turn）の消費点・判定点はregistryのdataとして明示され、roundは二重計上されず（既定3 roundの開始から停止までの系列testで固定）、clarificationは5回目のturn開始が許可され6回目の開始で停止する。同一fingerprintの質問と再提出は共通counterを消費する。上限到達の受理後に新しいCodex / host起動commandが一度も発行されず`BLOCKED`へ遷移し、**loopを終了する結果は正常に処理される** |
+| AC-C01-10 | `CANCELLED`へは、cancel attemptへbindされた停止・checkpoint完了eventを受けて初めて遷移する。完了event前はterminalにならず新しいagent commandを発行しない。cancel中はstale pendingのVERIFIEDを含むsemantic継続が拒否され、**stateの分類に関わらず**（全resumable stateを含む）停止失敗後の明示resumeでは停止commandの再発行だけが返る。binding不一致の完了eventは拒否される（`MERGING`のみmerge結果の照会を優先する） |
+| AC-C01-11 | `BLOCKED`は停止理由（種別・対象binding・budget等）を保持し、同一条件での単純resumeはcommandを発行せず`BLOCKED`を維持する。解消evidenceはrecord自身のbindingと解除対象blockへの参照を分離して持ち、blockとの完全一致で受理される。limit引き上げの検証またはblock解消のuser-input record（2経路）のcanonical検証だけが、保存された本来のcommand列（付随actionを含む）を1回再現する。同一対象への別record（初回のみ受理）・別blockを指すrecord・同一recordのreplayが区別して拒否される |
+| AC-C01-12 | progress以外のblockがPhase 1 registryで定義される: C-06の整合性検出（AC-C06-06〜08）は受理する全経路で承認を即時・冪等に失効させ、`MERGING`のoutcome段階では検出済みevidenceを保持したまま照会を維持して確定を最優先し（確定ruleが必ず消費し、検出済み違反をsilentに失わない）、preconditions段階では安全停止、activeなstateでは停止gateのprocess停止完了後、resumable stateでは直接、record整合性blockへ入る（進入時に旧resume情報を残さない）。record整合性blockはgeneric fallbackを受理せず、整合性復元またはsalvage確立の専用evidence（対象binding一致）のみを出口とし、未修復chainからfresh reviewを起動できない。terminal前のincident監査記録はcanonical record gateを通過した検証済みrecordを要求する。外部依存はhostの報告record検証で外部依存blockへ入り、intervention検証で継続を再現する。preflight NGの`FAILED`はresume系eventを拒否し、新しいrunの`initialize`だけを復帰経路とする |
 
 ### C-02 agent protocol schemaとcheckpoint envelope
 
@@ -467,7 +490,7 @@ schema検証は、runtime依存をゼロに保ち、必要なschema機能だけ�
 | Phase | 内容 | Component | 完了条件 | 追加するcheckpoint field |
 | --- | --- | --- | --- | --- |
 | 0 | 基盤と品質ゲート | — | CIでlint、type、coverage、size ratchetが動作する。P-001を決定する | — |
-| 1 | domain state machine | C-01 | AC-C01-01〜03 | — |
+| 1 | domain state machine | C-01 | AC-C01-01〜12 | — |
 | 2 | protocol schemaとenvelope | C-02 | AC-C02-01〜03 | envelope schemaとmigration policyを定義（永続化はPhase 5以降） |
 | 3 | process abstraction | C-03 | AC-C03-01、AC-C03-02 | — |
 | 4 | security policy | C-04 | AC-C04-01〜03 | — |
