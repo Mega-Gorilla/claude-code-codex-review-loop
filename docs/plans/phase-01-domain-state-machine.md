@@ -49,7 +49,7 @@ C-01は、target experienceの「State model」節が定義する17 stateと全�
 ## 4. 状態モデルの基本semantics
 
 - **17 state**はtarget experienceの定義どおり。**terminal** = `MERGED` / `CANCELLED`（全eventを構造化errorで拒否）。**resumable** = `WAITING_CI` / `AWAITING_USER_DECISION` / `AWAITING_TOOL_PERMISSION` / `READY_FOR_HUMAN_MERGE` / `BLOCKED` / `FAILED` / `REPORT_FAILED` / `MERGE_FAILED`の8つ。残る7つが**active**
-- 開始は`initialize(preflight_event)`の専用API（成功で`RUNNING_REVIEW`、失敗で`FAILED`。可視stateに「未開始」を追加しない）。preflight失敗で作られた`FAILED`はresume系eventを拒否し、新しいrunの`initialize`（preflight再実行）だけを復帰経路とする
+- 開始は`initialize(preflight_event) -> (machine_state, [command])`の専用API。preflight成功では`RUNNING_REVIEW`へ入り、**purpose = `CODE_REVIEW`のCodex起動command 1件と対応する応答期待値**を返す（初回reviewの開始を欠いた実装は本契約に適合しない。5.1）。preflight失敗では`FAILED`へ入りcommandを返さない。可視stateに「未開始」を追加しない。preflight失敗で作られた`FAILED`はresume系eventを拒否し、新しいrunの`initialize`（preflight再実行）だけを復帰経路とする
 - 遷移関数は`transition(machine_state, event) -> (machine_state, [command])`。未定義の入力はsilent no-opにせず、構造化errorで拒否する
 - **MachineStateは排他的contextの直和を実装候補とする**: 可視stateに加え、`NormalContext` / `CancellingContext` / `IncidentContext` / `BlockedContext`等の互いに排他なcontextで「進行中の手続き」を表現し、**不正な付随値の組合せを型として表現不能にする**。多数のoptional fieldの直積を文章上の組合せ不変条件で制約する方式は採らない（設計レビューで矛盾の主因になった）。最終的な型はC-01実装PRで確定する
 - guardは有限のtyped discriminatorに限定し、registry上の各（状態, event, guard）に一致するruleが0件または1件であることをtestで機械検証する。優先順位による解決はしない
@@ -119,7 +119,7 @@ C-01実装PRは、少なくとも次の系列をproperty / sequence testとし�
 - R1: 到達可能な（状態 × 付随値 × event × guard値）の全展開で、一致ruleが常に0件または1件。優先順位による解決が存在しない（08）
 - R2: 純粋性 — 同一入力の再適用で同一結果、入力非変更、I/O・時刻・乱数・環境変数への非依存、command列順序の決定性（04）
 - R3: 17 stateすべて到達可能、到達不能stateの検出、terminalからの全event拒否、未定義遷移の構造化error（01、02、05）
-- R4: 付随情報（復帰先・継続・binding等）が遷移ruleのみで設定され、eventから注入できない。不正な組合せがcontext直和により表現不能（06）
+- R4: 付随情報（復帰先・継続・binding等）が遷移ruleのみで設定され、eventから注入できない。不正な付随値の組合せ（排他であるべき進行中手続きの同時保持等）を構築・受理できないことを、表現方式（context直和等）に依存しない形でproperty / static testで検証する（06）
 - R5: 生成した遷移表・遷移図と文書のsnapshot照合（01）
 
 **canonical record（03）**
@@ -130,6 +130,7 @@ C-01実装PRは、少なくとも次の系列をproperty / sequence testとし�
 
 **workflowとbounded progress（09、11）**
 
+- W0: initializeの正常系 — preflight成功eventから`RUNNING_REVIEW`へ入り、purpose = `CODE_REVIEW`のCodex起動command 1件と応答期待値が返り、最初のreview結果待ちになる（I9の失敗系列と対。03）
 - W1: 既定3 review roundの開始から停止までの系列。roundの二重計上がない
 - W2: clarificationの5回目turn開始が許可され、5回目の回答処理後の6回目開始で停止する。同一fingerprintのresubmitが共通counterを消費し、5 turn消費後のresubmitが停止する
 - W3: loop終了結果（上限turnのCONFIRMED / REVISED / WITHDRAWN / ESCALATED、上限時のASK_USER / PROCEED）が正常に処理される

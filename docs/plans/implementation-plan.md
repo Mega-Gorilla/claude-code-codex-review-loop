@@ -139,7 +139,7 @@ src/claude_code_codex_review_loop/
 
 高水準の実装計画（不変条件・責務境界・sub-protocol契約・受入test系列）は[Phase 1計画](phase-01-domain-state-machine.md)が定める。**完全遷移・guard排他・到達可能性の正本は、C-01実装のcode registryとproperty / sequence test**であり、生成した遷移表・遷移図を文書へ反映してsnapshot照合する。計画文書は完全遷移表を先に確定しない（文章だけで実装より先に完全性を証明したように見せない）。
 
-遷移関数は`transition(machine_state, event) -> (machine_state, [command])`。開始は`initialize(preflight_event)`の専用API（preflight成功で`RUNNING_REVIEW`、失敗で`FAILED`。可視の17 stateに「未開始」を追加せず、未開始の`FAILED`はresume不可で新runの`initialize`のみが復帰経路）。GitHub永続化とread-after-write確認の完了をevidence eventとして要求し、gate未通過の遷移を表現できないようにする。commandは記述であり、C-01は実行しない。
+遷移関数は`transition(machine_state, event) -> (machine_state, [command])`。開始は`initialize(preflight_event) -> (machine_state, [command])`の専用API（preflight成功で`RUNNING_REVIEW`へ入り、purpose = `CODE_REVIEW`のCodex起動command 1件と対応する応答期待値を返す。失敗で`FAILED`へ入りcommandを返さない。可視の17 stateに「未開始」を追加せず、未開始の`FAILED`はresume不可で新runの`initialize`のみが復帰経路）。GitHub永続化とread-after-write確認の完了をevidence eventとして要求し、gate未通過の遷移を表現できないようにする。commandは記述であり、C-01は実行しない。
 
 **実装方針**: 全遷移ruleを単一のregistryとしてdataで定義し、guardは有限typed discriminatorに限定する。到達可能な組合せ × 各eventに一致するruleは0件または1件で、優先順位による解決はしない（一意性・到達可能性・純粋性はproperty testで機械検証する）。MachineStateは**排他的contextの直和**（進行中の手続き — 通常 / cancel / incident / block — を互いに排他な型で表現し、不正な付随値の組合せを表現不能にする）を第一候補とし、最終的な型はC-01実装PRで確定する。
 
