@@ -411,5 +411,3 @@ class TestPermissionAndHeadChange:
         )
         assert ms.state is State.CHANGES_REQUESTED
         assert names(commands) == ("InvalidateApprovals", "RequestHostAction")
-
-
