@@ -177,6 +177,20 @@ class TestRepair:
         assert result.ok and result.payload is not None
         assert result.payload["meta"] == {"note": ""}
 
+    def test_default_is_not_shared_between_repairs(self) -> None:
+        """返却payloadの変更がspec定義のdefaultへ漏れず、次のrepairは宣言時defaultのまま。"""
+        definition = _definition(
+            {"tags": Field(types=(list,), required=False, items=Field(types=(str,)), default=[])}
+        )
+        first = repair_and_validate(definition, _raw({"schema_version": 1}))
+        assert first.ok and first.payload is not None
+        tags = first.payload["tags"]
+        assert isinstance(tags, list)
+        tags.append("leaked")
+        second = repair_and_validate(definition, _raw({"schema_version": 1}))
+        assert second.ok and second.payload is not None
+        assert second.payload["tags"] == []
+
     def test_repaired_output_passes_the_same_validator(self) -> None:
         """AC-C02-02: repair経路の出力が、repairを経ない出力と同じvalidatorで検証される。"""
         definition = _definition(

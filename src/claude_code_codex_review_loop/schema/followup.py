@@ -90,12 +90,29 @@ FOLLOWUP_EVALUATION = SchemaDefinition(
     },
 )
 
+
+def _rule_approved_requires_authority(data: dict[str, object]) -> list[PublicError]:
+    """APPROVEDは入力経路とcanonicalな承認record（approval comment ID）を必須とする（TE L510）。"""
+    errors: list[PublicError] = []
+    if data.get("status") == "APPROVED":
+        if "input_route" not in data:
+            errors.append(PublicError("cross_field", "input_route"))
+        if "approval_comment_id" not in data:
+            errors.append(PublicError("cross_field", "approval_comment_id"))
+    return errors
+
+
 FOLLOWUP_PERMISSION = SchemaDefinition(
     kind=SchemaKind.FOLLOWUP_PERMISSION,
     versions={
         1: VersionSpec(
             fields={
                 "schema_version": schema_version_field(),
+                # 許可のbind対象（TE L510: repository、元Issue / PR、head SHA、candidate ID、
+                # candidate fingerprint、Issue本文hash、入力経路、approval comment ID）
+                "repository": text(),
+                "number": integer(),
+                "target_head_sha": sha(),
                 "candidate_id": opaque(),
                 "candidate_fingerprint": opaque(),
                 "body_hash": opaque(),
@@ -107,6 +124,7 @@ FOLLOWUP_PERMISSION = SchemaDefinition(
                 "failure_reason": text(required=False),
                 "resume_hint": text(required=False),
             },
+            rules=(_rule_approved_requires_authority,),
         )
     },
 )

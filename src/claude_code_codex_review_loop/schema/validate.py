@@ -19,6 +19,7 @@ Phase 0の評価実装（`tests/p001_evaluation/`）を製品codeへ移植した
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -202,7 +203,8 @@ def apply_defaults(spec: VersionSpec, data: dict[str, object]) -> dict[str, obje
     for name, field_spec in spec.fields.items():
         if name not in repaired:
             if field_spec.default is not _NO_DEFAULT and not field_spec.required:
-                repaired[name] = field_spec.default
+                # spec定義側のdefaultと結果を共有しない（呼び出し側の変更が次のrepairへ漏れない）
+                repaired[name] = copy.deepcopy(field_spec.default)
             continue
         value = repaired[name]
         if field_spec.fields is not None and isinstance(value, dict):

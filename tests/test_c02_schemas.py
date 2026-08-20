@@ -147,6 +147,9 @@ REPRESENTATIVE: dict[SchemaKind, dict[str, object]] = {
     },
     SchemaKind.FOLLOWUP_PERMISSION: {
         "schema_version": 1,
+        "repository": "owner/repo",
+        "number": 12,
+        "target_head_sha": _SHA,
         "candidate_id": "FU-1",
         "candidate_fingerprint": "fp-fu-1",
         "body_hash": "hash-1",
@@ -325,7 +328,7 @@ REQUIRED_PROBE: dict[SchemaKind, str] = {
     SchemaKind.USER_DECISION: "answer",
     SchemaKind.FOLLOWUP_CANDIDATES: "candidates",
     SchemaKind.FOLLOWUP_EVALUATION: "evaluations",
-    SchemaKind.FOLLOWUP_PERMISSION: "status",
+    SchemaKind.FOLLOWUP_PERMISSION: "target_head_sha",
     SchemaKind.FINAL_REPORT: "approved_head_sha",
     SchemaKind.MERGE_INTENT: "intent",
     SchemaKind.MERGE_APPROVAL: "approved_head_sha",
@@ -496,6 +499,28 @@ class TestCrossFieldRules:
         self._reject(SchemaKind.SUBMIT, payload, "error_category")
         payload["error_category"] = "network"
         assert validate(REGISTRY[SchemaKind.SUBMIT], _raw(payload)).ok
+
+    def test_approved_followup_permission_requires_authority(self) -> None:
+        """APPROVEDは入力経路と承認comment IDなしでは受理されない（TE L510のbind）。"""
+        base = dict(REPRESENTATIVE[SchemaKind.FOLLOWUP_PERMISSION])
+        missing_route = dict(base)
+        del missing_route["input_route"]
+        self._reject(SchemaKind.FOLLOWUP_PERMISSION, missing_route, "input_route")
+        missing_comment = dict(base)
+        del missing_comment["approval_comment_id"]
+        self._reject(SchemaKind.FOLLOWUP_PERMISSION, missing_comment, "approval_comment_id")
+        # 未回答は承認根拠を要求しない（未回答のIssue作成許可はmergeを止めない）
+        unanswered = dict(base)
+        del unanswered["input_route"]
+        del unanswered["approval_comment_id"]
+        del unanswered["created_issue_url"]
+        unanswered["status"] = "UNANSWERED"
+        assert validate(REGISTRY[SchemaKind.FOLLOWUP_PERMISSION], _raw(unanswered)).ok
+        # binding（repository / number / head）の欠落は必須field違反として拒否される
+        unbound = dict(base)
+        del unbound["repository"]
+        result = validate(REGISTRY[SchemaKind.FOLLOWUP_PERMISSION], _raw(unbound))
+        assert any(e.code == "required_missing" and e.path == "repository" for e in result.errors)
 
     def test_incident_violations_must_not_be_empty(self) -> None:
         payload = dict(REPRESENTATIVE[SchemaKind.INTEGRITY_INCIDENT])
