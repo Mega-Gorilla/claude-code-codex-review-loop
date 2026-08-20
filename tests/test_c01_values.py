@@ -223,3 +223,13 @@ class TestEventShape:
         with pytest.raises(IllegalEventError) as bad_kind:
             ev.BlockResolvedIntervention(wrong_kind)
         assert bad_kind.value.code == "INTERVENTION_RECORD"
+
+    def test_integrity_exit_requires_violation_set_binding(self) -> None:
+        """復元 / salvage evidenceはviolation集合全体へのbindなしに構築できない（AC-C01-12）。"""
+        from claude_code_codex_review_loop.domain.values import BlockResolutionEvidence
+
+        unbound = BlockResolutionEvidence(target_block_binding=binding("b-1"), head=OpaqueRef("h"))
+        for exit_event in (ev.IntegrityRestoredValidated, ev.IntegritySalvageEstablished):
+            with pytest.raises(IllegalEventError) as exc_info:
+                exit_event(unbound)
+            assert exc_info.value.code == "INTEGRITY_RESOLUTION_SET"

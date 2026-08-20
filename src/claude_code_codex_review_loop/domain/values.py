@@ -285,7 +285,9 @@ class BlockResolutionEvidence:
     """block解消eventのevidence。target_block_bindingは解除対象のblock attemptを指す。
 
     record自身のbinding（一意性・再利用防止）とは別のfieldであり、C-01は対象blockとの
-    完全一致照合のみを行う（AC-C01-11）。
+    完全一致照合のみを行う（AC-C01-11）。violation_bindingsはRECORD_INTEGRITY blockの
+    解消evidence専用で、解除対象のviolation集合全体（canonical order）へbindする —
+    集合が拡大した後の旧evidenceは一致しない（stale evidenceの拒否）。
     """
 
     target_block_binding: OpaqueBinding
@@ -295,6 +297,7 @@ class BlockResolutionEvidence:
     budget: Budget | None = None
     counter_snapshot: OpaqueSnapshot | None = None
     fingerprint: OpaqueFingerprint | None = None
+    violation_bindings: tuple[OpaqueBinding, ...] | None = None
 
 
 # ---------------------------------------------------------------------------

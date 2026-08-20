@@ -416,17 +416,30 @@ class BlockResolvedIntervention:
 
 
 @dataclass(frozen=True)
-class IntegrityRestoredValidated:
-    """canonical chainの整合性復元と同一chainの再検証（C-06 / C-07）。"""
+class _IntegrityExitEvent:
+    """RECORD_INTEGRITY blockの専用出口evidenceの共通形。
+
+    解除対象のviolation集合全体（canonical order）へのbindを必ず伴う（集合が拡大した後の
+    旧evidenceでは構築・一致できない。AC-C01-11 / 12）。
+    """
 
     resolution: BlockResolutionEvidence
+
+    def __post_init__(self) -> None:
+        if not self.resolution.violation_bindings:
+            raise IllegalEventError(
+                "INTEGRITY_RESOLUTION_SET", "復元 / salvage evidenceは対象violation集合全体へbindする"
+            )
 
 
 @dataclass(frozen=True)
-class IntegritySalvageEstablished:
-    """明示salvageによる新baseline確立の検証（C-07。供給はPhase 14以降）。"""
+class IntegrityRestoredValidated(_IntegrityExitEvent):
+    """canonical chainの整合性復元と同一chainの再検証（C-06 / C-07）。"""
 
-    resolution: BlockResolutionEvidence
+
+@dataclass(frozen=True)
+class IntegritySalvageEstablished(_IntegrityExitEvent):
+    """明示salvageによる新baseline確立の検証（C-07。供給はPhase 14以降）。"""
 
 
 PreflightEvent = PreflightOk | PreflightNg

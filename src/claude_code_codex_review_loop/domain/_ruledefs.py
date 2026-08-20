@@ -205,7 +205,11 @@ def _block_binding(block: ProgressBlock | ExternalDependencyBlock | RecordIntegr
 
 
 def _resolution_matches(ms: MachineState, res: BlockResolutionEvidence) -> BindingMatch:
-    """解消evidenceと現在のblockの完全一致照合（該当しないkindのfieldはNoneどうしの一致）。"""
+    """解消evidenceと現在のblockの完全一致照合（該当しないkindのfieldはNoneどうしの一致）。
+
+    RECORD_INTEGRITYでは現在のviolation集合全体（canonical order）との一致を要求する。
+    集合が拡大した後の旧evidence（stale evidence）は一致しない。
+    """
     block = ms.block
     if block is None:
         return BindingMatch.MISMATCH
@@ -217,6 +221,11 @@ def _resolution_matches(ms: MachineState, res: BlockResolutionEvidence) -> Bindi
     else:
         expected = (None, None, None, None)
     if (res.reason, res.budget, res.counter_snapshot, res.fingerprint) != expected:
+        return BindingMatch.MISMATCH
+    if isinstance(block, RecordIntegrityBlock):
+        if res.violation_bindings != tuple(ref.binding for ref in block.violations):
+            return BindingMatch.MISMATCH
+    elif res.violation_bindings is not None:
         return BindingMatch.MISMATCH
     return BindingMatch.MATCH
 

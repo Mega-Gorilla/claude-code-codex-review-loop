@@ -39,7 +39,11 @@ def _detect(bind: str = "v-1") -> ev.RecordIntegrityViolationDetected:
 
 
 def _integrity_resolution(block: RecordIntegrityBlock) -> BlockResolutionEvidence:
-    return BlockResolutionEvidence(target_block_binding=block.representative_binding, head=block.head)
+    return BlockResolutionEvidence(
+        target_block_binding=block.representative_binding,
+        head=block.head,
+        violation_bindings=tuple(ref.binding for ref in block.violations),
+    )
 
 
 def _record_incident(ms: MachineState, bind: str, recorded: tuple[str, ...]) -> tuple[MachineState, tuple]:
@@ -176,9 +180,28 @@ class TestI4FailClosed:
 
     def test_mismatched_dedicated_evidence_rejected(self) -> None:
         ms = self._blocked()
-        bad = BlockResolutionEvidence(target_block_binding=binding("other"), head=violation().head)
+        bad = BlockResolutionEvidence(
+            target_block_binding=binding("other"),
+            head=violation().head,
+            violation_bindings=(binding("other"),),
+        )
         with pytest.raises(TransitionRejected):
             transition(ms, ev.IntegrityRestoredValidated(bad))
+
+    @pytest.mark.parametrize("exit_event", [ev.IntegrityRestoredValidated, ev.IntegritySalvageEstablished])
+    def test_stale_resolution_from_before_union_is_rejected(self, exit_event) -> None:  # type: ignore[no-untyped-def]
+        """集合が拡大した後は、拡大前のviolation集合へbindしたevidenceで退出できない。"""
+        ms, _ = transition(to_waiting_ci(), _detect("v-1"))
+        assert isinstance(ms.block, RecordIntegrityBlock)
+        stale = exit_event(_integrity_resolution(ms.block))  # [v-1]時点のevidence
+        grown, _ = transition(ms, _detect("v-2"))
+        with pytest.raises(TransitionRejected):
+            transition(grown, stale)
+        # 拡大後の集合全体へbindしたfresh evidenceのみが受理される
+        assert isinstance(grown.block, RecordIntegrityBlock)
+        fresh = exit_event(_integrity_resolution(grown.block))
+        exited, _ = transition(grown, fresh)
+        assert exited.state is State.RUNNING_REVIEW
 
     def test_intervention_rejected_for_integrity_block(self) -> None:
         from dataclasses import replace as dc_replace

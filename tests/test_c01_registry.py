@@ -183,7 +183,11 @@ def _resolutions(ms: MachineState) -> list[BlockResolutionEvidence]:
             record=RecordEvidence(RecordKind.BLOCK_INTERVENTION, _PEND_BINDING, OpaqueRef("r")),
         )
     else:
-        matched = BlockResolutionEvidence(target_block_binding=block.representative_binding, head=block.head)
+        matched = BlockResolutionEvidence(
+            target_block_binding=block.representative_binding,
+            head=block.head,
+            violation_bindings=tuple(ref.binding for ref in block.violations),
+        )
     return [matched, mismatched]
 
 
@@ -286,8 +290,12 @@ def events_for(ms: MachineState) -> list[ev.Event]:
     intervention_record = RecordEvidence(RecordKind.BLOCK_INTERVENTION, _PEND_BINDING, OpaqueRef("r"))
     for resolution in _resolutions(ms):
         events.append(ev.BlockResolvedLimitRaised(resolution))
-        events.append(ev.IntegrityRestoredValidated(resolution))
-        events.append(ev.IntegritySalvageEstablished(resolution))
+        # 復元 / salvageはviolation集合全体へのbindを必ず伴う（構築時検査）
+        exit_resolution = resolution
+        if not exit_resolution.violation_bindings:
+            exit_resolution = dc_replace(exit_resolution, violation_bindings=(OpaqueBinding("no-such-violation"),))
+        events.append(ev.IntegrityRestoredValidated(exit_resolution))
+        events.append(ev.IntegritySalvageEstablished(exit_resolution))
         # interventionはBLOCK_INTERVENTION recordのcanonical検証を必ず伴う（構築時検査）
         if resolution.record is None or resolution.record.kind is not RecordKind.BLOCK_INTERVENTION:
             resolution = dc_replace(resolution, record=intervention_record)
