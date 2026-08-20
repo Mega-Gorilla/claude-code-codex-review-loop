@@ -12,7 +12,7 @@ from dataclasses import replace
 from typing import cast
 
 from . import events as ev
-from ._ruledefs import BUDGET_EVENTS, DRIVE_TABLE, Effect, Match, PendingMatch, Rule
+from ._ruledefs import BUDGET_EVENTS, DRIVE_TABLE, BlockKind, Effect, Match, PendingMatch, Rule
 from .commands import (
     CheckCi,
     CodexPurpose,
@@ -146,6 +146,38 @@ PRODUCED_RULES: tuple[Rule, ...] = (
     _produced_rule("P-19", _K.GATE_CHANGES, frozenset({_S.READY_FOR_HUMAN_MERGE}), frozenset({_A.USER_INPUT_GATE})),
     _produced_rule(
         "P-20", _K.MERGE_APPROVAL, frozenset({_S.READY_FOR_HUMAN_MERGE}), frozenset({_A.USER_INPUT_GATE})
+    ),
+    # BLOCK_INTERVENTIONのPRODUCEDは、blockのkindが解消を許可する場合のみ受理する
+    Rule(
+        rule_id="P-22",
+        section="record",
+        description="BLOCK_INTERVENTIONのPRODUCED（膠着block。NO_PROGRESSのみ解消を許可）",
+        match=Match(
+            states=frozenset({_S.BLOCKED}),
+            event_type=ev.RecordProduced,
+            pending=_ABSENT,
+            record_kinds=frozenset({_K.BLOCK_INTERVENTION}),
+            block_kinds=frozenset({BlockKind.PROGRESS}),
+            block_reasons=frozenset({Progress.NO_PROGRESS}),
+        ),
+        effect=_produced_effect(keep_awaiting=True),
+        to_state="同一state",
+        command_names=("PersistRecord",),
+    ),
+    Rule(
+        rule_id="P-23",
+        section="record",
+        description="BLOCK_INTERVENTIONのPRODUCED（外部依存block）",
+        match=Match(
+            states=frozenset({_S.BLOCKED}),
+            event_type=ev.RecordProduced,
+            pending=_ABSENT,
+            record_kinds=frozenset({_K.BLOCK_INTERVENTION}),
+            block_kinds=frozenset({BlockKind.EXTERNAL_DEPENDENCY}),
+        ),
+        effect=_produced_effect(keep_awaiting=True),
+        to_state="同一state",
+        command_names=("PersistRecord",),
     ),
     # USER_CANCELのPRODUCEDはawaiting不問・pending空を要求し、awaitingを消費せず維持する
     Rule(

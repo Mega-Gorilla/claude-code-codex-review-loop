@@ -23,15 +23,13 @@ from .values import (
 )
 
 
-@dataclass(frozen=True)
 class IllegalEventError(DomainError):
     """eventの構築時検査の違反（kind不一致など）。"""
 
-    code: str
-    detail: str
-
-    def __str__(self) -> str:
-        return f"{self.code}: {self.detail}"
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(f"{code}: {detail}")
+        self.code = code
+        self.detail = detail
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ __all__ = [
     "check_registry",
     "derive_guard_key",
     "initialize",
+    "select_rule",
     "transition",
 ]
 
@@ -65,20 +66,21 @@ def initialize(preflight_event: PreflightEvent) -> tuple[MachineState, tuple[Com
     return MachineState(state=State.FAILED), ()
 
 
-def transition(machine_state: MachineState, event: Event) -> tuple[MachineState, tuple[Command, ...]]:
-    """遷移判断。未定義の(state, event, guard値)はsilent no-opにせず構造化errorで拒否する。"""
-    event_name = type(event).__name__
-    if machine_state.state in TERMINAL_STATES:
-        raise TransitionRejected(machine_state.state, event_name, "terminal stateは全eventを拒否する")
+def select_rule(rules: tuple[Rule, ...], machine_state: MachineState, event: Event) -> Rule:
+    """一致ruleの選択。0件は構造化error、2件以上は優先順位で解決せずregistry欠陥として拒否する。"""
     key = derive_guard_key(machine_state, event)
-    matched = [
-        rule
-        for rule in _INDEX.get(type(event), ())
-        if rule.match.matches(machine_state.state, event, key)
-    ]
+    matched = [rule for rule in rules if rule.match.matches(machine_state.state, event, key)]
     if not matched:
-        raise TransitionRejected(machine_state.state, event_name, f"一致するruleがない（guard: {key}）")
+        raise TransitionRejected(machine_state.state, type(event).__name__, f"一致するruleがない（guard: {key}）")
     if len(matched) > 1:
         ids = ", ".join(rule.rule_id for rule in matched)
         raise RegistryIntegrityError(f"複数ruleが一致した（優先順位による解決はしない）: {ids}")
-    return matched[0].effect(machine_state, event)
+    return matched[0]
+
+
+def transition(machine_state: MachineState, event: Event) -> tuple[MachineState, tuple[Command, ...]]:
+    """遷移判断。未定義の(state, event, guard値)はsilent no-opにせず構造化errorで拒否する。"""
+    if machine_state.state in TERMINAL_STATES:
+        raise TransitionRejected(machine_state.state, type(event).__name__, "terminal stateは全eventを拒否する")
+    rule = select_rule(_INDEX.get(type(event), ()), machine_state, event)
+    return rule.effect(machine_state, event)

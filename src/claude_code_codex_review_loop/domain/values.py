@@ -27,37 +27,31 @@ class DomainError(Exception):
     """C-01の構造化errorの基底。"""
 
 
-@dataclass(frozen=True)
 class IllegalMachineStateError(DomainError):
     """MachineStateの組合せ不変条件違反（構築時に拒否する）。"""
 
-    code: str
-    detail: str
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(f"{code}: {detail}")
+        self.code = code
+        self.detail = detail
 
-    def __str__(self) -> str:
-        return f"{self.code}: {self.detail}"
 
-
-@dataclass(frozen=True)
 class TransitionRejected(DomainError):
     """未定義または不整合な(state, event, guard)入力の拒否。silent no-opにしない。"""
 
-    state: State
-    event_name: str
-    detail: str
+    def __init__(self, state: State, event_name: str, detail: str) -> None:
+        super().__init__(f"{state.value} <- {event_name}: {detail}")
+        self.state = state
+        self.event_name = event_name
+        self.detail = detail
 
-    def __str__(self) -> str:
-        return f"{self.state.value} <- {self.event_name}: {self.detail}"
 
-
-@dataclass(frozen=True)
 class RegistryIntegrityError(DomainError):
     """registry自己検査の失敗（rule重複など）。構築時に検出する。"""
 
-    detail: str
-
-    def __str__(self) -> str:
-        return self.detail
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 # ---------------------------------------------------------------------------
@@ -536,9 +530,27 @@ class MachineState:
             raise IllegalMachineStateError(
                 "INCIDENT_PENDING_SCOPE", "INTEGRITY_INCIDENTのpendingはincident記録中に限る"
             )
+        if self.awaiting is not None and self.pending_record.kind is not RecordKind.USER_CANCEL:
+            raise IllegalMachineStateError(
+                "PENDING_AWAITING_EXCLUSIVE", "awaitingと共存できるpendingはUSER_CANCEL（awaiting維持）に限る"
+            )
+        if (
+            self.state is State.FAILED
+            and self.pending_record.source_state is not State.FAILED
+            and self.recovery_to is not self.pending_record.source_state
+        ):
+            raise IllegalMachineStateError(
+                "FAILED_PENDING_RECOVERY", "FAILEDが引き継ぐpendingのsource_stateはrecovery_toと一致する"
+            )
 
     def _check_awaiting_home(self) -> None:
         if self.awaiting is None:
             return
         if self.state not in AWAITING_HOME[self.awaiting] and self.state is not State.FAILED:
             raise IllegalMachineStateError("AWAITING_HOME", "awaiting値が当該stateに対応しない")
+        if self.state is State.FAILED and (
+            self.recovery_to is None or self.recovery_to not in AWAITING_HOME[self.awaiting]
+        ):
+            raise IllegalMachineStateError(
+                "FAILED_AWAITING_RECOVERY", "FAILEDが引き継ぐawaitingはrecovery_toの応答期待値でなければならない"
+            )

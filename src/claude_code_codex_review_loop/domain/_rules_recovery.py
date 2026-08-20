@@ -534,10 +534,15 @@ PROCEDURE_RULES: tuple[Rule, ...] = _procedure_rules()
 
 
 def _resume_pending(ms: MachineState, event: ev.Event) -> tuple[MachineState, tuple[Command, ...]]:
-    """partial turnの再開: source_stateへ戻り、同一bindingの永続化確認のみを再発行する。"""
+    """partial turnの再開: source_stateへ戻り、同一bindingの永続化確認のみを再発行する。
+
+    現在のstateで生成されたpending（FAILED内のUSER_CANCEL等）はstateを変えず、
+    recovery_to等の復帰情報も保持する。
+    """
     pending = cast(PendingRecord, ms.pending_record)
+    recovery_to = ms.recovery_to if pending.source_state is ms.state else None
     return (
-        replace(ms, state=pending.source_state, recovery_to=None),
+        replace(ms, state=pending.source_state, recovery_to=recovery_to),
         (PersistRecord(pending.kind, pending.binding),),
     )
 
