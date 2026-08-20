@@ -350,7 +350,7 @@ CANCEL_RULES: tuple[Rule, ...] = (
         section="cancel",
         description="binding一致の停止完了（deferredなし）-> CANCELLED",
         match=Match(
-            states=_NON_TERMINAL,
+            states=_NON_TERMINAL - {_S.MERGING},
             event_type=ev.CancellationCompleted,
             procedures=frozenset({ProcedureKind.CANCELLING}),
             binding=frozenset({BindingMatch.MATCH}),
@@ -365,7 +365,7 @@ CANCEL_RULES: tuple[Rule, ...] = (
         section="cancel",
         description="binding一致の停止完了（deferredあり）-> incident記録へ切替（CANCELLEDへは検証後にのみ進む）",
         match=Match(
-            states=_NON_TERMINAL,
+            states=_NON_TERMINAL - {_S.MERGING},
             event_type=ev.CancellationCompleted,
             procedures=frozenset({ProcedureKind.CANCELLING}),
             binding=frozenset({BindingMatch.MATCH}),
@@ -468,7 +468,9 @@ def _procedure_rules() -> tuple[Rule, ...]:
                 section="procedure",
                 description=f"cancel手続き中の{name} -> 停止commandの冪等再発行のみ",
                 match=Match(
-                    states=_NON_TERMINAL, event_type=event_type, procedures=frozenset({ProcedureKind.CANCELLING})
+                    states=_NON_TERMINAL - {_S.MERGING},
+                    event_type=event_type,
+                    procedures=frozenset({ProcedureKind.CANCELLING}),
                 ),
                 effect=_reissue_halt_for_cancel,
                 to_state="同一state",
@@ -481,7 +483,7 @@ def _procedure_rules() -> tuple[Rule, ...]:
                 section="procedure",
                 description=f"halt gate中の{name} -> 停止commandの冪等再発行のみ",
                 match=Match(
-                    states=_NON_TERMINAL,
+                    states=ACTIVE_STATES - {_S.MERGING},
                     event_type=event_type,
                     procedures=frozenset({ProcedureKind.HALTING_FOR_BLOCK}),
                 ),

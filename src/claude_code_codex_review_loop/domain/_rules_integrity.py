@@ -124,7 +124,7 @@ DETECTION_RULES: tuple[Rule, ...] = (
         section="integrity",
         description="cancel手続き中の検出 -> 集合へunion + 即時失効（停止処理を継続）",
         match=Match(
-            states=_NON_TERMINAL,
+            states=_NON_TERMINAL - {_S.MERGING},
             event_type=ev.RecordIntegrityViolationDetected,
             procedures=frozenset({ProcedureKind.CANCELLING}),
         ),
@@ -175,7 +175,7 @@ DETECTION_RULES: tuple[Rule, ...] = (
         section="integrity",
         description="halt gate中の追加検出 -> block集合へunion + 即時失効",
         match=Match(
-            states=_NON_TERMINAL,
+            states=ACTIVE_STATES - {_S.MERGING},
             event_type=ev.RecordIntegrityViolationDetected,
             procedures=frozenset({ProcedureKind.HALTING_FOR_BLOCK}),
         ),
@@ -419,7 +419,7 @@ BLOCK_RESOLUTION_RULES: tuple[Rule, ...] = (
         section="integrity",
         description="halt gateの停止完了（binding一致）-> BLOCKED（RECORD_INTEGRITY）",
         match=Match(
-            states=_NON_TERMINAL,
+            states=ACTIVE_STATES - {_S.MERGING},
             event_type=ev.BlockHaltCompleted,
             procedures=frozenset({ProcedureKind.HALTING_FOR_BLOCK}),
             binding=frozenset({BindingMatch.MATCH}),
