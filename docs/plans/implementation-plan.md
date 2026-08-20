@@ -564,8 +564,7 @@ CIは常に全testを実行する。regression testは対象のIssue番号を参
 
 未決事項:
 
-- checkpoint envelopeのversioning方式とmigration policyの詳細（Phase 2）
 - HOST_ACTIONの最終的な種類と粒度（Phase 8）
 - protocol versionの表現形式と互換range（Phase 16）
 
-解決済み: P-001は[ADR-0003](../decisions/0003-p001-protocol-validator.md)で決定。coverage floorとmodule size baselineの初期値はPhase 0のPR（floor 100、branch coverage採用、実測行数・headroomなし）で決定した。
+解決済み: P-001は[ADR-0003](../decisions/0003-p001-protocol-validator.md)で決定。coverage floorとmodule size baselineの初期値はPhase 0のPR（floor 100、branch coverage採用、実測行数・headroomなし）で決定した。checkpoint envelopeのversioning方式とmigration policyは[ADR-0004](../decisions/0004-envelope-versioning-migration.md)で決定した（kindごとの整数version・additive方針・損失のない段階的migration chainと再検証・未知versionの拒否）。
