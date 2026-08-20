@@ -13,6 +13,16 @@ floor = 100
 # baselineは登録時点の実測行数とし、headroomを設けない。増加はこのfileの変更として
 # PR diffへ現れるため、理由をPRへ記載する。生成fileは現状存在しない（導入時に除外listを追加）。
 "src/claude_code_codex_review_loop/__init__.py" = 5
+"src/claude_code_codex_review_loop/domain/__init__.py" = 35
+"src/claude_code_codex_review_loop/domain/states.py" = 49
+"src/claude_code_codex_review_loop/domain/values.py" = 544
+"src/claude_code_codex_review_loop/domain/events.py" = 477
+"src/claude_code_codex_review_loop/domain/commands.py" = 119
+"src/claude_code_codex_review_loop/domain/_ruledefs.py" = 333
+"src/claude_code_codex_review_loop/domain/_rules_workflow.py" = 757
+"src/claude_code_codex_review_loop/domain/_rules_recovery.py" = 696
+"src/claude_code_codex_review_loop/domain/_rules_integrity.py" = 511
+"src/claude_code_codex_review_loop/domain/machine.py" = 84
 "tests/test_repository_contract.py" = 181
 "tests/test_quality_gates.py" = 116
 "tests/test_p001_corpus.py" = 96
