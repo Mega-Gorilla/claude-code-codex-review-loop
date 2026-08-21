@@ -82,11 +82,16 @@ REDACTION_PATTERNS: Final[tuple[RedactionPattern, ...]] = (
     # 未quoted値は行末まで安全側でredactする（headerは行単位のため）。値の文字クラスは
     # 単純な線形scanでbacktrackingが発生しないため、長さ上限は設けない（上限があると
     # 超過分の末尾が公開面へ残る）
+    # quoted値はescape-awareに走査する: `\X`（escaped文字。escaped quoteとescaped
+    # backslashを含む）は値の一部とし、escapeされていないquoteだけを終端とする。
+    # 選択肢の先頭文字が排他（backslash / 非backslash）のためbacktrackingは線形。
+    # 閉じquoteが行内に無い場合はfallback（headerは行末まで、envは開きquote以降を
+    # 行末まで）で安全側にredactする
     RedactionPattern(
         "authorization-header",
         re.compile(
             r"(?<![0-9A-Za-z_])authorization[\"']?\s*[:=]\s*"
-            r"(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\r\n]+)",
+            r"(?:\"(?:\\.|[^\"\\\r\n])+\"|'(?:\\.|[^'\\\r\n])+'|[^\r\n]+)",
             re.IGNORECASE,
         ),
     ),
@@ -99,7 +104,8 @@ REDACTION_PATTERNS: Final[tuple[RedactionPattern, ...]] = (
             _L
             + r"(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN"
             + r"|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENAI_KEY|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)"
-            + r"[\"']?\s*[=:]\s*(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|(?!\$\{)\S+)"
+            + r"[\"']?\s*[=:]\s*"
+            + r"(?:\"(?:\\.|[^\"\\\r\n])+\"|'(?:\\.|[^'\\\r\n])+'|\"[^\r\n]*|'[^\r\n]*|(?!\$\{)\S+)"
         ),
     ),
 )

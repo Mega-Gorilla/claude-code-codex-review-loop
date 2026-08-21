@@ -190,6 +190,34 @@ class TestWrapperValueForms:
         assert "p" * 32 not in result.text
         assert any(hit.name == "url-userinfo" for hit in result.hits)
 
+    @pytest.mark.parametrize(
+        "text,leak,keep",
+        [
+            # JSON値内のescaped quoteは終端でない（後半を残さない）
+            ('{"Authorization": "Bearer abc\\"def", "next": "keep"}', "def", '"next": "keep"'),
+            ('{"ANTHROPIC_' + 'AUTH_TOKEN": "abc\\"def", "next": "keep"}', "def", '"next": "keep"'),
+            # shellのdouble-quoted値内のescaped quote
+            ("ANTHROPIC_" + 'AUTH_TOKEN="abc\\"def ghi" tail-ok', "def ghi", "tail-ok"),
+            # 偶数個のbackslash連続: 直後のquoteはunescaped（正しい終端）
+            ('{"ANTHROPIC_' + 'AUTH_TOKEN": "abc\\\\", "next": "keep"}', "abc", '"next": "keep"'),
+            # 奇数個のbackslash連続: escaped quoteとして値が継続する
+            ('{"ANTHROPIC_' + 'AUTH_TOKEN": "abc\\\\\\"def", "next": "keep"}', "def", '"next": "keep"'),
+        ],
+    )
+    def test_escaped_quotes_are_part_of_the_value(self, text: str, leak: str, keep: str) -> None:
+        """escaped quote（\\"）を値の終端と誤認せず、値全体をredactする。"""
+        result = redact(text)
+        assert leak not in result.text, text
+        assert keep in result.text, text
+        assert redact(result.text).text == result.text  # 冪等
+
+    def test_unterminated_quoted_env_value_is_redacted_to_end_of_line(self) -> None:
+        """閉じquoteが行内に無い場合は開きquote以降を行末まで安全側でredactする。"""
+        text = "ANTHROPIC_" + 'AUTH_TOKEN="abc def\nnext-line-ok'
+        result = redact(text)
+        assert "abc def" not in result.text
+        assert "next-line-ok" in result.text
+
     def test_workflow_secret_reference_is_not_a_secret(self) -> None:
         """`${{ secrets.X }}`は参照であり秘密値でない（既知のFNとして正しい挙動）。"""
         text = "GITHUB_" + "TOKEN: ${{ secrets.GITHUB_TOKEN }}"

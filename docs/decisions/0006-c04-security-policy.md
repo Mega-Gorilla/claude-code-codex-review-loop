@@ -18,7 +18,7 @@ implementation planはC-04を「GitHubへ問い合わせずに評価できる純
 3. 語境界は`\b`でなく**ASCII lookaround**（`(?<![0-9A-Za-z_])` / `(?![0-9A-Za-z_])`）を使う。漢字・かなはUnicodeの語文字であり、日本語隣接では`\b`が境界にならずtokenを取り逃す（実測で確認）
 4. 置換は`[REDACTED:<pattern名>]`（名前の字母は`[a-z-]`）。**markerはどのpatternにも再matchせず、redactは冪等**（property testで常設検証）。結果のhitsはpattern名と件数のみで、秘密値そのものを保持しない（P-015）
 5. PEM private keyは (a) BEGIN/END対（本体は長さcap `{0,10000}?`。実PEMは数KBであり、capは敵対的入力での超線形時間を防ぐ）、(b) **END欠落（logの切詰め等）を素通りさせないunterminated fallback**（BEGINから末尾まで安全側でredact）の2段で扱う。性能の検証条件はtestへ常設する（END欠落のBEGIN反復3,000件の敵対的入力が5秒以内に完了すること。通常入力はpattern適用が入力長に線形）
-6. **wrapper（Authorization header / 既知credential環境変数への代入）は、名前で識別できた時点で値全体を長さ・scheme・quote形式に依存せずredactする**。quoted値は閉じquoteで停止し（JSONの同一行にある他のfieldを飲み込まない）、未quoted値は行末まで安全側でredactする
+6. **wrapper（Authorization header / 既知credential環境変数への代入）は、名前で識別できた時点で値全体を長さ・scheme・quote形式に依存せずredactする**。quoted値は**escape-aware**に走査し（`\X`は値の一部。backslash連続の偶奇も正しく処理）、escapeされていない閉じquoteで停止する（JSONの同一行にある他のfieldを飲み込まない）。未quoted値は行末まで、閉じquoteが行内に無いquoted値も開きquote以降を行末まで、安全側でredactする。値の文字クラスは選択肢の先頭文字が排他で線形scanのため長さ上限を設けない（上限は超過分の末尾を公開面へ残すため有害）
 7. **既知のFP / FN（許容として記録）**: `authorization: token required ...`のような文は行末までredactされる（行単位の安全側over-redaction。情報漏れは発生しない）。`${{ secrets.X }}`のworkflow参照はredactされない（秘密値でないため正しい挙動）。`github_pat_`は本体60文字以上のみを対象とし、短い識別子とのFPを避ける
 8. redactionはschema検証の後、公開用render / 投稿の前に適用する（target experienceの順序）。予約markerの除去 / escapeはC-05の責務であり、redactionとは別の変換である
 
