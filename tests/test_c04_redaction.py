@@ -167,6 +167,29 @@ class TestWrapperValueForms:
         assert '"tail": "stay"' in result.text
         assert "abc" not in result.text and '"v1"' not in result.text
 
+    @pytest.mark.parametrize("length", [512, 513, 600])
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "Authorization: Bearer {}",  # header / 未quoted
+            'Authorization: "Bearer {}"',  # header / quoted
+            "ANTHROPIC_" + "AUTH_TOKEN={}",  # env / 未quoted
+            "ANTHROPIC_" + 'AUTH_TOKEN="{}"',  # env / quoted
+        ],
+    )
+    def test_long_values_are_redacted_without_truncation(self, template: str, length: int) -> None:
+        """長い値でも末尾が残らない（cap撤廃の境界regression。512 / 513 / 600文字）。"""
+        secret = "v" * length
+        result = redact(template.format(secret))
+        assert "v" * 32 not in result.text, (template, length)
+        assert result.hits, (template, length)
+
+    def test_long_url_password_is_redacted(self) -> None:
+        secret = "p" * 300
+        result = redact(f"https://user:{secret}@example.invalid/repo")
+        assert "p" * 32 not in result.text
+        assert any(hit.name == "url-userinfo" for hit in result.hits)
+
     def test_workflow_secret_reference_is_not_a_secret(self) -> None:
         """`${{ secrets.X }}`は参照であり秘密値でない（既知のFNとして正しい挙動）。"""
         text = "GITHUB_" + "TOKEN: ${{ secrets.GITHUB_TOKEN }}"

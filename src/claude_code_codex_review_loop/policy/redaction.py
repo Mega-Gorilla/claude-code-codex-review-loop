@@ -79,16 +79,18 @@ REDACTION_PATTERNS: Final[tuple[RedactionPattern, ...]] = (
     ),
     # wrapperは名前で識別できた時点で、値の長さ・schemeに依存せず値全体をredactする。
     # quoted値は閉じquoteで停止し（JSONの同一行にある他のfieldを飲み込まない）、
-    # 未quoted値は行末まで安全側でredactする（headerは行単位のため）
+    # 未quoted値は行末まで安全側でredactする（headerは行単位のため）。値の文字クラスは
+    # 単純な線形scanでbacktrackingが発生しないため、長さ上限は設けない（上限があると
+    # 超過分の末尾が公開面へ残る）
     RedactionPattern(
         "authorization-header",
         re.compile(
             r"(?<![0-9A-Za-z_])authorization[\"']?\s*[:=]\s*"
-            r"(?:\"[^\"\r\n]{1,512}\"|'[^'\r\n]{1,512}'|[^\r\n]{1,512})",
+            r"(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\r\n]+)",
             re.IGNORECASE,
         ),
     ),
-    RedactionPattern("url-userinfo", re.compile(r"(?<=://)[^/\s:@]{0,64}:[^/\s@]{1,256}(?=@)")),
+    RedactionPattern("url-userinfo", re.compile(r"(?<=://)[^/\s:@]*:[^/\s@]+(?=@)")),
     # 値は非空なら長さ・空白の有無を問わない。`${{ ... }}`はworkflowの参照であり
     # 秘密値ではないため対象外（既知のFNとして正しい挙動。ADR-0006）
     RedactionPattern(
@@ -97,7 +99,7 @@ REDACTION_PATTERNS: Final[tuple[RedactionPattern, ...]] = (
             _L
             + r"(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN"
             + r"|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENAI_KEY|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)"
-            + r"[\"']?\s*[=:]\s*(?:\"[^\"\r\n]{1,512}\"|'[^'\r\n]{1,512}'|(?!\$\{)\S{1,512})"
+            + r"[\"']?\s*[=:]\s*(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|(?!\$\{)\S+)"
         ),
     ),
 )
