@@ -137,6 +137,44 @@ class TestPrivateKeyEdgeCases:
         assert "QQQQ" not in result.text and "MIIEvQIBADANBg" not in result.text
 
 
+class TestWrapperValueForms:
+    """wrapperは名前で識別できた時点で、値の長さ・scheme・quote形式に依存せず値全体をredactする。"""
+
+    @pytest.mark.parametrize(
+        "text,secret",
+        [
+            ("Authorization: ApiKey supersecret123", "supersecret123"),  # 未知scheme
+            ("Authorization: Bearer x1", "x1"),  # 短い値
+            ('"Authorization": "Bearer abc"', "abc"),  # JSON形式
+            ("ANTHROPIC_" + "AUTH_TOKEN=short", "short"),  # 短い非空値
+            ('"ANTHROPIC_' + 'AUTH_TOKEN": "opaque-secret-value"', "opaque-secret-value"),  # JSON key/value
+            ("ANTHROPIC_" + 'AUTH_TOKEN="opaque secret value"', "opaque secret value"),  # 空白を含むshell quote
+            ("ANTHROPIC_" + "AUTH_TOKEN='single quoted secret'", "single quoted secret"),
+        ],
+    )
+    def test_value_is_redacted_regardless_of_form(self, text: str, secret: str) -> None:
+        result = redact(text)
+        assert secret not in result.text, text
+        assert result.hits, text
+        # 修正後も冪等
+        assert redact(result.text).text == result.text
+
+    def test_quoted_value_does_not_swallow_following_fields(self) -> None:
+        """JSONの同一行にある後続の非秘密fieldを飲み込まない。"""
+        text = '{"Authorization": "Bearer abc", "next": "keep", "ANTHROPIC_' + 'AUTH_TOKEN": "v1", "tail": "stay"}'
+        result = redact(text)
+        assert '"next": "keep"' in result.text
+        assert '"tail": "stay"' in result.text
+        assert "abc" not in result.text and '"v1"' not in result.text
+
+    def test_workflow_secret_reference_is_not_a_secret(self) -> None:
+        """`${{ secrets.X }}`は参照であり秘密値でない（既知のFNとして正しい挙動）。"""
+        text = "GITHUB_" + "TOKEN: ${{ secrets.GITHUB_TOKEN }}"
+        result = redact(text)
+        assert result.text == text
+        assert result.hits == ()
+
+
 class TestNonRetention:
     def test_hits_do_not_retain_secret_values(self) -> None:
         """hitsはpattern名と件数のみ（P-015）。"""
