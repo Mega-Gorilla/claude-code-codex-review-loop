@@ -31,6 +31,15 @@
 | fingerprint | 同一のfinding、decision、follow-up候補を、head変更をまたいで同一と判定するための識別値 |
 | head binding | 承認やreview結果を特定のhead SHAへ結び付けること。headが変われば失効する |
 
+## security policy
+
+| 用語 | 定義 |
+| --- | --- |
+| redaction | credential等の秘密情報を公開前に`[REDACTED:<種別>]`へ置換する変換。patternはC-04が一元管理し、投稿本文・prompt・log・artifactへ共通適用する（ADR-0006） |
+| trust rule | fork PR・trusted author集合外のauthor・agent設定file変更に対する、入力データだけで再現できる純粋な判定。判定結果は「目立つ表示」と「実行の既定拒否」の2用途を持つ |
+| permission profile | Claude Code等へ指定する権限presetの選択（Auto / acceptEdits / default / dontAsk）。bypass系は値域に存在しない（P-006）。承認受理用のallowlist（C-06）とは別のauthority |
+| fork PR | head repositoryがbase repositoryと異なるPR。headを特定できない場合もforkとして扱う（fail closed） |
+
 ## process
 
 | 用語 | 定義 |
