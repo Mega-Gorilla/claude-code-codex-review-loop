@@ -313,13 +313,18 @@ class WindowsTreeHandle:
         job = self._job
         if job is None:
             return  # close済み（冪等）
-        self._job = None
-        # 明示のterminateを安全網として実行してからhandleを閉じる（KILL_ON_JOB_CLOSEも作動する）
-        _terminate_job(job)
-        _close_handle(job)
-        self._popen.poll()
-        for stream in self._files:
-            stream.close()
+        try:
+            # 明示のterminateを安全網として実行する
+            _terminate_job(job)
+        finally:
+            # terminateが失敗（StopError）してもhandleとstreamは必ず解放する。
+            # handleのcloseでKILL_ON_JOB_CLOSEが作動するため、失敗時もtreeはOSの
+            # 安全網で全滅し、_job = Noneが実態と一致する
+            self._job = None
+            _close_handle(job)
+            self._popen.poll()
+            for stream in self._files:
+                stream.close()
 
 
 def spawn_tree(spec: SpawnSpec) -> WindowsTreeHandle:

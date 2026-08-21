@@ -86,15 +86,20 @@ class PosixTreeHandle:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
-        _signal_group(self._ref.pgid, signal.SIGKILL)
-        # SIGKILL後の直接childを確実にreapする（zombieを残さない）
         try:
-            self._popen.wait(_FORCE_CONFIRM_SECONDS)
-        except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL後にwaitが失敗する状況は再現不能
-            pass
-        for stream in self._files:
-            stream.close()
+            _signal_group(self._ref.pgid, signal.SIGKILL)
+            # SIGKILL後の直接childを確実にreapする（zombieを残さない）
+            try:
+                self._popen.wait(_FORCE_CONFIRM_SECONDS)
+            except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL後にwaitが失敗する状況は再現不能
+                pass
+        finally:
+            # 停止が失敗（StopError）してもredirect streamは必ず解放する（closeは冪等）
+            for stream in self._files:
+                stream.close()
+        # POSIXにはKILL_ON_JOB_CLOSE相当の安全網がないため、停止が完了するまで
+        # closedにせず、再closeによる停止の再試行を可能に保つ（C-01の冪等再発行契約）
+        self._closed = True
 
 
 def spawn_tree(spec: SpawnSpec) -> PosixTreeHandle:

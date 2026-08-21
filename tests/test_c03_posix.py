@@ -74,6 +74,39 @@ def test_stop_by_ref_detects_pid_reuse() -> None:
     assert result.method is StopMethod.ALREADY_EXITED
 
 
+def test_close_failure_releases_streams_and_allows_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """closeの停止失敗ではstreamを解放しつつ、再closeによる停止の再試行が成立する。"""
+    script = write_child_script(tmp_path)
+    pidfile = tmp_path / "close-retry.txt"
+    out = tmp_path / "close-retry-out.txt"
+    spec = SpawnSpec(
+        argv=child_argv(script, "ignore", pidfile, grandchild=True),
+        cwd=tmp_path,
+        env=child_env(),
+        stdout_path=out,
+    )
+    handle = spawn_tree(spec)
+    child_pid, grandchild_pid = read_pids(pidfile)
+    original = process_group._signal_group
+    inject = {"fail": True}
+
+    def _flaky(pgid: int, signum: int) -> bool:
+        if inject["fail"]:
+            raise StopError("signal_group", "注入した失敗", 1)
+        return original(pgid, signum)
+
+    monkeypatch.setattr(process_group, "_signal_group", _flaky)
+    with pytest.raises(StopError):
+        handle.close()
+    assert all(stream.closed for stream in handle._files)  # streamは解放済み
+    inject["fail"] = False
+    handle.close()  # 再試行で停止が完了する
+    assert wait_until(lambda: tree_gone(child_pid, grandchild_pid))
+    handle.close()  # 冪等
+
+
 def test_stop_by_ref_force_failure_is_structured(monkeypatch: pytest.MonkeyPatch) -> None:
     """強制停止後も残存する場合の構造化error（停止失敗の表現。Windows側testと対）。"""
     monkeypatch.setattr(process_group.os, "getpgid", lambda pid: 424_242)

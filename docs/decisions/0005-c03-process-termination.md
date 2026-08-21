@@ -22,7 +22,7 @@ implementation planはC-03の要件を「POSIXはprocess group、WindowsはJob O
 4. 停止は**graceful要求 -> grace period -> 強制停止**の段階とする。gracefulはPOSIXが`killpg(SIGTERM)`、Windowsが`CTRL_BREAK_EVENT`（best-effort）。強制はPOSIXが`killpg(SIGKILL)`、Windowsが`TerminateJobObject`
 5. **graceful要求の戻り値は「要求が受理されたか（requested）」であり配送保証ではない**。WindowsのCTRL_BREAKは成功してもeventがqueueされただけである。graceful成立の判定はtree生存の観測（WindowsはActiveProcesses == 0、POSIXは`kill(-pgid, 0)`）へ一本化する
 6. `GRACEFUL`という結果は「grace期間内にtreeが消滅した」ことを意味する。並行するforce要求（2回目のCtrl+C等）との競合の最終確定はC-08が行う
-7. 停止は**冪等**とする。対象treeが存在しなければ即時に`ALREADY_EXITED`を返す（C-01のcancellation契約「実行中processが無ければ完了eventは即時返る」）。強制停止後もtreeが残存する場合は構造化error（`StopError`）とし、停止commandの再発行に耐える
+7. 停止は**冪等**とする。対象treeが存在しなければ即時に`ALREADY_EXITED`を返す（C-01のcancellation契約「実行中processが無ければ完了eventは即時返る」）。強制停止後もtreeが残存する場合は構造化error（`StopError`）とし、停止commandの再発行に耐える。`close()`の停止失敗でもredirect streamは必ず解放し、**WindowsはJob handleのcloseによりKILL_ON_JOB_CLOSEの安全網でtreeを全滅させて状態を実態に一致させる**。**POSIXには同等の安全網がないため、closedにせず再closeによる停止の再試行を可能に保つ**
 8. timeoutとgrace periodの**既定値をC-03は持たない**（必須引数）。既定値の解決はPhase 12（C-12設定解決）で行う。強制停止の完了確認に使う内部上限のみ実装定数とする
 
 ### 別processからの再停止（ref）

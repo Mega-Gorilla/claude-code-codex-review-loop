@@ -288,6 +288,42 @@ class TestInjectedFailures:
         finally:
             handle.close()
 
+    def test_close_releases_resources_when_terminate_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """terminate失敗でもhandle / streamを解放し、KILL_ON_JOB_CLOSEの安全網でtreeが全滅する。"""
+        script = write_child_script(tmp_path)
+        pidfile = tmp_path / "close-fail.txt"
+        out = tmp_path / "close-fail-out.txt"
+        spec = SpawnSpec(
+            argv=child_argv(script, "ignore", pidfile, grandchild=True),
+            cwd=tmp_path,
+            env=child_env(),
+            stdout_path=out,
+        )
+        handle = spawn_tree(spec)
+        child_pid, grandchild_pid = read_pids(pidfile)
+
+        def _fail(job: int) -> None:
+            raise StopError("terminate_job", "注入した失敗")
+
+        monkeypatch.setattr(job_object, "_terminate_job", _fail)
+        with pytest.raises(StopError):
+            handle.close()
+        # handleが閉じられ、KILL_ON_JOB_CLOSEでtreeはOS側の安全網により全滅する
+        assert wait_until(lambda: tree_gone(child_pid, grandchild_pid))
+
+        def _unlinkable() -> bool:
+            # 親側streamが解放済みなら、killされた子のhandle解放（非同期）を待てば削除できる
+            try:
+                out.unlink()
+            except PermissionError:
+                return False
+            return True
+
+        assert wait_until(_unlinkable)
+        handle.close()  # 再closeはno-op（解放済み、冪等）
+
     def test_stop_by_ref_forced_when_graceful_unavailable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
