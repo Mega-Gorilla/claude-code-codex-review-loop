@@ -211,6 +211,22 @@ class TestWrapperValueForms:
         assert keep in result.text, text
         assert redact(result.text).text == result.text  # 冪等
 
+    @pytest.mark.parametrize(
+        "text,keep",
+        [
+            ('{"Authorization": "", "next": "keep"}', '"next": "keep"'),
+            ('{"ANTHROPIC_' + 'AUTH_TOKEN": "", "next": "keep"}', '"next": "keep"'),
+            ("ANTHROPIC_" + 'AUTH_TOKEN="" tail-ok', "tail-ok"),
+            ("Authorization: '' tail-ok", "tail-ok"),
+            ("ANTHROPIC_" + "AUTH_TOKEN='' tail-ok", "tail-ok"),
+        ],
+    )
+    def test_empty_quoted_value_does_not_swallow_following_content(self, text: str, keep: str) -> None:
+        """空のquoted値は「正常に閉じた値」であり、fallbackへ流して後続を飲み込まない。"""
+        result = redact(text)
+        assert keep in result.text, text
+        assert redact(result.text).text == result.text  # 冪等
+
     def test_unterminated_quoted_env_value_is_redacted_to_end_of_line(self) -> None:
         """閉じquoteが行内に無い場合は開きquote以降を行末まで安全側でredactする。"""
         text = "ANTHROPIC_" + 'AUTH_TOKEN="abc def\nnext-line-ok'
