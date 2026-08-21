@@ -74,6 +74,16 @@ def test_stop_by_ref_detects_pid_reuse() -> None:
     assert result.method is StopMethod.ALREADY_EXITED
 
 
+def test_stop_by_ref_force_failure_is_structured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """強制停止後も残存する場合の構造化error（停止失敗の表現。Windows側testと対）。"""
+    monkeypatch.setattr(process_group.os, "getpgid", lambda pid: 424_242)
+    monkeypatch.setattr(process_group, "_signal_group", lambda pgid, sig: True)
+    monkeypatch.setattr(process_group, "_drain_group", lambda pgid, seconds: False)
+    with pytest.raises(StopError) as excinfo:
+        process_group.stop_by_ref(ProcessGroupRef(pid=1234, pgid=424_242), grace_seconds=0.1)
+    assert excinfo.value.stage == "force_stop"
+
+
 def test_stop_by_ref_with_live_leader_uses_group_match(tmp_path: Path) -> None:
     """leaderが生存しているtreeへのby-ref停止（pgid照合の一致分岐）。
 
