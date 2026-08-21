@@ -334,4 +334,3 @@ class TestParsingUnits:
         assert _parse_float_header({"retry-after": "soon"}, "retry-after") is None
         assert _parse_float_header({}, "retry-after") is None
         assert _parse_float_header({"retry-after": "30"}, "retry-after") == 30.0
-
