@@ -95,7 +95,7 @@ class TestPostAndVerify:
 class TestIdempotentFlow:
     def test_timeout_with_persisted_comment_is_found_not_duplicated(self, tmp_path: Path) -> None:
         """AC-C05-02: 投稿がtimeoutしたがserver側で成立していた場合、検索で発見し重複させない。"""
-        context = make_context(tmp_path, scenario="persist_then_hang,ok", timeout_seconds=2.0)
+        context = make_context(tmp_path, scenario="ok,persist_then_hang,ok", timeout_seconds=2.0)
         body = attach_marker("本文", {"key": "turn-1"})
         outcome = _ensure(context, body)
         assert isinstance(outcome, PostVerified)
@@ -103,7 +103,7 @@ class TestIdempotentFlow:
         assert len(read_state(tmp_path)["comments"]) == 1  # 重複なし
 
     def test_timeout_without_persistence_reposts_with_same_key(self, tmp_path: Path) -> None:
-        context = make_context(tmp_path, scenario="timeout,ok", timeout_seconds=2.0)
+        context = make_context(tmp_path, scenario="ok,timeout,ok", timeout_seconds=2.0)
         body = attach_marker("本文", {"key": "turn-1"})
         outcome = _ensure(context, body, search_attempts=1)
         assert isinstance(outcome, PostVerified)
@@ -113,7 +113,7 @@ class TestIdempotentFlow:
 
     def test_transient_post_failure_uses_search_flow(self, tmp_path: Path) -> None:
         """5xxも成否不明として扱い、検索flowへ入る（blind retryで重複させない）。"""
-        context = make_context(tmp_path, scenario="s500,ok,ok", timeout_seconds=10.0)
+        context = make_context(tmp_path, scenario="ok,s500,ok,ok", timeout_seconds=10.0)
         body = attach_marker("本文", {"key": "turn-1"})
         outcome = _ensure(context, body, search_attempts=1)
         assert isinstance(outcome, PostVerified)
@@ -121,7 +121,7 @@ class TestIdempotentFlow:
         assert len(read_state(tmp_path)["comments"]) == 1
 
     def test_permanent_post_failure_propagates(self, tmp_path: Path) -> None:
-        context = make_context(tmp_path, scenario="u422")
+        context = make_context(tmp_path, scenario="ok,u422")
         body = attach_marker("本文", {"key": "turn-1"})
         with pytest.raises(GhApiError) as excinfo:
             _ensure(context, body)
@@ -132,11 +132,55 @@ class TestIdempotentFlow:
         body = attach_marker("正しい本文", {"key": "turn-1"})
         forged = attach_marker("偽の本文", {"key": "turn-1"})
         seed_state(tmp_path, comments=[_seed_comment(1, body=forged)])
-        context = make_context(tmp_path, scenario="timeout,ok", timeout_seconds=2.0)
+        context = make_context(tmp_path, scenario="ok,timeout,ok", timeout_seconds=2.0)
         outcome = _ensure(context, body, search_attempts=1)
         assert isinstance(outcome, PostVerified)
         assert outcome.route is PostRoute.REPOSTED_AFTER_TIMEOUT
         assert len(read_state(tmp_path)["comments"]) == 2  # 偽物 + 正規repost
+
+
+class TestResumeIdempotency:
+    """round 2指摘: 別processからのPersistRecord再発行（resume）で重複しないsearch-first。"""
+
+    def test_resume_after_persist_and_recovery_failure_finds_existing(self, tmp_path: Path) -> None:
+        """1回目: persist成立→timeout→recovery検索も失敗。2回目: 同一key/bodyで再実行しても件数1。"""
+        from c05_support.helpers import reset_call_counter
+
+        body = attach_marker("本文", {"key": "turn-1"})
+        # 1回目: 事前検索ok(空) -> POSTがpersist後hang -> recovery検索がs500で尽きる
+        context1 = make_context(tmp_path, scenario="ok,persist_then_hang,s500", timeout_seconds=2.0)
+        with pytest.raises(GhApiError):
+            _ensure(context1, body, search_attempts=1, policy=make_policy(max_attempts=1))
+        assert len(read_state(tmp_path)["comments"]) == 1  # persist済み
+        # 2回目（別processのresume相当）: 事前検索が既存を発見し、POSTを呼ばない
+        reset_call_counter(tmp_path)
+        context2 = make_context(tmp_path, scenario="ok")
+        outcome = _ensure(context2, body)
+        assert isinstance(outcome, PostVerified)
+        assert outcome.route is PostRoute.FOUND_EXISTING
+        assert len(read_state(tmp_path)["comments"]) == 1  # 重複なし
+
+    def test_existing_record_is_verified_without_posting(self, tmp_path: Path) -> None:
+        """既存record発見時はPOST endpointを呼ばず、GET確認のみを行う。"""
+        body = attach_marker("既存の本文", {"key": "turn-1"})
+        existing = _seed_comment(1, body=body)
+        seed_state(tmp_path, comments=[existing])
+        context = make_context(tmp_path)
+        outcome = _ensure(context, body)
+        assert isinstance(outcome, PostVerified)
+        assert outcome.route is PostRoute.FOUND_EXISTING
+        assert outcome.comment.comment_id == "1"
+        state = read_state(tmp_path)
+        assert len(state["comments"]) == 1  # POSTされていない
+        assert state["counter"] == 0  # 新規採番なし = POST endpoint未到達
+
+    def test_existing_record_with_mutated_body_reports_mismatch(self, tmp_path: Path) -> None:
+        body = attach_marker("既存の本文", {"key": "turn-1"})
+        seed_state(tmp_path, comments=[_seed_comment(1, body=body)])
+        context = make_context(tmp_path, scenario="ok,mutate_get")
+        outcome = _ensure(context, body)
+        assert isinstance(outcome, PostHashMismatch)
+        assert outcome.route is PostRoute.FOUND_EXISTING
 
 
 class TestMarkerKeyDerivation:
@@ -158,7 +202,7 @@ class TestMarkerKeyDerivation:
 
     def test_search_uses_the_key_from_the_body_marker(self, tmp_path: Path) -> None:
         """persist後timeoutでも本文のkeyで検索するため、必ず発見され重複しない。"""
-        context = make_context(tmp_path, scenario="persist_then_hang,ok", timeout_seconds=2.0)
+        context = make_context(tmp_path, scenario="ok,persist_then_hang,ok", timeout_seconds=2.0)
         body = attach_marker("本文", {"key": "body-key"})
         outcome = _ensure(context, body)
         assert isinstance(outcome, PostVerified)
@@ -248,7 +292,7 @@ class TestSearchBackoff:
         from c05_support.helpers import SleepRecorder
 
         recorder = SleepRecorder()
-        context = make_context(tmp_path, scenario="timeout,ok,ok,ok,ok", timeout_seconds=2.0)
+        context = make_context(tmp_path, scenario="ok,timeout,ok,ok,ok,ok", timeout_seconds=2.0)
         body = attach_marker("本文", {"key": "turn-1"})
         outcome = _ensure(
             context, body, search_attempts=2, policy=make_policy(sleep=recorder), search_backoff_seconds=0.2

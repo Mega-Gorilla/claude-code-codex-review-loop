@@ -119,7 +119,7 @@ class TestReply:
         threads = fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
         # 以降のstepを先頭から固定: reply(persist_then_hang) -> 検索(graphql ok) -> 再取得(get ok)
         reset_call_counter(tmp_path)
-        context2 = make_context(tmp_path, scenario="persist_then_hang,ok,ok,ok", timeout_seconds=2.0)
+        context2 = make_context(tmp_path, scenario="ok,persist_then_hang,ok,ok,ok", timeout_seconds=2.0)
         body = attach_marker("回答", {"key": "turn-1"})
         outcome = ensure_thread_reply(context2, _REPO, 7, threads[0], body, **_reply_kwargs())
         assert isinstance(outcome, PostVerified)
@@ -142,7 +142,7 @@ class TestReplyIdempotency:
         context = make_context(tmp_path)
         threads = fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
         reset_call_counter(tmp_path)
-        context2 = make_context(tmp_path, scenario="timeout,ok,ok,ok", timeout_seconds=2.0)
+        context2 = make_context(tmp_path, scenario="ok,timeout,ok,ok,ok", timeout_seconds=2.0)
         body = attach_marker("回答", {"key": "turn-1"})
         outcome = ensure_thread_reply(context2, _REPO, 7, threads[0], body, **_reply_kwargs())
         assert isinstance(outcome, PostVerified)
@@ -202,7 +202,7 @@ class TestReplyIdempotency:
         from c05_support.helpers import SleepRecorder
 
         recorder = SleepRecorder()
-        context2 = make_context(tmp_path, scenario="timeout,ok,ok,ok,ok", timeout_seconds=2.0)
+        context2 = make_context(tmp_path, scenario="ok,timeout,ok,ok,ok,ok", timeout_seconds=2.0)
         outcome = ensure_thread_reply(
             context2, _REPO, 7, target_thread, body,
             **_reply_kwargs(search_attempts=2, policy=make_policy(sleep=recorder)),
@@ -212,6 +212,64 @@ class TestReplyIdempotency:
         assert 0.01 in recorder.calls  # 検索間のbackoff
 
 
+class TestReplyResumeIdempotency:
+    """round 2指摘: replyのresume（冪等再発行）で重複しないsearch-first。"""
+
+    def test_resume_after_persist_and_recovery_failure_finds_existing(self, tmp_path: Path) -> None:
+        seed_state(tmp_path, threads=[_thread("T1")])
+        context = make_context(tmp_path)
+        threads = fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
+        body = attach_marker("回答", {"key": "turn-1"})
+        # 1回目: 事前検索(graphql ok) -> reply POSTがpersist後hang -> recovery検索がs500で尽きる
+        reset_call_counter(tmp_path)
+        context1 = make_context(tmp_path, scenario="ok,persist_then_hang,s500", timeout_seconds=2.0)
+        with pytest.raises(GhApiError):
+            ensure_thread_reply(
+                context1, _REPO, 7, threads[0], body,
+                **_reply_kwargs(policy=make_policy(max_attempts=1)),
+            )
+        assert len(read_state(tmp_path)["pull_comments"]) == 1  # persist済み
+        # 2回目（resume相当）: 事前検索が既存replyを発見し、POSTを呼ばない
+        reset_call_counter(tmp_path)
+        context2 = make_context(tmp_path, scenario="ok")
+        outcome = ensure_thread_reply(context2, _REPO, 7, threads[0], body, **_reply_kwargs())
+        assert isinstance(outcome, PostVerified)
+        assert outcome.route is PostRoute.FOUND_EXISTING
+        assert len(read_state(tmp_path)["pull_comments"]) == 1  # 重複なし
+
+
+class TestReplyFoundExistingMismatch:
+    def test_existing_reply_with_mutated_body_reports_mismatch(self, tmp_path: Path) -> None:
+        from claude_code_codex_review_loop.transport import PostHashMismatch
+
+        body = attach_marker("既存の回答", {"key": "turn-1"})
+        thread = _thread("T1")
+        thread["comments"].append(
+            {"databaseId": 901, "url": "u", "body": body, "path": None, "author": {"login": "bot"}}
+        )
+        seed_state(
+            tmp_path,
+            threads=[thread],
+            pull_comments=[
+                {
+                    "id": 901,
+                    "html_url": "u",
+                    "body": body,
+                    "created_at": "t",
+                    "updated_at": "t",
+                    "user": {"login": "bot"},
+                }
+            ],
+        )
+        context = make_context(tmp_path)
+        threads = fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
+        reset_call_counter(tmp_path)
+        context2 = make_context(tmp_path, scenario="ok,mutate_get")
+        outcome = ensure_thread_reply(context2, _REPO, 7, threads[0], body, **_reply_kwargs())
+        assert isinstance(outcome, PostHashMismatch)
+        assert outcome.route is PostRoute.FOUND_EXISTING
+
+
 class TestTruncatedSearch:
     def test_truncated_thread_stops_search_instead_of_reposting(self, tmp_path: Path) -> None:
         """round 1指摘: 検索が完結しない（truncated）場合は「不在」を確定せずerrorで停止する。"""
@@ -219,12 +277,12 @@ class TestTruncatedSearch:
         context = make_context(tmp_path)
         threads = fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
         reset_call_counter(tmp_path)
-        context2 = make_context(tmp_path, scenario="timeout,ok", timeout_seconds=2.0)
+        context2 = make_context(tmp_path, scenario="ok")
         body = attach_marker("回答", {"key": "turn-1"})
         with pytest.raises(TransportError) as excinfo:
             ensure_thread_reply(context2, _REPO, 7, threads[0], body, **_reply_kwargs())
         assert excinfo.value.stage == "search"
-        # 不完全な検索結果から再投稿していない（timeout時のpersist無し = 0件のまま）
+        # search-firstの事前検索が完結しないため、POSTへ一切進まない（0件のまま）
         assert read_state(tmp_path)["pull_comments"] == []
 
     def test_reply_body_without_marker_key_is_rejected(self, tmp_path: Path) -> None:
@@ -285,7 +343,7 @@ class TestFallback:
         threads = fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
         # reply(u422) -> fallback post(ok) -> verify(ok)
         reset_call_counter(tmp_path)
-        context2 = make_context(tmp_path, scenario="u422,ok,ok")
+        context2 = make_context(tmp_path, scenario="ok,u422,ok,ok")
         body = attach_marker("回答", {"key": "turn-1"})
         outcome = reply_with_fallback(
             context2,

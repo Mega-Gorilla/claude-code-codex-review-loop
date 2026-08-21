@@ -24,7 +24,7 @@ implementation planはC-05を「未検証のGitHub metadataの取得・投稿・
 
 ### 冪等post flow（AC-C05-02）
 
-6. 投稿のtimeoutおよびTRANSIENT失敗は**成否不明**として扱い、blind retryしない。idempotency marker（payloadの`key`）でGitHubを検索し、見つかれば確認のみ、無ければ**同一key**で再投稿する。検索は`since=(投稿開始時刻 − 時計skew余裕)`を起点に**bounded N回**（backoff付き）行う。**検索keyは本文markerから導出し、引数との二重入力を持たない**（本文と検索keyの不一致による重複投稿を構造的に防ぐ）。正規markerまたはkeyの無い本文はensure系の入口で拒否する
+6. **search-first**: `ensure`系は初回POSTより前に、key + 正規化済みbody hashで既存recordを検索する。前回の呼び出しがpersist後・確認前に失敗していても、別processからの冪等再発行（C-01のPersistRecord契約「既投稿なら確認のみ」）で重複投稿しない（既存発見は`FOUND_EXISTING`として区別する）。呼び出し側の`search_since`は**同じturnを覆う安定したcursor**であり、再試行のたびに進めない。投稿のtimeoutおよびTRANSIENT失敗は**成否不明**として扱い、blind retryしない。idempotency marker（payloadの`key`）でGitHubを検索し、見つかれば確認のみ、無ければ**同一key**で再投稿する。検索は`since=(投稿開始時刻 − 時計skew余裕)`を起点に**bounded N回**（backoff付き）行う。**検索keyは本文markerから導出し、引数との二重入力を持たない**（本文と検索keyの不一致による重複投稿を構造的に防ぐ）。正規markerまたはkeyの無い本文はensure系の入口で拒否する
 7. **検索のpredicateは「marker key一致 AND body hash一致」**。書込権限を持つ第三者が同一keyのmarkerを偽造して再投稿を抑止する攻撃を無効化する（真正性の最終判定はC-06のallowlist照合）。事後に重複が発覚した場合のcanonical選択はC-06の責務であり、**C-05はcommentを削除しない**（mutable anchor更新方式の不採用と整合）
 8. replyの冪等flowも同型（timeout → thread再取得 → 同一thread内でkey+hash検索 → 確認 or 再投稿）
 

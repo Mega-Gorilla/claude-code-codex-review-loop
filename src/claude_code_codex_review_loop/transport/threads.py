@@ -278,14 +278,38 @@ def ensure_thread_reply(
     search_max_pages: int,
     policy: RetryPolicy,
 ) -> EnsureOutcome:
-    """replyの冪等投稿: post -> read-after-write。成否不明時はthread再取得で検索する。
+    """replyの冪等投稿: 事前検索 -> post -> read-after-write。
 
     検索keyは本文markerから導出する（引数との二重入力を持たない）。正規markerまたは
-    keyの無い本文は投稿前に拒否する。
+    keyの無い本文は投稿前に拒否する。**search-first**: 初回POSTより前にthreadを
+    再取得してkey + hashで既存replyを検索し、見つかれば確認のみ（FOUND_EXISTING）、
+    検索が完結して不在の場合だけPOSTへ進む（別processからの冪等再発行=C-01の
+    PersistRecord契約で重複しない）。
     """
     body = normalize_newlines(body)
     idempotency_key = _require_marker_key(body)
     expected_hash = body_hash_of(body)
+    existing = _search_reply(
+        context,
+        repo,
+        pr_number,
+        thread_id=thread.thread_id,
+        idempotency_key=idempotency_key,
+        expected_hash=expected_hash,
+        attempts=1,
+        backoff_seconds=0.0,
+        max_pages=search_max_pages,
+        policy=policy,
+    )
+    if existing is not None:
+        fetched_existing, matched_existing = _verify_pull_comment(
+            context, repo, existing.comment_id, expected_hash, policy=policy
+        )
+        if not matched_existing:
+            return PostHashMismatch(
+                route=PostRoute.FOUND_EXISTING, comment=fetched_existing, expected_hash=expected_hash
+            )
+        return PostVerified(route=PostRoute.FOUND_EXISTING, comment=fetched_existing, body_hash=expected_hash)
     try:
         posted_id = post_thread_reply(context, repo, pr_number, thread, body).comment_id
         route = PostRoute.POSTED

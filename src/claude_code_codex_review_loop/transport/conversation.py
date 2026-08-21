@@ -71,6 +71,7 @@ class PostRoute(Enum):
     """投稿が完了へ至った経路。"""
 
     POSTED = "POSTED"
+    FOUND_EXISTING = "FOUND_EXISTING"  # 入口の事前検索で既存recordを発見（resumeの冪等再発行）
     FOUND_AFTER_TIMEOUT = "FOUND_AFTER_TIMEOUT"
     REPOSTED_AFTER_TIMEOUT = "REPOSTED_AFTER_TIMEOUT"
 
@@ -292,18 +293,41 @@ def ensure_comment_posted(
     search_max_pages: int,
     policy: RetryPolicy,
 ) -> EnsureOutcome:
-    """冪等な投稿: post -> read-after-write。成否不明時はmarker検索 -> 確認 or 再投稿。
+    """冪等な投稿: 事前検索 -> post -> read-after-write。
 
+    - **search-first**: 初回POSTより前に、key + 正規化済みbody hashで既存recordを
+      検索する。前回の呼び出しがpersist後・確認前に失敗していても、別processからの
+      冪等再発行（C-01のPersistRecord契約「既投稿なら確認のみ」）で重複投稿しない。
+      既存が見つかればGET by idの確認のみを行い、`FOUND_EXISTING`で返す
     - bodyは事前にmarker（key入り）をattach済みであること。**検索keyは本文markerから
       導出する**（引数との二重入力を持たず、本文と検索の不一致による重複投稿を
       構造的に防ぐ）。正規markerまたはkeyが無い本文は投稿前に拒否する
-    - search_sinceは投稿開始前の時刻から時計skew分を引いたcursorを渡す
+    - search_sinceは**同じturnを覆う安定したcursor**（turn開始時刻から時計skew分を
+      引いた値）を渡す。再試行のたびに進めてはならない（resume時に既存recordが
+      検索範囲から外れるため）
     - 再投稿は同一keyの同一本文で行う。事後に重複が発覚した場合のcanonical選択は
       C-06の責務（C-05は削除しない）
     """
     body = normalize_newlines(body)
     idempotency_key = _require_marker_key(body)
     expected_hash = body_hash_of(body)
+    existing = _search_with_backoff(
+        context,
+        repo,
+        number,
+        idempotency_key=idempotency_key,
+        expected_hash=expected_hash,
+        since=search_since,
+        attempts=1,
+        backoff_seconds=0.0,
+        max_pages=search_max_pages,
+        policy=policy,
+    )
+    if existing is not None:
+        fetched, matched = verify_comment(context, repo, existing.comment_id, expected_hash, policy=policy)
+        if not matched:
+            return PostHashMismatch(route=PostRoute.FOUND_EXISTING, comment=fetched, expected_hash=expected_hash)
+        return PostVerified(route=PostRoute.FOUND_EXISTING, comment=fetched, body_hash=expected_hash)
     try:
         posted = post_issue_comment(context, repo, number, body)
         route = PostRoute.POSTED
