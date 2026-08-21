@@ -31,6 +31,15 @@
 | fingerprint | 同一のfinding、decision、follow-up候補を、head変更をまたいで同一と判定するための識別値 |
 | head binding | 承認やreview結果を特定のhead SHAへ結び付けること。headが変われば失効する |
 
+## process
+
+| 用語 | 定義 |
+| --- | --- |
+| process tree | C-03が起動する子processとその全子孫。POSIXはprocess group、WindowsはJob Objectで1単位として捕捉・停止する |
+| grace period | graceful停止の要求から強制停止までの待機時間。C-03は既定値を持たず、既定値の解決はC-12の設定解決で行う |
+| graceful要求（requested） | graceful停止の要求がOSに受理されたこと。配送保証ではなく、停止の成立はtree生存の観測でのみ確認する（ADR-0005） |
+| tree ref | 元のhandleを持たない別processがtreeを再停止するためのidentifier。Windowsは(pid, job name)、POSIXは(pid, pgid) |
+
 ## 役割
 
 | 用語 | 定義 |

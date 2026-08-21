@@ -41,7 +41,8 @@ baselineは`quality-baseline.toml`でversion管理します。値を緩める変
 - **coverage**: branch coverageで計測し、`[coverage].floor`を下回るとCIがfailします。floorは引き上げる方向を推奨します。`patch = ["subprocess"]`により、通常のPython subprocessとして起動した子processも自動計測されます（parallel dataのためreport前に`combine`が必要）
 - **module size**: git管理下の全`.py`を`[module-size]`へ登録します。**baselineは登録時点の実測行数**とし、headroomを設けません。以後の増加は`quality-baseline.toml`の変更として必ずPR diffへ現れるため、あわせて理由を記載してください。未登録・存在しないfileの登録（stale）はCIがfailします。生成fileは現状存在せず、導入時に除外listをbaselineへ追加します
 - **mypy**: 対象は`src`配下でstrictです。対象は広げる方向のみ変更できます。例外が必要な場合は`pyproject.toml`のoverridesへ理由つきで追加し、PRで説明してください
-- **subprocess coverage**: 有効です。素の`python child.py`として起動した子processが自動計測されることを`tests/test_quality_gates.py`のtestで担保しています
+- **subprocess coverage**: 有効です。素の`python child.py`として起動した子processが自動計測されることを`tests/test_quality_gates.py`のtestで担保しています。C-03のspawn（explicit env）経由の子は計測が注入されないため、backend実行を子processでcoverageへ計上したいtestは環境変数を継承して起動します
+- **OS専用moduleのcoverage / mypy**: C-03のOS専用backend（`process/job_object.py` / `process/process_group.py`）は自OSでしか実行できないため、CIのfloor stepは**異OS側moduleだけ**をreport対象から`--omit`します（floor値100は変更しません。ADR-0005）。mypyはplatform narrowingにより各OSが自OS側backendを検査し、2 jobの合算で両方の型検査が成立します。localでfloorを確認する場合は、Windowsでは`python -m coverage report --omit "*/process/process_group.py"`、POSIXでは`--omit "*/process/job_object.py"`を付けてください
 - **version整合**: 通常CIで`pyproject.toml`とpackageの`__version__`の一致を検証し、`v*` tagのbuildではtagとpackage versionの不一致をfailにします
 
 CIは`ubuntu-latest`と`windows-latest`のPython 3.11で全testを実行します。testの実行対象を限定する設定は追加しません。test fileの追加漏れが構造的に起こらない状態を保ちます。
