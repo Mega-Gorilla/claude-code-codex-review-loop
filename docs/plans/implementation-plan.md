@@ -546,7 +546,7 @@ schema検証は、runtime依存をゼロに保ち、必要なschema機能だけ�
 | type | mypy。Phase 0で対象package、許容する例外、ratchet方法を記録し、以後は緩めない | Phase 0 |
 | module size | 固定行数の即時failではなくbaselineからのratchet。責務数、循環依存、複雑度、testabilityと併せてreviewし、例外はPRで根拠とともに認める | Phase 0 |
 | CI matrix | Ubuntu / Windows × Python 3.11 | 導入済み |
-| contract test | SPDX表示、repository参照、CLI名称、禁止flag（P-006）、baseline link | 一部導入済み |
+| contract test | SPDX表示、repository参照、CLI名称、禁止flag（P-006）、baseline link | 導入済み（禁止flagはPhase 4、ADR-0006） |
 | version | `pyproject.toml`のversionとgit tagを同期する（P-012） | Phase 0 |
 
 CIは常に全testを実行する。regression testは対象のIssue番号を参照する。

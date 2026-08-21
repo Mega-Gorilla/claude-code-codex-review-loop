@@ -179,3 +179,31 @@ def test_cli_naming_is_unified_on_cc_review() -> None:
         text = (ROOT / path).read_text(encoding="utf-8")
         for token in legacy_tokens:
             assert not token.search(text), f"{path}: {token.pattern}"
+
+
+def test_no_permission_bypass_flags_in_code() -> None:
+    """permission bypass系flagの構築経路をcodeへ持たない（P-006、AC-C04-02）。
+
+    文書（.md）は「使用不可にする」という禁止の記述自体を含むため対象外とする。
+    検査regexは区切り可変（case・space・underscore・hyphenの変種を含めて検出）で
+    あり、regex source自体は禁止語の連続文字列を含まないため、本testや
+    policy/permission_profile.pyの検査regexは自己検出されない。分割連結による
+    構築は静的走査では検出できず、ensure_argv_allowedのruntime検査が補完する
+    （ADR-0006）。
+    """
+
+    forbidden_tokens = (
+        re.compile(r"bypass[\s_-]*permissions", re.IGNORECASE),
+        re.compile(r"dangerously[\s_-]*skip[\s_-]*permissions", re.IGNORECASE),
+    )
+
+    scanned = tuple(path for path in _tracked_files() if not path.endswith(".md"))
+    assert len(scanned) >= 20, f"discoveryが機能していない: {len(scanned)}件"
+
+    violations: list[str] = []
+    for path in scanned:
+        text = (ROOT / path).read_text(encoding="utf-8", errors="replace")
+        for token in forbidden_tokens:
+            if token.search(text):
+                violations.append(f"{path}: {token.pattern}")
+    assert not violations, "\n".join(violations)

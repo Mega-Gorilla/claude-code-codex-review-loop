@@ -39,6 +39,7 @@ CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3
 - `docs/plans/target-experience.md`は`| Status | **Agreed** |`を保持し、implementation planはbaselineへのlinkとIssue #2参照を保持する。
 - `docs/examples/`と`docs/research/`の文書はauthority marker（`Non-normative example` / `Research`）を保持する。
 - 本repository以外の同一owner配下repositoryを文書へ書かない。旧CLI名とその技術namespace（contract testが正規表現で検査する）を書かない。
+- permission bypass系flag（P-006）をcodeへ書かない。contract testが非`.md`のtracked file全件を区切り可変regexで走査する。
 
 ## Naming
 

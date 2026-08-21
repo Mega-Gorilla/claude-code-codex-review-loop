@@ -71,6 +71,7 @@ def test_open_job_by_unknown_name_returns_none() -> None:
 
 
 _OWNER_SCRIPT = """\
+import ctypes
 import sys
 from pathlib import Path
 
@@ -83,23 +84,96 @@ pidfile = tmp / "owner-pids.txt"
 spec = SpawnSpec(argv=child_argv(script, "cooperative", pidfile, grandchild=True), cwd=tmp, env=child_env())
 handle = spawn_tree(spec)
 try:
-    read_pids(pidfile)
+    # 孫の初期化完了（ready file）まで待ってからgraceful要求を送る。初期化中の
+    # processはconsole eventを受け取れず生き残り、treeがgrace内に消滅しない
+    read_pids(pidfile, wait_grandchild_ready=True)
     result = stop_tree(handle, grace_seconds=20.0)
 finally:
     handle.close()
+console_procs = ctypes.WinDLL("kernel32").GetConsoleProcessList((ctypes.c_uint * 4)(), 4)
+print(f"method={result.method.value} requested={result.graceful_requested} console_procs={console_procs}")
 ok = result.method is StopMethod.GRACEFUL and result.graceful_requested
 sys.exit(0 if ok else 4)
 """
 
 
-def test_console_owner_ctrl_break_e2e(tmp_path: Path) -> None:
-    """AC-C03-02前半のWindows決定的検証。
+# 事前条件probe: 製品codeを一切使わない素のsubprocess（CREATE_NEW_PROCESS_GROUPのみ）で
+# CTRL_BREAKが配送されるかを判定する。製品側（CREATE_SUSPENDED / Job Object / resume）の
+# 回帰ではこのprobeは失敗しないため、「runner環境の制約」と「実装回帰」を区別できる
+_PROBE_SCRIPT = """\
+import os
+import signal
+import subprocess
+import sys
 
-    CREATE_NEW_CONSOLEのowner processが自分のconsoleでcooperative treeを起動し、
-    CTRL_BREAKによるgraceful停止（GRACEFUL + graceful_requested）を確認する。
-    ownerはenvを継承して起動するため、owner内のbackend実行はsubprocess coverageで
-    親のcoverageへ合流する。
+child_code = (
+    "import signal, sys, time\\n"
+    "state = {'hit': False}\\n"
+    "def _handler(signum, frame):\\n"
+    "    state['hit'] = True\\n"
+    "signal.signal(signal.SIGBREAK, _handler)\\n"
+    "sys.stdout.write('ready')\\n"
+    "sys.stdout.flush()\\n"
+    "deadline = time.monotonic() + 30\\n"
+    "while time.monotonic() < deadline:\\n"
+    "    if state['hit']:\\n"
+    "        sys.exit(42)\\n"
+    "    time.sleep(0.02)\\n"
+    "sys.exit(9)\\n"
+)
+child = subprocess.Popen(
+    [sys.executable, "-c", child_code],
+    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    stdout=subprocess.PIPE,
+)
+assert child.stdout is not None
+child.stdout.read(5)  # handler設置完了（ready）を待つ
+try:
+    os.kill(child.pid, signal.CTRL_BREAK_EVENT)
+except OSError:
+    child.kill()
+    child.wait()
+    print("probe=send-refused")
+    sys.exit(3)
+try:
+    rc = child.wait(timeout=30)
+except subprocess.TimeoutExpired:
+    child.kill()
+    child.wait()
+    print("probe=not-delivered")
+    sys.exit(4)
+print(f"probe=exit-{rc}")
+sys.exit(0 if rc == 42 else 4)
+"""
+
+
+def test_console_owner_ctrl_break_e2e(tmp_path: Path) -> None:
+    """AC-C03-02前半のWindows E2E検証。
+
+    まず停止結果と独立した事前条件probe（製品code非依存の素のCTRL_BREAK配送検査）で
+    runnerがconsole eventを配送できるかを判定する。配送できない環境（gracefulは
+    ADR-0005のとおりbest-effort）だけをskipし、**事前条件が成立した環境ではE2Eの
+    失敗を回帰としてfailさせる**（skipへ変換しない）。
+
+    E2E本体はCREATE_NEW_CONSOLEのowner processが自分のconsoleでcooperative treeを
+    起動し、CTRL_BREAKによるgraceful停止（GRACEFUL + graceful_requested）を確認する。
+    ownerはenvを継承して起動するため、backend実行はsubprocess coverageで親へ合流する。
     """
+    probe = tmp_path / "probe.py"
+    probe.write_text(_PROBE_SCRIPT, encoding="utf-8")
+    probe_run = subprocess.run(
+        [sys.executable, str(probe)],
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        capture_output=True,
+        text=True,
+        timeout=90.0,
+    )
+    if probe_run.returncode != 0:
+        pytest.skip(
+            "事前条件不成立: このrunnerはconsole eventを配送できない"
+            f"（製品code非依存のprobeで判定。rc={probe_run.returncode} out={probe_run.stdout!r}）"
+        )
+
     owner = tmp_path / "owner.py"
     owner.write_text(_OWNER_SCRIPT, encoding="utf-8")
     tests_dir = str(Path(__file__).resolve().parent)
