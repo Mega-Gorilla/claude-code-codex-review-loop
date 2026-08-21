@@ -82,6 +82,8 @@ def test_full_envelope_with_all_sections_is_accepted() -> None:
             "records": [
                 {
                     "comment_id": "c-1",
+                    "review_id": "rv-1",
+                    "thread_id": "th-1",
                     "url": "https://example.invalid/c-1",
                     "body_hash": "h-1",
                     "author_role": "codex",

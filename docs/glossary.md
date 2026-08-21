@@ -31,6 +31,16 @@
 | fingerprint | 同一のfinding、decision、follow-up候補を、head変更をまたいで同一と判定するための識別値 |
 | head binding | 承認やreview結果を特定のhead SHAへ結び付けること。headが変われば失効する |
 
+## transport
+
+| 用語 | 定義 |
+| --- | --- |
+| read-after-write | 投稿後にGitHubから再取得し、comment / review ID・URL・本文hash・対象head SHAを確認してからturnをcompletedにする手順 |
+| 予約marker | Controllerだけが本文末尾へ付加する機械metadata（`CC_REVIEW_META`のHTML comment）。agent生成本文中の同tokenは投稿前にescapeされる（ADR-0007） |
+| conversation cursor | 差分取得の起点となるcursor（updated_atのinclusive filter）。境界のcommentは再配送されるため呼び出し側がdedupeする |
+| review thread | PRのfile / line固有のfinding議論のthread。解決状態（isResolved）を持ち、replyはthread先頭commentへ行う |
+| fallback comment | threadへのreplyが恒久的に不可能な場合に、元comment URLを前置して投稿するconversation comment |
+
 ## security policy
 
 | 用語 | 定義 |

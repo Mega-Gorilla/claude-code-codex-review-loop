@@ -94,6 +94,10 @@ _SECTIONS: dict[str, Field] = {
                 items=obj(
                     {
                         "comment_id": opaque(),
+                        # review_id / thread_idはPhase 5（C-05）のadditive追加（ADR-0004。
+                        # thread操作の再開用にcomment IDと種別を分離して保持する）
+                        "review_id": _optional_opaque(),
+                        "thread_id": _optional_opaque(),
                         "url": _optional_opaque(),
                         "reply_to": _optional_opaque(),
                         "body_hash": _optional_opaque(),
