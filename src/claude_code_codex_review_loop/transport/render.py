@@ -28,16 +28,26 @@ class PreparedBody:
     escaped_marker_count: int
 
 
+def normalize_newlines(text: str) -> str:
+    """改行を`\\n`へ正規化する（ADR-0007の単一choke point。冪等）。
+
+    本文hashと実際に投稿されるbytesを同じ正規化済み文字列から生成するため、
+    marker付加・hash計算・file書込より前に必ず本関数を通す（prepare_public_bodyと
+    post / ensure系の入口が呼ぶ）。
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _validate_header_field(label: str, value: str) -> None:
     if not value or "\n" in value or "\r" in value:
         raise TransportError("render", f"{label}は非空の1行でなければならない", ErrorCategory.PERMANENT)
 
 
 def prepare_public_body(agent_body: str, *, speaker: str, model: str) -> PreparedBody:
-    """agent発言を公開用へ変換する: sanitize -> redact -> 発言者/model headerの前置。"""
+    """agent発言を公開用へ変換する: 改行正規化 -> sanitize -> redact -> headerの前置。"""
     _validate_header_field("speaker", speaker)
     _validate_header_field("model", model)
-    sanitized = sanitize_agent_body(agent_body)
+    sanitized = sanitize_agent_body(normalize_newlines(agent_body))
     redacted = redact(sanitized.text)
     text = f"**{speaker}**（model: {model}）\n\n{redacted.text}"
     return PreparedBody(

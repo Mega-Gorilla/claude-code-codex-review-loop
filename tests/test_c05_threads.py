@@ -45,7 +45,6 @@ def _thread(thread_id: str = "T1", *, resolved: bool = False, inner_next: bool =
 
 def _reply_kwargs(**overrides):  # type: ignore[no-untyped-def]
     kwargs = dict(
-        idempotency_key="turn-1",
         search_attempts=1,
         search_backoff_seconds=0.01,
         search_max_pages=5,
@@ -211,6 +210,47 @@ class TestReplyIdempotency:
         assert isinstance(outcome, PostVerified)
         assert outcome.route is PostRoute.REPOSTED_AFTER_TIMEOUT  # 別thread・別keyは採用されない
         assert 0.01 in recorder.calls  # 検索間のbackoff
+
+
+class TestTruncatedSearch:
+    def test_truncated_thread_stops_search_instead_of_reposting(self, tmp_path: Path) -> None:
+        """round 1指摘: 検索が完結しない（truncated）場合は「不在」を確定せずerrorで停止する。"""
+        seed_state(tmp_path, threads=[_thread("T1", inner_next=True)])
+        context = make_context(tmp_path)
+        threads = fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
+        reset_call_counter(tmp_path)
+        context2 = make_context(tmp_path, scenario="timeout,ok", timeout_seconds=2.0)
+        body = attach_marker("回答", {"key": "turn-1"})
+        with pytest.raises(TransportError) as excinfo:
+            ensure_thread_reply(context2, _REPO, 7, threads[0], body, **_reply_kwargs())
+        assert excinfo.value.stage == "search"
+        # 不完全な検索結果から再投稿していない（timeout時のpersist無し = 0件のまま）
+        assert read_state(tmp_path)["pull_comments"] == []
+
+    def test_reply_body_without_marker_key_is_rejected(self, tmp_path: Path) -> None:
+        seed_state(tmp_path, threads=[_thread("T1")])
+        context = make_context(tmp_path)
+        threads = fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
+        with pytest.raises(TransportError) as excinfo:
+            ensure_thread_reply(context, _REPO, 7, threads[0], "markerなし本文", **_reply_kwargs())
+        assert excinfo.value.stage == "marker"
+
+    def test_nullable_graphql_author_is_preserved(self, tmp_path: Path) -> None:
+        ghost = _thread("T1")
+        ghost["comments"][0]["author"] = None
+        seed_state(tmp_path, threads=[ghost])
+        context = make_context(tmp_path)
+        threads = fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
+        assert threads[0].comments[0].author_login is None
+
+    def test_non_object_author_is_still_rejected(self, tmp_path: Path) -> None:
+        broken = _thread("T1")
+        broken["comments"][0]["author"] = "codex-bot"
+        seed_state(tmp_path, threads=[broken])
+        context = make_context(tmp_path)
+        with pytest.raises(TransportError) as excinfo:
+            fetch_review_threads(context, _REPO, 7, policy=make_policy(), max_pages=3)
+        assert excinfo.value.stage == "metadata"
 
 
 class TestShapeUnits:

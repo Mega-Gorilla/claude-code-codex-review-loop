@@ -19,12 +19,12 @@ implementation planはC-05を「未検証のGitHub metadataの取得・投稿・
 
 ### body hashとread-after-write
 
-4. 本文hashは**SHA-256 hex（UTF-8生bytes、正規化なし、marker含む全body）**。投稿前に改行を`\n`へ正規化した本文をfileへ書き、そのbytesのhashを期待値とする。read-after-writeは**comment IDでのGET直接取得**で行い、hash一致・comment ID・URL・head SHAの記録をもってturnをcompletedにできる（AC-C05-01）。hash不一致は編集・改変の疑いとして`PostHashMismatch`で返し、retryしない（呼び出し側がBLOCKED化）
+4. 本文は投稿pipelineの入口（`prepare_public_body`とpost / ensure系）で**改行を`\n`へ正規化**する（単一のchoke point関数`normalize_newlines`。冪等）。本文hashは**正規化済み本文のUTF-8 bytesのSHA-256 hex（marker含む全body。それ以外の正規化はしない）**とし、実際に投稿するfileと期待hashを同じ正規化済み文字列から生成する。read-after-writeは**comment IDでのGET直接取得**で行い、hash一致・comment ID・URL・head SHAの記録をもってturnをcompletedにできる（AC-C05-01）。hash不一致は編集・改変の疑いとして`PostHashMismatch`で返し、retryしない（呼び出し側がBLOCKED化）
 5. 本文はGitHubの上限（65,536字）を投稿前に検査し、超過はPERMANENTとして投稿しない
 
 ### 冪等post flow（AC-C05-02）
 
-6. 投稿のtimeoutおよびTRANSIENT失敗は**成否不明**として扱い、blind retryしない。idempotency marker（payloadの`key`）でGitHubを検索し、見つかれば確認のみ、無ければ**同一key**で再投稿する。検索は`since=(投稿開始時刻 − 時計skew余裕)`を起点に**bounded N回**（backoff付き）行う
+6. 投稿のtimeoutおよびTRANSIENT失敗は**成否不明**として扱い、blind retryしない。idempotency marker（payloadの`key`）でGitHubを検索し、見つかれば確認のみ、無ければ**同一key**で再投稿する。検索は`since=(投稿開始時刻 − 時計skew余裕)`を起点に**bounded N回**（backoff付き）行う。**検索keyは本文markerから導出し、引数との二重入力を持たない**（本文と検索keyの不一致による重複投稿を構造的に防ぐ）。正規markerまたはkeyの無い本文はensure系の入口で拒否する
 7. **検索のpredicateは「marker key一致 AND body hash一致」**。書込権限を持つ第三者が同一keyのmarkerを偽造して再投稿を抑止する攻撃を無効化する（真正性の最終判定はC-06のallowlist照合）。事後に重複が発覚した場合のcanonical選択はC-06の責務であり、**C-05はcommentを削除しない**（mutable anchor更新方式の不採用と整合）
 8. replyの冪等flowも同型（timeout → thread再取得 → 同一thread内でkey+hash検索 → 確認 or 再投稿）
 
@@ -42,7 +42,7 @@ implementation planはC-05を「未検証のGitHub metadataの取得・投稿・
 
 ### thread操作（AC-C05-03）
 
-15. 取得はGraphQL（`isResolved`はRESTに無い）。thread levelはcursor loop（max_pages有界）、**thread内commentsの未取得の続きは`truncated`で顕在化**する（内側paginationはv1では実装しない）。**reply対象はthread先頭comment（top-level）のdatabaseId**（reply IDへのreplyはAPIが拒否する）。replyはREST replies endpoint + body file
+15. 取得はGraphQL（`isResolved`はRESTに無い）。thread levelはcursor loop（max_pages有界）、**thread内commentsの未取得の続きは`truncated`で顕在化**する（内側paginationはv1では実装しない）。**replyの冪等検索は、対象threadがtruncatedの場合「不在」を確定せず構造化errorで停止する**（不完全な検索結果から再投稿しない）。**reply対象はthread先頭comment（top-level）のdatabaseId**（reply IDへのreplyはAPIが拒否する）。replyはREST replies endpoint + body file
 16. **fallbackは恒久分類（NOT_FOUND / PERMANENT / AUTH）のみ**: 元comment URLを前置したconversation commentへ切り替え、経路を型（DIRECT_REPLY / FALLBACK_COMMENT）で返す。TRANSIENTの尽きはfallbackせず伝播する（恒久 / 一時の混同を避け、FAILED化は呼び出し側）
 
 ### 未実装・先送り（記録）
@@ -51,7 +51,7 @@ implementation planはC-05を「未検証のGitHub metadataの取得・投稿・
 
 ## Consequences
 
-- C-06はC-05の`UnverifiedComment`（加工なしのcreatedAt / updatedAt / author login / body / marker）だけで編集検知・payload hash照合・404検知が成立する
+- C-06はC-05の`UnverifiedComment`（加工なしのcreatedAt / updatedAt / author login / body / marker）だけで編集検知・payload hash照合・404検知が成立する。**author / userのnull（削除済みaccount等）はNoneとして保持**し、受理可否（fail closed）の判断はC-06が行う
 - C-01の`PersistRecord`（冪等な永続化）は`ensure_comment_posted` / `ensure_thread_reply`がそのまま実装になる。C-05はC-01 eventのproducerにならない（VERIFIED系はC-06が生成する）
 - fake gh（P-011）は`--include`形式・exit code・`-F body=@file`のfile読みを実仕様どおり模倣し、全ACをlive接続なしで検証する
 

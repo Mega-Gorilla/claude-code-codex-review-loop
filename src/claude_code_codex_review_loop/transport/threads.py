@@ -29,6 +29,7 @@ from .conversation import (
     PostRoute,
     PostVerified,
     UnverifiedComment,
+    _require_marker_key,
     body_hash_of,
     comment_from_json,
     ensure_comment_posted,
@@ -45,6 +46,7 @@ from .gh import (
     write_private_file,
 )
 from .marker import ExtractedMarker, extract_marker
+from .render import normalize_newlines
 
 _THREADS_QUERY: Final = """\
 query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -73,7 +75,7 @@ class ThreadComment:
 
     comment_id: str
     url: str
-    author_login: str
+    author_login: str | None
     body: str
     path: str | None
     body_hash: str
@@ -134,14 +136,22 @@ def _thread_comment_from_node(raw: object) -> ThreadComment:
     if isinstance(database_id, bool) or not isinstance(database_id, int):
         raise TransportError("metadata", "databaseIdが整数でない", ErrorCategory.PERMANENT)
     body = _as_str(node.get("body"), "comment bodyが文字列でない")
-    author = _as_dict(node.get("author"), "authorがobjectでない")
+    # 削除済みaccount等でauthorはnullになり得る。未検証metadataとしてnullを保持し、
+    # actorの受理判断はC-06が行う
+    raw_author = node.get("author")
+    author_login: str | None
+    if raw_author is None:
+        author_login = None
+    else:
+        author_login = _as_str(_as_dict(raw_author, "authorがobjectでもnullでもない").get("login"),
+                               "author.loginが文字列でない")
     path = node.get("path")
     if path is not None and not isinstance(path, str):
         raise TransportError("metadata", "pathが文字列でもnullでもない", ErrorCategory.PERMANENT)
     return ThreadComment(
         comment_id=str(database_id),
         url=_as_str(node.get("url"), "comment urlが文字列でない"),
-        author_login=_as_str(author.get("login"), "author.loginが文字列でない"),
+        author_login=author_login,
         body=body,
         path=path,
         body_hash=body_hash_of(body),
@@ -221,6 +231,7 @@ def post_thread_reply(
     context: GhContext, repo: RepoRef, pr_number: int, thread: UnverifiedThread, body: str
 ) -> UnverifiedComment:
     """review threadへのreplyを1件投稿する（retryしない。冪等flowはensure側）。"""
+    body = normalize_newlines(body)
     if len(body) > MAX_COMMENT_CHARS:
         raise TransportError("body", f"本文がGitHubの上限を超えた（{len(body)}字）", ErrorCategory.PERMANENT)
     target = _reply_target(thread)
@@ -262,13 +273,18 @@ def ensure_thread_reply(
     thread: UnverifiedThread,
     body: str,
     *,
-    idempotency_key: str,
     search_attempts: int,
     search_backoff_seconds: float,
     search_max_pages: int,
     policy: RetryPolicy,
 ) -> EnsureOutcome:
-    """replyの冪等投稿: post -> read-after-write。成否不明時はthread再取得で検索する。"""
+    """replyの冪等投稿: post -> read-after-write。成否不明時はthread再取得で検索する。
+
+    検索keyは本文markerから導出する（引数との二重入力を持たない）。正規markerまたは
+    keyの無い本文は投稿前に拒否する。
+    """
+    body = normalize_newlines(body)
+    idempotency_key = _require_marker_key(body)
     expected_hash = body_hash_of(body)
     try:
         posted_id = post_thread_reply(context, repo, pr_number, thread, body).comment_id
@@ -325,6 +341,14 @@ def _search_reply(
         for candidate in threads:
             if candidate.thread_id != thread_id:
                 continue
+            if candidate.truncated:
+                # 未取得部分にpersist済みreplyが隠れている可能性があり、「不在」を
+                # 確定できない。再投稿すると重複するため構造化errorで停止する
+                raise TransportError(
+                    "search",
+                    "対象threadのcommentsが切り詰められており、検索を完結できない",
+                    ErrorCategory.PERMANENT,
+                )
             for comment in candidate.comments:
                 if comment.marker is None or comment.marker.payload is None:
                     continue
@@ -345,7 +369,6 @@ def reply_with_fallback(
     body: str,
     *,
     source_comment_url: str,
-    idempotency_key: str,
     search_since: str | None,
     search_attempts: int,
     search_backoff_seconds: float,
@@ -364,7 +387,6 @@ def reply_with_fallback(
             pr_number,
             thread,
             body,
-            idempotency_key=idempotency_key,
             search_attempts=search_attempts,
             search_backoff_seconds=search_backoff_seconds,
             search_max_pages=search_max_pages,
@@ -380,7 +402,6 @@ def reply_with_fallback(
         repo,
         pr_number,
         fallback_body,
-        idempotency_key=idempotency_key,
         search_since=search_since,
         search_attempts=search_attempts,
         search_backoff_seconds=search_backoff_seconds,

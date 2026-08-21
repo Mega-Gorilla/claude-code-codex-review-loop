@@ -36,6 +36,7 @@ from .gh import (
     write_private_file,
 )
 from .marker import ExtractedMarker, extract_marker
+from .render import normalize_newlines
 
 # 応答sizeの機構上限（設定値ではない）。comment本文は最大65,536字（多byte + JSON escape考慮）
 MAX_SINGLE_RESPONSE_BYTES: Final = 2_097_152
@@ -55,7 +56,7 @@ class UnverifiedComment:
 
     comment_id: str
     url: str
-    author_login: str
+    author_login: str | None
     created_at: str
     updated_at: str
     body: str
@@ -131,14 +132,21 @@ def comment_from_json(data: object) -> UnverifiedComment:
     raw_id = data.get("id")
     if isinstance(raw_id, bool) or not isinstance(raw_id, int):
         raise TransportError("metadata", "comment応答のidが整数でない", ErrorCategory.PERMANENT)
+    # 削除済みaccount等でuserはnullになり得る。未検証metadataとしてnullを保持し、
+    # actorの受理判断（fail closed）はC-06が行う（AC-C05-05）
     user = data.get("user")
-    if not isinstance(user, dict):
-        raise TransportError("metadata", "comment応答のuserがobjectでない", ErrorCategory.PERMANENT)
+    author_login: str | None
+    if user is None:
+        author_login = None
+    elif isinstance(user, dict):
+        author_login = _require_str(user, "login")
+    else:
+        raise TransportError("metadata", "comment応答のuserがobjectでもnullでもない", ErrorCategory.PERMANENT)
     body = _require_str(data, "body")
     return UnverifiedComment(
         comment_id=str(raw_id),
         url=_require_str(data, "html_url"),
-        author_login=_require_str(user, "login"),
+        author_login=author_login,
         created_at=_require_str(data, "created_at"),
         updated_at=_require_str(data, "updated_at"),
         body=body,
@@ -155,6 +163,7 @@ def post_issue_comment(context: GhContext, repo: RepoRef, number: int, body: str
     TRANSIENT失敗とtimeoutは成否不明として扱い、冪等flow（ensure_comment_posted）が
     marker検索で回復する。
     """
+    body = normalize_newlines(body)
     if len(body) > MAX_COMMENT_CHARS:
         raise TransportError("body", f"本文がGitHubの上限を超えた（{len(body)}字）", ErrorCategory.PERMANENT)
     body_file = write_private_file(context.workdir, "body", body)
@@ -242,6 +251,21 @@ def fetch_comments_since(
     return FetchResult(comments=tuple(collected), next_cursor=next_cursor)
 
 
+def _require_marker_key(body: str) -> str:
+    """冪等投稿の前提: 本文末尾の正規markerからidempotency keyを取り出す。
+
+    markerまたはkeyが無い本文をensure系へ渡すのは呼び出し側の誤りであり、
+    timeout時に検索できず重複投稿へ至るため投稿前に拒否する。
+    """
+    marker = extract_marker(body)
+    if marker is None or marker.payload is None:
+        raise TransportError("marker", "本文末尾に正規のmarkerが必要（冪等投稿の前提）", ErrorCategory.PERMANENT)
+    key = marker.payload.get("key")
+    if not isinstance(key, str) or not key:
+        raise TransportError("marker", "markerのkeyが無いか文字列でない", ErrorCategory.PERMANENT)
+    return key
+
+
 def find_comment_by_marker(
     comments: tuple[UnverifiedComment, ...], idempotency_key: str, expected_body_hash: str
 ) -> UnverifiedComment | None:
@@ -262,7 +286,6 @@ def ensure_comment_posted(
     number: int,
     body: str,
     *,
-    idempotency_key: str,
     search_since: str | None,
     search_attempts: int,
     search_backoff_seconds: float,
@@ -271,11 +294,15 @@ def ensure_comment_posted(
 ) -> EnsureOutcome:
     """冪等な投稿: post -> read-after-write。成否不明時はmarker検索 -> 確認 or 再投稿。
 
-    - bodyは事前にmarker（key入り）をattach済みであること（呼び出し側の責務）
+    - bodyは事前にmarker（key入り）をattach済みであること。**検索keyは本文markerから
+      導出する**（引数との二重入力を持たず、本文と検索の不一致による重複投稿を
+      構造的に防ぐ）。正規markerまたはkeyが無い本文は投稿前に拒否する
     - search_sinceは投稿開始前の時刻から時計skew分を引いたcursorを渡す
-    - 再投稿は同一idempotency keyで行う。事後に重複が発覚した場合のcanonical選択は
+    - 再投稿は同一keyの同一本文で行う。事後に重複が発覚した場合のcanonical選択は
       C-06の責務（C-05は削除しない）
     """
+    body = normalize_newlines(body)
+    idempotency_key = _require_marker_key(body)
     expected_hash = body_hash_of(body)
     try:
         posted = post_issue_comment(context, repo, number, body)

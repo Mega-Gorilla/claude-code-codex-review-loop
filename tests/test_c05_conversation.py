@@ -43,7 +43,6 @@ def _seed_comment(number: int, *, issue: int = 5, body: str = "x", updated: str 
 
 def _ensure(context, body: str, **overrides):  # type: ignore[no-untyped-def]
     kwargs = dict(
-        idempotency_key="turn-1",
         search_since=None,
         search_attempts=2,
         search_backoff_seconds=0.01,
@@ -138,6 +137,65 @@ class TestIdempotentFlow:
         assert isinstance(outcome, PostVerified)
         assert outcome.route is PostRoute.REPOSTED_AFTER_TIMEOUT
         assert len(read_state(tmp_path)["comments"]) == 2  # 偽物 + 正規repost
+
+
+class TestMarkerKeyDerivation:
+    """検索keyは本文markerから導出する（round 1指摘: 二重入力による不一致の排除）。"""
+
+    def test_body_without_marker_is_rejected_before_posting(self, tmp_path: Path) -> None:
+        context = make_context(tmp_path)
+        with pytest.raises(TransportError) as excinfo:
+            _ensure(context, "markerの無い本文")
+        assert excinfo.value.stage == "marker"
+        assert read_state(tmp_path)["comments"] == []  # 投稿前に拒否
+
+    def test_marker_without_key_is_rejected(self, tmp_path: Path) -> None:
+        context = make_context(tmp_path)
+        body = attach_marker("本文", {"kind": "REVIEW_RESULT"})  # keyなし
+        with pytest.raises(TransportError) as excinfo:
+            _ensure(context, body)
+        assert excinfo.value.stage == "marker"
+
+    def test_search_uses_the_key_from_the_body_marker(self, tmp_path: Path) -> None:
+        """persist後timeoutでも本文のkeyで検索するため、必ず発見され重複しない。"""
+        context = make_context(tmp_path, scenario="persist_then_hang,ok", timeout_seconds=2.0)
+        body = attach_marker("本文", {"key": "body-key"})
+        outcome = _ensure(context, body)
+        assert isinstance(outcome, PostVerified)
+        assert outcome.route is PostRoute.FOUND_AFTER_TIMEOUT
+        assert len(read_state(tmp_path)["comments"]) == 1
+
+
+class TestNewlineNormalization:
+    """ADR-0007: 投稿前にCRLF / 単独CRをLFへ正規化する単一choke point。"""
+
+    def test_crlf_body_is_normalized_before_hash_and_post(self, tmp_path: Path) -> None:
+        from claude_code_codex_review_loop.transport import normalize_newlines
+
+        context = make_context(tmp_path)
+        body = attach_marker("first\r\nsecond\rthird", {"key": "turn-1"})
+        outcome = _ensure(context, body)
+        assert isinstance(outcome, PostVerified)
+        posted = outcome.comment.body
+        assert "\r" not in posted
+        assert outcome.body_hash == body_hash_of(normalize_newlines(body))  # hashは正規化後bytesから
+
+    def test_prepare_public_body_normalizes_newlines(self) -> None:
+        from claude_code_codex_review_loop.transport import attach_marker as attach
+        from claude_code_codex_review_loop.transport import prepare_public_body
+
+        prepared = prepare_public_body("first\r\nsecond", speaker="Codex", model="m")
+        final = attach(prepared.text, {"key": "turn-1"})
+        assert "\r" not in final
+
+    def test_nullable_user_is_preserved_not_rejected(self, tmp_path: Path) -> None:
+        """削除済みaccount等のnull userは未検証metadataとしてNoneで保持する（C-06が判断）。"""
+        ghost = _seed_comment(1, body="ghost")
+        ghost["user"] = None
+        seed_state(tmp_path, comments=[ghost])
+        context = make_context(tmp_path)
+        result = fetch_comments_since(context, _REPO, 5, None, policy=make_policy(), max_pages=1)
+        assert result.comments[0].author_login is None
 
 
 class TestFetchSince:

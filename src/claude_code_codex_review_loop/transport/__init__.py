@@ -47,7 +47,7 @@ from .marker import (
     extract_marker,
     sanitize_agent_body,
 )
-from .render import PreparedBody, prepare_public_body
+from .render import PreparedBody, normalize_newlines, prepare_public_body
 from .threads import (
     ReplyOutcome,
     ReplyRoute,
@@ -95,6 +95,7 @@ __all__ = [
     "find_comment_by_marker",
     "get_issue_comment",
     "get_pull_comment",
+    "normalize_newlines",
     "post_issue_comment",
     "post_thread_reply",
     "prepare_public_body",
