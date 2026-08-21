@@ -53,7 +53,7 @@ grandchild_pid = ""
 if spawn_grandchild:
     ignore_flag = "1" if mode in ("ignore", "exit_ignore") else "0"
     grandchild = subprocess.Popen(
-        [sys.executable, "-c", GRANDCHILD_CODE, ignore_flag, str(lifetime)],
+        [sys.executable, "-c", GRANDCHILD_CODE, ignore_flag, str(lifetime), pidfile + ".ready"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -74,7 +74,9 @@ while time.monotonic() < deadline:
 sys.exit(9)
 """
 
-# 孫process code（-cで渡す）。argv: ignore_flag lifetime
+# 孫process code（-cで渡す）。argv: ignore_flag lifetime ready_path
+# handler設置「後」にready fileを書く。testはこれを待つことで、設置前にsignalが
+# 届いて孫が既定動作で死ぬrace（CIのinterpreter起動遅延で顕在化する）を排除する
 _GRANDCHILD_CODE = """\
 import signal
 import sys
@@ -84,6 +86,9 @@ if sys.argv[1] == "1":
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+with open(sys.argv[3], "w", encoding="utf-8") as handle:
+    handle.write("ready")
 
 deadline = time.monotonic() + float(sys.argv[2])
 while time.monotonic() < deadline:
@@ -131,11 +136,20 @@ def wait_until(condition, timeout_seconds: float = WAIT_LIMIT_SECONDS, interval:
         time.sleep(interval)
 
 
-def read_pids(pidfile: Path) -> tuple[int, int | None]:
-    """子scriptが書いたpidfileから(child_pid, grandchild_pid)を読む。"""
+def read_pids(pidfile: Path, *, wait_grandchild_ready: bool = False) -> tuple[int, int | None]:
+    """子scriptが書いたpidfileから(child_pid, grandchild_pid)を読む。
+
+    孫のSIG_IGNが結果を左右するtest（graceful無視の断言）はwait_grandchild_ready=True
+    でhandler設置完了（ready file）まで待つ。設置前にsignalが届くと孫は既定動作で
+    死に、CIのinterpreter起動遅延でflakyになる。treeが即座に停止される経路では
+    孫がready前にkillされ得るため、既定では待たない。
+    """
     assert wait_until(pidfile.exists), "pidfileが作成されない"
     text = pidfile.read_text(encoding="utf-8")
     child_text, _, grandchild_text = text.partition(",")
+    if grandchild_text and wait_grandchild_ready:
+        ready = pidfile.parent / (pidfile.name + ".ready")
+        assert wait_until(ready.exists), "孫のready fileが作成されない"
     return int(child_text), int(grandchild_text) if grandchild_text else None
 
 

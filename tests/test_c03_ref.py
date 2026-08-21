@@ -37,13 +37,16 @@ from claude_code_codex_review_loop.process import (
 
 
 def _leaderless_tree(tmp_path: Path, mode: str = "exit_after_spawn") -> tuple[TreeHandle, int | None]:
-    """leaderが終了・reap済みで、孫だけが生き残ったtreeを作る。(handle, grandchild_pid)を返す。"""
+    """leaderが終了・reap済みで、孫だけが生き残ったtreeを作る。(handle, grandchild_pid)を返す。
+
+    exit_ignoreでは孫のSIG_IGN設置完了まで待つ（設置前のsignalで死ぬraceの排除）。
+    """
     script = write_child_script(tmp_path)
     pidfile = tmp_path / f"ref-pids-{mode}.txt"
     spec = SpawnSpec(argv=child_argv(script, mode, pidfile, grandchild=True), cwd=tmp_path, env=child_env())
     handle = spawn_tree(spec)
     assert handle.wait(WAIT_LIMIT_SECONDS) == 0  # leaderをreapする
-    _child_pid, grandchild_pid = read_pids(pidfile)
+    _child_pid, grandchild_pid = read_pids(pidfile, wait_grandchild_ready=mode == "exit_ignore")
     return handle, grandchild_pid
 
 
