@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """C-06 testの共有helper。
 
-chain specに準拠した正規chain（prev連結済み）の本文列とUnverifiedComment列を生成する。
-fake ghへのseedは`seed_dict`でdict形式へ写す（tests/c05_support/helpers.pyのseed_stateへ渡す）。
+- chain specに準拠した正規chain（prev連結済み）の本文列とUnverifiedComment列を生成する
+  （fake ghへのseedは`seed_dict`でdict形式へ写す。c05_support.seed_stateへ渡す）
+- credential隔離testのfixture script（env dump child / fake claude CLI）をtmp_pathへ
+  生成する（tracked fileを増やさない。c03_supportと同じ方式）
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from claude_code_codex_review_loop.domain.values import RecordKind
 from claude_code_codex_review_loop.identity import compose_record_marker_payload
@@ -94,3 +98,54 @@ def seed_dict(comment: UnverifiedComment, *, issue: int = 7) -> dict[str, object
         "updated_at": comment.updated_at,
         "user": None if comment.author_login is None else {"login": comment.author_login},
     }
+
+
+# 子processが自分のenvをJSONで書き出すscript（argv: 出力path）
+_ENV_DUMP_SCRIPT = """\
+import json
+import os
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(dict(os.environ), handle, ensure_ascii=False)
+"""
+
+# fake claude CLI。argv: mode ...（modeは環境変数CC_REVIEW_FAKE_CLAUDE_MODEで指定）
+_FAKE_CLAUDE_SCRIPT = """\
+import json
+import os
+import sys
+import time
+
+mode = os.environ.get("CC_REVIEW_FAKE_CLAUDE_MODE", "ok")
+if mode == "hang":
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+    sys.exit(9)
+if mode == "fail":
+    sys.stderr.write("auto-mode unavailable")
+    sys.exit(1)
+if mode == "nonjson":
+    sys.stdout.write("not json")
+    sys.exit(0)
+if mode == "jsonarray":
+    sys.stdout.write("[1, 2]")
+    sys.exit(0)
+sys.stdout.write(json.dumps({"mode": "auto", "subcommand": sys.argv[1:]}))
+sys.exit(0)
+"""
+
+
+def write_env_dump_script(directory: Path) -> Path:
+    """子processのenvをJSONへ書き出すscriptを生成する。"""
+    script = directory / "env_dump.py"
+    script.write_text(_ENV_DUMP_SCRIPT, encoding="utf-8")
+    return script
+
+
+def write_fake_claude(directory: Path) -> Path:
+    """Auto mode probe用のfake claude CLIを生成する（P-011: 実CLIへ依存しない）。"""
+    script = directory / "fake_claude.py"
+    script.write_text(_FAKE_CLAUDE_SCRIPT, encoding="utf-8")
+    return script

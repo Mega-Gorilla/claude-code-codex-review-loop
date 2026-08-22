@@ -88,6 +88,9 @@
 | tool permission | Claude Code等が個々の操作を許可するかどうかの判定。workflow承認とは別のauthority |
 | workflow承認 | merge、follow-up Issue作成、仕様判断に対するユーザーの明示的な承認。tool permissionで代替できない |
 | allowlist | ユーザー判断を受理できるGitHub loginの明示的な一覧。完全一致を必須とする |
+| reviewer home | reviewerへ差し替えるHOME相当の一時領域。`GH_CONFIG_DIR` / `XDG_*` / git global configの探索先をここへ閉じ込める（ADR-0009） |
+| private directory | 作成者のみがアクセスできるdirectory。POSIXは`0o700`、Windowsは現userの単一ACE。排他作成し、実効権限を読み戻して検証する |
+| resume ticket | 停止したtool操作**だけ**の再実行許可。Permission ID・head・tool・scopeの完全一致で発行され、workflow承認のevidenceにはならない |
 
 ## review
 
