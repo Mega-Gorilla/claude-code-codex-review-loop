@@ -146,22 +146,59 @@ class TestCanonicalMarkerForm:
     @pytest.mark.parametrize(
         "payload_json",
         [
+            # --- canonical encoding（sorted keysのcompact JSON）でreachする形状違反 ---
             '{"broken": }',  # JSON不正
-            '{"key":"k","kind":"REVIEW_RESULT","run":"run-1","head":"h","seq":1,"authorization":"x"}',  # 許可外key
-            '{"kind":"REVIEW_RESULT","run":"run-1","head":"h","seq":1}',  # key欠如
-            '{"key":"","kind":"REVIEW_RESULT","run":"run-1","head":"h","seq":1}',  # key空
-            '{"key":"k","kind":"REVIEW_RESULT","run":"run-1","head":"h","seq":true}',  # seqがbool
-            '{"key":"k","kind":"REVIEW_RESULT","run":"run-1","head":"h","seq":"1"}',  # seqが文字列
-            '{"key":"k","kind":"REVIEW_RESULT","run":"run-1","head":"h","seq":0}',  # seqが0
-            '{"key":"k","kind":"REVIEW_RESULT","run":"run-1","head":"h","seq":1,"prev":null}',  # genesisにprev
-            '{"key":"k","kind":"REVIEW_RESULT","run":"run-1","head":"h","seq":2}',  # 後続にprevなし
-            '{"key":"k","kind":"REVIEW_RESULT","run":"run-1","head":"h","seq":2,"prev":"XYZ"}',  # prev形式不正
-            '{"key":"k","kind":"UNKNOWN_KIND","run":"run-1","head":"h","seq":1}',  # kind未知
+            '{"authorization":"x","head":"h","key":"k","kind":"REVIEW_RESULT","run":"run-1","seq":1}',  # 許可外key
+            '{"head":"h","kind":"REVIEW_RESULT","run":"run-1","seq":1}',  # key欠如
+            '{"head":"h","key":"","kind":"REVIEW_RESULT","run":"run-1","seq":1}',  # key空
+            '{"head":"h","key":"k","kind":"REVIEW_RESULT","run":"run-1","seq":true}',  # seqがbool
+            '{"head":"h","key":"k","kind":"REVIEW_RESULT","run":"run-1","seq":"1"}',  # seqが文字列
+            '{"head":"h","key":"k","kind":"REVIEW_RESULT","run":"run-1","seq":0}',  # seqが0
+            '{"head":"h","key":"k","kind":"REVIEW_RESULT","prev":null,"run":"run-1","seq":1}',  # genesisにprev
+            '{"head":"h","key":"k","kind":"REVIEW_RESULT","run":"run-1","seq":2}',  # 後続にprevなし
+            '{"head":"h","key":"k","kind":"REVIEW_RESULT","prev":"XYZ","run":"run-1","seq":2}',  # prev形式不正
+            '{"head":"h","key":"k","kind":"UNKNOWN_KIND","run":"run-1","seq":1}',  # kind未知
+            # --- canonical encoding自体の違反（key・型が正しくても非正規形式） ---
+            '{"key":"k","head":"h","kind":"REVIEW_RESULT","run":"run-1","seq":1}',  # 非sorted key順
+            '{"head":"h", "key":"k","kind":"REVIEW_RESULT","run":"run-1","seq":1}',  # 空白入り
+            '{"head":"h",\n"key":"k","kind":"REVIEW_RESULT","run":"run-1","seq":1}',  # 複数行JSON
+            '{"head":"h","head":"h","key":"k","kind":"REVIEW_RESULT","run":"run-1","seq":1}',  # 重複key
         ],
     )
     def test_malformed_payload_variants(self, payload_json: str) -> None:
         comment = make_comment(1, _marker_body(payload_json))
         assert isinstance(_parse_chain_payload(comment), str)
+
+    def test_oversized_payload_is_rejected(self) -> None:
+        """canonical encodingでもpayload byte上限（2048）超過は非正規形式。"""
+        oversized = json.dumps(
+            {"head": "h", "key": "K" * 2500, "kind": "REVIEW_RESULT", "run": RUN, "seq": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        comment = make_comment(1, _marker_body(oversized))
+        assert isinstance(_parse_chain_payload(comment), str)
+
+    def test_trailing_whitespace_after_marker_is_rejected(self) -> None:
+        body = attach_marker(
+            "record 1",
+            compose_record_marker_payload(
+                key="k", kind=RecordKind.REVIEW_RESULT, run_id=RUN, head_sha=HEAD, seq=1, prev_body_hash=None
+            ),
+        )
+        assert isinstance(_parse_chain_payload(make_comment(1, body + "\n")), str)
+        assert isinstance(_parse_chain_payload(make_comment(1, body + " ")), str)
+
+    def test_marker_not_alone_on_final_line_is_rejected(self) -> None:
+        canonical = json.dumps(
+            {"head": HEAD, "key": "k", "kind": "REVIEW_RESULT", "run": RUN, "seq": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        inline = f"本文と同じ行 <!-- CC_REVIEW_META:v1 {canonical} -->"
+        assert isinstance(_parse_chain_payload(make_comment(1, inline)), str)
 
     def test_valid_genesis_parses(self) -> None:
         parsed = _parse_chain_payload(chain_comments(1)[0])

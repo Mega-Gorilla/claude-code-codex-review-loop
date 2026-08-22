@@ -15,6 +15,8 @@ from claude_code_codex_review_loop.transport.marker import attach_marker, extrac
 PRODUCER = "controller-bot"
 HEAD = "a" * 40
 RUN = "run-1"
+REPOSITORY = "Mega-Gorilla/claude-code-codex-review-loop"
+NUMBER = 42
 
 
 def make_comment(
@@ -24,11 +26,17 @@ def make_comment(
     author: str | None = PRODUCER,
     created_at: str = "2026-08-21T10:00:00Z",
     updated_at: str | None = None,
+    repository: str = REPOSITORY,
+    number: int = NUMBER,
+    url: str | None = None,
 ) -> UnverifiedComment:
-    """UnverifiedCommentを直接構築する（pure coreのtestはfake gh不要）。"""
+    """UnverifiedCommentを直接構築する（pure coreのtestはfake gh不要）。
+
+    urlはGitHubのhtml_url形式を既定にする（観測元照合の入力になるため）。
+    """
     return UnverifiedComment(
         comment_id=str(comment_id),
-        url=f"https://example.invalid/c/{comment_id}",
+        url=url if url is not None else f"https://github.com/{repository}/issues/{number}#issuecomment-{comment_id}",
         author_login=author,
         created_at=created_at,
         updated_at=updated_at if updated_at is not None else created_at,

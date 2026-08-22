@@ -16,9 +16,12 @@ allowlistが未設定または取得できない場合は`AllowlistUnavailable`�
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum, unique
+from typing import Final
 
 from ..domain.values import (
     USER_INPUT_RECORD_KINDS,
@@ -31,6 +34,24 @@ from ..transport.conversation import UnverifiedComment
 from ..transport.marker import MARKER_TOKEN
 from .actor import ActorClass, resolve_actor
 from .errors import IdentityError
+
+_REPOSITORY_PATTERN: Final = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
+_HEAD_SHA_PATTERN: Final = re.compile(r"[0-9a-f]{40}\Z")
+# 観測元の導出はGitHubが返したhtml_urlの構造による（comment author が操作できる値ではない）。
+# PR conversation commentのhtml_urlは`/pull/{n}#issuecomment-{id}`形式になる。github.com前提
+# （GHESはscope外の暫定。ADR-0008）
+_COMMENT_URL_PATTERN: Final = re.compile(
+    r"https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/(?:issues|pull)/([1-9][0-9]*)"
+    r"#issuecomment-([0-9]+)\Z"
+)
+
+
+def _comment_origin(url: str) -> tuple[str, int, str] | None:
+    """観測したcomment URLから(repository, number, comment ID)を導出する。不能ならNone。"""
+    match = _COMMENT_URL_PATTERN.fullmatch(url)
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2)), match.group(3)
 
 
 def _normalized_logins(stage: str, raw_logins: Iterable[str]) -> frozenset[str]:
@@ -83,7 +104,11 @@ class ProducerAllowlist:
 @dataclass(frozen=True)
 class DecisionContext:
     """承認bindの期待値（intent・対象・head。D-031「承認はintent、repository、番号、head SHA、
-    merge method、candidate fingerprintへbindする」）。kindはuser-input record種別に限る。"""
+    merge method、candidate fingerprintへbindする」）。kindはuser-input record種別に限る。
+
+    形式違反（空repository・非正番号・不正head SHA等）は構築時に拒否する: 空のbind対象で
+    受理を走らせると、実質bindなしの承認を生成してしまう（fail closed）。
+    """
 
     kind: RecordKind
     repository: str
@@ -95,6 +120,18 @@ class DecisionContext:
     def __post_init__(self) -> None:
         if self.kind not in USER_INPUT_RECORD_KINDS:
             raise IdentityError("context", f"user-input record種別ではない: {self.kind.value}")
+        if _REPOSITORY_PATTERN.fullmatch(self.repository) is None:
+            raise IdentityError("context", "repositoryはowner/name形式でなければならない")
+        if self.number < 1:
+            raise IdentityError("context", "Issue / PR番号は正の整数でなければならない")
+        if _HEAD_SHA_PATTERN.fullmatch(self.head_sha) is None:
+            raise IdentityError("context", "head SHAは40桁小文字hexでなければならない")
+        if self.kind is RecordKind.MERGE_APPROVAL and not self.merge_method:
+            raise IdentityError("context", "MERGE_APPROVALはmerge methodへのbindが必須")
+        if self.merge_method is not None and not self.merge_method:
+            raise IdentityError("context", "merge methodは空にできない")
+        if self.candidate_fingerprint is not None and not self.candidate_fingerprint:
+            raise IdentityError("context", "candidate fingerprintは空にできない")
 
 
 @unique
@@ -106,6 +143,7 @@ class DecisionRejection(Enum):
     BOT_ACTOR = "BOT_ACTOR"
     INVALID_LOGIN = "INVALID_LOGIN"
     MISSING_ACTOR = "MISSING_ACTOR"
+    SOURCE_MISMATCH = "SOURCE_MISMATCH"
     EDITED = "EDITED"
     ALREADY_CONSUMED = "ALREADY_CONSUMED"
     EMBEDDED_MARKER = "EMBEDDED_MARKER"
@@ -134,13 +172,21 @@ class RejectedUserDecision:
 
 
 def _derive_binding(context: DecisionContext, comment_id: str) -> str:
-    """受理bindingの決定論的導出。contextとcomment IDのみに依存する（冪等）。"""
-    method = context.merge_method if context.merge_method is not None else "-"
-    fingerprint = context.candidate_fingerprint if context.candidate_fingerprint is not None else "-"
-    return (
-        f"ud:{context.kind.value}:{context.repository}#{context.number}"
-        f":{context.head_sha}:{method}:{fingerprint}:c{comment_id}"
-    )
+    """受理bindingの決定論的導出。contextとcomment IDのみに依存する（冪等）。
+
+    区切り文字を含むopaque値でも衝突しないよう、sorted keysのcompact JSONで導出する。
+    repositoryはGitHub上でcase-insensitiveなためcasefoldで安定化する。
+    """
+    payload = {
+        "comment": comment_id,
+        "fingerprint": context.candidate_fingerprint,
+        "head": context.head_sha,
+        "kind": context.kind.value,
+        "method": context.merge_method,
+        "number": context.number,
+        "repository": context.repository.casefold(),
+    }
+    return "ud:" + json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def accept_user_decision(
@@ -152,8 +198,10 @@ def accept_user_decision(
 ) -> AcceptedUserDecision | RejectedUserDecision:
     """GitHub直接commentをユーザー判断として受理する（D-031完全一致、fail closed）。
 
-    検査は取得不能 -> actor -> allowlist -> 編集 -> 消費済み -> 埋め込みtokenの順で、
-    最初の違反で型付き理由を返す。受理はexternal evidenceでありPersistRecordを発行しない。
+    検査は取得不能 -> actor -> allowlist -> 観測元（URL由来のrepository / 番号 / comment ID
+    と期待contextの一致） -> 編集 -> 消費済み -> 埋め込みtokenの順で、最初の違反で型付き
+    理由を返す。観測元の照合により、別repository / 別PRから取得したcommentを期待contextへ
+    bindすることを構造的に防ぐ。受理はexternal evidenceでありPersistRecordを発行しない。
     """
     if isinstance(allowlist, AllowlistUnavailable):
         return RejectedUserDecision(
@@ -179,6 +227,24 @@ def accept_user_decision(
             reason=DecisionRejection.NOT_IN_ALLOWLIST,
             comment_id=comment.comment_id,
             detail="allowlistと完全一致しない",
+        )
+    origin = _comment_origin(comment.url)
+    if origin is None:
+        return RejectedUserDecision(
+            reason=DecisionRejection.SOURCE_MISMATCH,
+            comment_id=comment.comment_id,
+            detail="観測元URLを解釈できない",
+        )
+    origin_repository, origin_number, origin_comment_id = origin
+    if (
+        origin_repository.casefold() != context.repository.casefold()
+        or origin_number != context.number
+        or origin_comment_id != comment.comment_id
+    ):
+        return RejectedUserDecision(
+            reason=DecisionRejection.SOURCE_MISMATCH,
+            comment_id=comment.comment_id,
+            detail="観測元（repository / 番号 / comment ID）が期待contextと一致しない",
         )
     if comment.updated_at != comment.created_at:
         return RejectedUserDecision(
@@ -215,6 +281,7 @@ class DecisionValidity(Enum):
     VALID = "VALID"
     VOIDED_EDITED = "VOIDED_EDITED"
     VOIDED_DELETED = "VOIDED_DELETED"
+    VOIDED_SOURCE_MISMATCH = "VOIDED_SOURCE_MISMATCH"
     VOIDED_BINDING_MISMATCH = "VOIDED_BINDING_MISMATCH"
 
 
@@ -226,11 +293,26 @@ def revalidate_user_decision(
 ) -> DecisionValidity:
     """受理済み判断の失効検証。currentはGitHub再取得の結果（None = 404 = 削除）。
 
+    再取得結果が**受理済みcommentそのもの**であること（comment ID・観測元・actor）を
+    先に照合し、別comment / 別actor / 別観測元の提示はfail closedで失効させる。
     編集（body hash差または編集timestamp）と削除は失効。expectedが受理時のcontextと
     異なる場合（head変更等）はbinding不一致として失効する（head binding不変条件）。
     """
     if current is None:
         return DecisionValidity.VOIDED_DELETED
+    if current.comment_id != accepted.comment_id:
+        return DecisionValidity.VOIDED_SOURCE_MISMATCH
+    origin = _comment_origin(current.url)
+    if (
+        origin is None
+        or origin[0].casefold() != expected.repository.casefold()
+        or origin[1] != expected.number
+        or origin[2] != current.comment_id
+    ):
+        return DecisionValidity.VOIDED_SOURCE_MISMATCH
+    actor = resolve_actor(current.author_login)
+    if actor.klass is not ActorClass.USER or actor.login != accepted.author_login:
+        return DecisionValidity.VOIDED_SOURCE_MISMATCH
     if current.body_hash != accepted.body_hash or current.updated_at != current.created_at:
         return DecisionValidity.VOIDED_EDITED
     if _derive_binding(expected, accepted.comment_id) != accepted.binding.value:

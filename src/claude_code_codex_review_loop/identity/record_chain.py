@@ -46,7 +46,12 @@ from ..domain.values import (
 from ..errors import ErrorCategory
 from ..transport.conversation import UnverifiedComment, get_issue_comment
 from ..transport.gh import GhApiError, GhContext, RepoRef, RetryPolicy
-from ..transport.marker import ALLOWED_PAYLOAD_KEYS, MARKER_TOKEN
+from ..transport.marker import (
+    ALLOWED_PAYLOAD_KEYS,
+    MARKER_TOKEN,
+    MARKER_VERSION,
+    MAX_PAYLOAD_BYTES,
+)
 from .actor import ActorClass, resolve_actor
 from .allowlist import ProducerAllowlist
 from .errors import IdentityError
@@ -181,6 +186,17 @@ def _parse_chain_payload(comment: UnverifiedComment) -> ChainPayload | str:
     payload = comment.marker.payload
     if payload is None:
         return "marker payloadがJSONとして解釈できない"
+    raw_json = comment.marker.raw_json
+    if len(raw_json.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        return "marker payloadが上限byte数を超える"
+    # canonical encoding（sorted keysのcompact JSON。ADR-0007 決定1）との完全一致を要求する。
+    # 複数行・空白・key順の乱れ・重複key（parseで縮退する）は全て非正規形式になる
+    canonical = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if raw_json != canonical:
+        return "marker payloadがcanonical encoding（sorted keysのcompact JSON）でない"
+    # markerは本文末尾の単独1行そのもの（末尾の余分な空白・改行も非正規形式）
+    if not comment.body.endswith(f"\n<!-- {MARKER_TOKEN}:{MARKER_VERSION} {raw_json} -->"):
+        return "markerが本文末尾の単独1行でない"
     if not set(payload.keys()) <= ALLOWED_PAYLOAD_KEYS:
         return "markerが許可されないkeyを含む"
     values: dict[str, str] = {}
