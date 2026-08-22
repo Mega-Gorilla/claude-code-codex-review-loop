@@ -79,11 +79,14 @@ def test_full_envelope_with_all_sections_is_accepted() -> None:
         "ledger": {"findings": [{"id": "F-1", "fingerprint": "fp-1", "resolution": "fixed"}]},
         "conversation": {
             "cursor": "c-99",
+            "high_water_mark": 7,
             "records": [
                 {
                     "comment_id": "c-1",
                     "review_id": "rv-1",
                     "thread_id": "th-1",
+                    "seq": 7,
+                    "kind": "REVIEW_RESULT",
                     "url": "https://example.invalid/c-1",
                     "body_hash": "h-1",
                     "author_role": "codex",
@@ -114,6 +117,8 @@ def test_full_envelope_with_all_sections_is_accepted() -> None:
             "codex_position": "判断必要",
             "user_answer": "[1]",
             "answer_head_sha": "bbb",
+            "answer_comment_id": "c-77",
+            "answer_body_hash": "h-77",
         },
         "followup": [
             {
@@ -151,6 +156,9 @@ def test_full_envelope_with_all_sections_is_accepted() -> None:
             "approved_head_sha": "ccc",
             "input_route": "powershell",
             "approval_comment_id": "c-200",
+            "approval_body_hash": "h-200",
+            "candidate_fingerprint": "fp-cand",
+            "approval_binding": "ud:MERGE_APPROVAL:o/r#12:ccc:merge:fp-cand:c200",
             "merge_method": "merge",
             "api_result": "success",
             "merged_commit_sha": "ddd",
@@ -168,6 +176,18 @@ def test_checkpoint_accepts_large_payloads_up_to_its_limit() -> None:
     raw = _raw(payload)
     assert len(raw) > 65_536
     assert validate(CHECKPOINT, raw).ok
+
+
+def test_chain_checkpoint_fields_reject_wrong_types() -> None:
+    """Phase 6 additive field（high_water_mark / records[].seq）の型違反は拒否される。"""
+    payload = dict(_BASE)
+    payload["conversation"] = {"high_water_mark": "seven"}
+    result = validate(CHECKPOINT, _raw(payload))
+    assert not result.ok
+
+    payload["conversation"] = {"records": [{"comment_id": "c-1", "seq": "seven"}]}
+    result = validate(CHECKPOINT, _raw(payload))
+    assert not result.ok
 
 
 def test_unknown_section_is_rejected() -> None:

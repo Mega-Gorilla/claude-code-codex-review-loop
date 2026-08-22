@@ -41,6 +41,16 @@
 | review thread | PRのfile / line固有のfinding議論のthread。解決状態（isResolved）を持ち、replyはthread先頭commentへ行う |
 | fallback comment | threadへのreplyが恒久的に不可能な場合に、元comment URLを前置して投稿するconversation comment |
 
+## identity（canonical record検証）
+
+| 用語 | 定義 |
+| --- | --- |
+| record chain | 同一run内の内部recordがmarker payloadの`seq`（1始まり通し番号）と`prev`（直前recordの本文hash）で連結された系列。specの正本はADR-0008 |
+| high-water mark | checkpointへ保存する確認済み最大sequence番号`N`。`N`以下の欠落は検出でき、`N`より後のtail truncationは検出できない残存risk（AC-C06-09） |
+| violation binding | integrity violationの決定論的識別子（`iv:{条件}:{run}:{対象}`）。同一違反の再検出は同一bindingになり（冪等）、C-01のcanonical orderと両立する |
+| producer allowlist | 内部record（chain）の正当な投稿者login集合（通常はControllerの認証login）。承認受理用のallowlistとは別の集合 |
+| external evidence | ユーザーがGitHubへ直接記入したcommentを、C-06がcomment ID・body hash・actor（allowlist完全一致）・対象headで検証して受理したevidence。再投稿（PersistRecord）を伴わない |
+
 ## security policy
 
 | 用語 | 定義 |
