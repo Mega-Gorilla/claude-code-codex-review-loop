@@ -213,6 +213,9 @@ _SECTIONS: dict[str, Field] = {
             "requested_scope": _optional_text(),
             "user_changes": _optional_text(),
             "resume_checkpoint": _optional_opaque(),
+            # head_shaはPhase 6（C-06）のadditive追加: resume gateがPermission IDと
+            # 併せて再検証するblock時のhead（AC-C06-04）
+            "head_sha": _optional_sha(),
         },
         required=False,
     ),

@@ -18,6 +18,7 @@ from .permission_profile import (
 )
 from .redaction import (
     REDACTION_PATTERNS,
+    TOKEN_ENV_NAMES,
     RedactionHit,
     RedactionPattern,
     RedactionResult,
@@ -32,6 +33,7 @@ from .trust_rules import (
 
 __all__ = [
     "REDACTION_PATTERNS",
+    "TOKEN_ENV_NAMES",
     "ForbiddenFlagError",
     "PermissionProfile",
     "PolicyError",
