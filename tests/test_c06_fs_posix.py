@@ -54,6 +54,16 @@ class TestVerifyRejectsLoosePermissions:
             mode_posix.verify_private_dir(target)
         assert excinfo.value.stage == "verify"
 
+    def test_foreign_owner_is_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """所有者が現userでないdirectoryは受理しない（uidをkernel levelで注入して検証）。"""
+        target = tmp_path / "artifacts"
+        mode_posix.create_private_dir(target)
+        real_uid = os.getuid()
+        monkeypatch.setattr(mode_posix.os, "getuid", lambda: real_uid + 1)
+        with pytest.raises(FsPermissionError) as excinfo:
+            mode_posix.verify_private_dir(target)
+        assert excinfo.value.stage == "verify"
+
     def test_loose_file_mode_is_rejected(self, tmp_path: Path) -> None:
         root = tmp_path / "artifacts"
         mode_posix.create_private_dir(root)
