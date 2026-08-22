@@ -12,6 +12,9 @@ acl_windows）が実装する。OS分岐は本module末尾のconditional import 
   （攻撃者が緩い権限で先に作ったdirectoryをそのまま使う経路を作らない = fail closed）
 - 作成後に実効権限を**読み戻して検証**する。検証に失敗した場合はsilentに続行せず
   `FsPermissionError`とする
+- private fileはlink数が1であること（他のpathと**file実体を共有しない**こと）も要求する。
+  hard linkはpath正規化では検出できず（`resolve()`してもlink側のpathのまま）、mode /
+  owner / DACLも同じ実体から読み出されるため、権限検証だけでは素通りしてしまう
 - 「作成者のみ」の定義: POSIXは`0o700` / `0o600`かつ所有者が自分、Windowsは現userの
   単一許可ACEのみ（継承遮断）。administratorのtake ownershipで到達可能である点は
   POSIXのrootと同格の限界として受け入れる（ADR-0009）
@@ -19,6 +22,7 @@ acl_windows）が実装する。OS分岐は本module末尾のconditional import 
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -48,9 +52,24 @@ def create_private_dir(path: Path) -> None:
     _backend.create_private_dir(path)
 
 
+def _reject_shared_file_entity(path: Path) -> None:
+    """他のpathとfile実体を共有していない（hard linkでない）ことを検証する。
+
+    権限検証を通過した後に呼ぶ（存在は確認済み）。root外のfileへのhard linkは、path上は
+    隔離領域内に見えてもfile実体を共有するため、内容も権限も外部と同一になる。
+    """
+    try:
+        info = os.stat(path)
+    except OSError as error:  # pragma: no cover - 権限検証直後のstat失敗は実質起きない
+        raise FsPermissionError("verify", f"statに失敗した: {path}", error.errno) from error
+    if info.st_nlink != 1:
+        raise FsPermissionError("verify", f"fileが他のpathと実体を共有している（link数{info.st_nlink}）: {path}")
+
+
 def write_private_text(path: Path, text: str) -> None:
     """private directory内へ、作成者のみが読書きできるfileを排他的に作成する。"""
     _backend.write_private_text(path, text)
+    _reject_shared_file_entity(path)
 
 
 def verify_private_dir(path: Path) -> None:
@@ -59,5 +78,6 @@ def verify_private_dir(path: Path) -> None:
 
 
 def verify_private_file(path: Path) -> None:
-    """既存fileの実効権限が作成者限定であることを検証する（違反はerror）。"""
+    """既存fileの実効権限が作成者限定であり、実体を共有していないことを検証する。"""
     _backend.verify_private_file(path)
+    _reject_shared_file_entity(path)

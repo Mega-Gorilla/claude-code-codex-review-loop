@@ -81,14 +81,9 @@ class ReviewerHome:
     askpass_path: Path
 
     def __post_init__(self) -> None:
-        if not self.root.is_absolute() or self.root != self.root.resolve():
-            raise CredentialIsolationError("home", "reviewer homeのrootは正規化済みの絶対pathでなければならない")
-        for name, path in self._members():
-            # `..`やsymlinkは字句上の包含判定を素通りするため、実体（resolve結果）で判定する
-            if not path.is_absolute() or path != path.resolve() or not path.is_relative_to(self.root):
-                raise CredentialIsolationError("home", f"{name}がreviewer home配下の正規化済み絶対pathでない")
+        _check_containment(self)
 
-    def _members(self) -> tuple[tuple[str, Path], ...]:
+    def members(self) -> tuple[tuple[str, Path], ...]:
         """rootを除く構成要素（名前つき）。containment検証と実体検証で共有する。"""
         return (
             ("tmp_dir", self.tmp_dir),
@@ -151,8 +146,23 @@ def prepare_reviewer_home(parent: Path, name: str) -> ReviewerHome:
     return home
 
 
+def _check_containment(home: ReviewerHome) -> None:
+    """全pathがcanonicalな絶対pathで、rootの配下にあることを検証する。
+
+    `..`やsymlinkは字句上の包含判定（`is_relative_to`）を素通りしてroot外を指せるため、
+    実体（`resolve()`結果）との一致を要求する。構築時とenv配布直前の両方で実行し、
+    構築後にpathの実体が差し替えられた場合も検出する。
+    """
+    if not home.root.is_absolute() or home.root != home.root.resolve():
+        raise CredentialIsolationError("home", "reviewer homeのrootは正規化済みの絶対pathでなければならない")
+    for name, path in home.members():
+        if not path.is_absolute() or path != path.resolve() or not path.is_relative_to(home.root):
+            raise CredentialIsolationError("home", f"{name}がreviewer home配下の正規化済み絶対pathでない")
+
+
 def _verify_home(home: ReviewerHome) -> None:
-    """envを配る直前の実体検証（containmentは構築時に済み、ここではfs側の状態を見る）。"""
+    """envを配る直前の再検証（構築後に変わり得るpath実体とfs側の状態を見る）。"""
+    _check_containment(home)
     for directory in home.private_dirs:
         verify_private_dir(directory)
     verify_private_file(home.git_config_file)

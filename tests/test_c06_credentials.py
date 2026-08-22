@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -13,7 +14,9 @@ from claude_code_codex_review_loop.identity import (
     CredentialIsolationError,
     ReviewerHome,
     build_reviewer_env,
+    create_private_dir,
     prepare_reviewer_home,
+    write_private_text,
 )
 from claude_code_codex_review_loop.policy import redact
 from claude_code_codex_review_loop.policy.redaction import TOKEN_ENV_NAMES
@@ -271,3 +274,38 @@ class TestEnvBuildRevalidatesHome:
         with pytest.raises(CredentialIsolationError) as excinfo:
             build_reviewer_env({}, home)
         assert excinfo.value.stage == "home"
+
+    def test_hard_linked_git_config_is_rejected(self, tmp_path: Path) -> None:
+        """root外fileへのhard linkはpath上root内でも実体を共有するため配布前に拒否する。"""
+        home = prepare_reviewer_home(tmp_path, "reviewer-1")
+        outside_dir = tmp_path / "outside"
+        create_private_dir(outside_dir)
+        outside_file = outside_dir / "real-gitconfig"
+        write_private_text(outside_file, "[user]\n\tname = escaped-hardlink\n")
+
+        home.git_config_file.unlink()
+        try:
+            os.link(outside_file, home.git_config_file)
+        except (OSError, NotImplementedError, AttributeError):  # pragma: no cover - hard link不可の環境
+            pytest.skip("hard linkを作成できない環境")
+        # 権限・所有者・containmentはすべて正当に見える状態
+        assert home.git_config_file.is_relative_to(home.root)
+        assert home.git_config_file.read_text(encoding="utf-8").endswith("escaped-hardlink\n")
+
+        with pytest.raises(Exception) as excinfo:
+            build_reviewer_env({}, home)
+        assert "verify" in str(excinfo.value)
+
+    def test_member_replaced_by_symlink_after_construction_is_rejected(self, tmp_path: Path) -> None:
+        """構築後にpath実体を差し替えても、配布直前のcanonical再検証で検出する。"""
+        home = prepare_reviewer_home(tmp_path, "reviewer-1")
+        outside = tmp_path / "outside-config"
+        create_private_dir(outside)
+        shutil.rmtree(home.gh_config_dir)
+        try:
+            home.gh_config_dir.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - symlink不可の環境
+            pytest.skip("symlinkを作成できない環境")
+        with pytest.raises(CredentialIsolationError) as excinfo:
+            build_reviewer_env({}, home)
+        assert "gh_config_dir" in excinfo.value.detail
