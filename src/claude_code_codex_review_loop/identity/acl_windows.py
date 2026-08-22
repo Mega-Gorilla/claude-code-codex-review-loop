@@ -8,8 +8,10 @@
 P-003の趣旨と同じく構造化値で判定する）。判断の正本はADR-0009。
 
 - private directory内で作成したfileは`(OI)`継承で同じ単一ACEを持つ
-- 検証は「DACLが存在し、全ACEが現userへのACCESS_ALLOWEDである」ことを要求する。
-  DACL不在（NULL DACL）は全員アクセス可を意味するためerrorとする
+- 検証は宣言したcanonical DACLとの完全一致を要求する: DACLが存在し、ACEが**ちょうど1つ**、
+  typeがACCESS_ALLOWED、SIDが現user、maskが`FILE_ALL_ACCESS`、directoryは`(OI)(CI)`かつ
+  継承遮断（`SE_DACL_PROTECTED`）、fileは親からの継承ACE。DACL不在（NULL DACL）は
+  全員アクセス可を意味するためerrorとする
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ _SE_DACL_PROTECTED = 0x1000
 _SE_FILE_OBJECT = 1
 _DACL_SECURITY_INFORMATION = 0x00000004
 _ACCESS_ALLOWED_ACE_TYPE = 0
+_INHERITED_ACE = 0x10
 _ERROR_SUCCESS = 0
 # ACL header(8) + ACE header/mask(8) + SID(最大68)に余裕を持たせた固定長
 _ACL_BYTES = 256
@@ -163,6 +166,12 @@ _advapi32.GetAclInformation.argtypes = (wintypes.LPVOID, wintypes.LPVOID, wintyp
 _advapi32.GetAclInformation.restype = wintypes.BOOL
 _advapi32.GetAce.argtypes = (wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.LPVOID))
 _advapi32.GetAce.restype = wintypes.BOOL
+_advapi32.GetSecurityDescriptorControl.argtypes = (
+    wintypes.LPVOID,
+    ctypes.POINTER(wintypes.WORD),
+    ctypes.POINTER(wintypes.DWORD),
+)
+_advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
 
 
 @dataclass(frozen=True)
@@ -173,6 +182,14 @@ class AceSummary:
     ace_flags: int
     mask: int
     is_current_user: bool
+
+
+@dataclass(frozen=True)
+class DaclSummary:
+    """対象のDACL全体の構造化要約。protectedは親からの継承が遮断されているか。"""
+
+    protected: bool
+    aces: tuple[AceSummary, ...]
 
 
 def _current_user_sid() -> ctypes.Array[ctypes.c_uint32]:
@@ -224,8 +241,8 @@ def _owner_only_security_attributes() -> tuple[_SecurityAttributes, tuple[object
     return attributes, (sid, acl, descriptor)
 
 
-def read_dacl(path: Path) -> tuple[AceSummary, ...]:
-    """対象のDACLを構造化して読み出す（DACL不在はerror）。"""
+def read_dacl(path: Path) -> DaclSummary:
+    """対象のDACLとcontrol flagを構造化して読み出す（DACL不在はerror）。"""
     descriptor = wintypes.LPVOID()
     dacl = wintypes.LPVOID()
     status = _advapi32.GetNamedSecurityInfoW(
@@ -246,6 +263,10 @@ def read_dacl(path: Path) -> tuple[AceSummary, ...]:
         info = _AclSizeInformation()
         if not _advapi32.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), _ACL_SIZE_INFORMATION_CLASS):
             raise FsPermissionError("verify", "GetAclInformationが失敗した", _last_error())
+        control = wintypes.WORD()
+        revision = wintypes.DWORD()
+        if not _advapi32.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+            raise FsPermissionError("verify", "GetSecurityDescriptorControlが失敗した", _last_error())
         current = _current_user_sid()
         summaries: list[AceSummary] = []
         for index in range(info.AceCount):
@@ -264,20 +285,33 @@ def read_dacl(path: Path) -> tuple[AceSummary, ...]:
                     is_current_user=bool(_advapi32.EqualSid(sid_pointer, current)),
                 )
             )
-        return tuple(summaries)
+        return DaclSummary(protected=bool(control.value & _SE_DACL_PROTECTED), aces=tuple(summaries))
     finally:
         _kernel32.LocalFree(descriptor)
 
 
 def _verify(path: Path, expect_dir: bool) -> None:
+    """宣言したcanonical DACLとの完全一致を検証する（生成結果を信用せず読み戻す）。"""
     if path.is_dir() is not expect_dir:
         raise FsPermissionError("verify", f"対象の種別が期待と異なる: {path}")
-    aces = read_dacl(path)
-    if not aces:
-        raise FsPermissionError("verify", f"DACLにACEが無く作成者もアクセスできない: {path}")
-    for ace in aces:
-        if ace.ace_type != _ACCESS_ALLOWED_ACE_TYPE or not ace.is_current_user:
-            raise FsPermissionError("verify", f"作成者以外のACEを含む: {path}")
+    summary = read_dacl(path)
+    if len(summary.aces) != 1:
+        raise FsPermissionError("verify", f"DACLが現userの単一ACEでない（{len(summary.aces)}件）: {path}")
+    ace = summary.aces[0]
+    if ace.ace_type != _ACCESS_ALLOWED_ACE_TYPE or not ace.is_current_user:
+        raise FsPermissionError("verify", f"作成者以外のACEを含む: {path}")
+    if ace.mask != _FILE_ALL_ACCESS:
+        raise FsPermissionError("verify", f"ACEのaccess maskが期待と異なる: {path}")
+    if expect_dir:
+        inherit = _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE
+        if ace.ace_flags & inherit != inherit:
+            raise FsPermissionError("verify", f"ACEが子へ継承される設定でない: {path}")
+        if not summary.protected:
+            raise FsPermissionError("verify", f"DACLが親からの継承を遮断していない: {path}")
+    elif not ace.ace_flags & _INHERITED_ACE:
+        # private directory内で作成したfileは親の(OI) ACEを継承する。継承ACEでない場合、
+        # 想定した親の配下に無い（= 権限の出所が不明な）fileである
+        raise FsPermissionError("verify", f"ACEがprivate directoryからの継承でない: {path}")
 
 
 def create_private_dir(path: Path) -> None:

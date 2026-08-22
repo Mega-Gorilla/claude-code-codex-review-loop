@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""credential隔離の受入test（AC-C06-03）。実processと実gitで両OS・CIで常時実行する（R-06）。
+"""credential隔離の受入test（AC-C06-03の一部）。実process・実git・実ghで両OS・CIで常時実行する（R-06）。
 
-**Phase 6の検証境界**: ここで実証するのは「reviewer環境からGitHub write credentialへ
-到達できない（認証が構造的に成立しない）」ことまで。実GitHubへのmutation試行はnetworkを
-要するため行わず、push可能remoteを与えない保証はcheckoutを作るC-09が完成させる
-（`file://` remoteへのpushは認証なしで成功するため、Phase 6のnegative controlにならない）。
+AC-C06-03は「reviewer環境からのGitHub mutation、実repository書込、GitHub write
+credentialへの到達が、いずれも失敗する」ことを要求する。本moduleが実証するのは
+**前2者のうちGitHub mutationとcredential到達**である（いずれも認証段階で失敗し、
+requestは送出されずnetworkへ出ない）。
+
+**未充足**: 「実repository書込の失敗」はenv契約だけでは成立せず、sandboxと隔離checkout
+（C-09）が必要である。`file://` remoteへのpushは認証なしで成功するため、Phase 6の
+negative controlにもならない。この残件のためIssue #11はC-09統合まで閉じない（ADR-0009）。
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ from claude_code_codex_review_loop.process import Completed, SpawnSpec, run_tree
 
 _TIMEOUT_SECONDS = 60.0
 _GRACE_SECONDS = 2.0
+# mutation試行の対象（存在しないrepository。認証が通ってしまっても副作用を残さない）
+_MUTATION_TARGET = "Mega-Gorilla/cc-review-nonexistent-isolation-probe"
 
 
 def _run(argv: Sequence[str], *, env: Mapping[str, str], workdir: Path, tag: str) -> tuple[int, str]:
@@ -152,3 +158,51 @@ class TestGhAuthUnreachable:
         )
         # 隔離領域の外へ設定fileを作らない
         assert list(Path(env["GH_CONFIG_DIR"]).iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "argv_tail",
+        [
+            ["api", "-X", "POST", f"repos/{_MUTATION_TARGET}/issues", "-f", "title=probe"],
+            ["api", "-X", "PATCH", f"repos/{_MUTATION_TARGET}"],
+            ["api", "-X", "DELETE", f"repos/{_MUTATION_TARGET}/issues/comments/1"],
+        ],
+    )
+    def test_github_mutation_attempts_fail_before_request(self, tmp_path: Path, argv_tail: list[str]) -> None:
+        """GitHub mutationの試行が認証段階で失敗する（requestの送出前。networkへ出ない）。
+
+        隔離が破れていた場合でも実repositoryへ作用しないよう、対象は存在しない
+        repository pathにする（認証が通ってしまえば404で終わる）。
+        """
+        env, _ = _reviewer_env(tmp_path)
+        gh = shutil.which("gh")
+        assert gh is not None
+        exit_code, _ = _run([gh, *argv_tail], env=env, workdir=tmp_path, tag="ghmutate")
+        assert exit_code == 4
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="gitが無い環境（CI runnerには常備）")
+class TestChildCwdIndependence:
+    """子processのcwdがController側と異なっても、隔離先は作成した領域のまま動かない。"""
+
+    def test_config_resolution_ignores_child_cwd_decoy(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        controller_cwd = tmp_path / "controller"
+        controller_cwd.mkdir()
+        monkeypatch.chdir(controller_cwd)
+        # Controller側のcwdを起点に相対parentでhomeを作る
+        home = prepare_reviewer_home(Path("."), "reviewer-home")
+        env = build_reviewer_env(dict(os.environ), home)
+        git = shutil.which("git")
+        assert git is not None
+        _run([git, "config", "--global", "user.name", "isolated-reviewer"], env=env, workdir=controller_cwd, tag="seed")
+
+        # 子のcwd配下へ、同じ相対pathになる囮の設定を置く
+        child_cwd = tmp_path / "child"
+        decoy = child_cwd / "reviewer-home"
+        decoy.mkdir(parents=True)
+        (decoy / "gitconfig").write_text("[user]\n\tname = attacker-from-child-cwd\n", encoding="utf-8")
+
+        exit_code, stdout = _run(
+            [git, "config", "--global", "--get", "user.name"], env=env, workdir=child_cwd, tag="childcwd"
+        )
+        assert exit_code == 0
+        assert stdout.strip() == "isolated-reviewer"

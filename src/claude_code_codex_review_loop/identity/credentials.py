@@ -27,7 +27,7 @@ from typing import Final
 
 from ..policy.redaction import TOKEN_ENV_NAMES
 from .errors import IdentityError
-from .fs_permissions import create_private_dir, write_private_text
+from .fs_permissions import create_private_dir, verify_private_dir, write_private_text
 
 # 親envから複写してよい基本変数（credentialを運ばない実行基盤の変数だけ）。
 # 両OSの名前の和集合を単一listで扱い、存在しない名前は単に複写されない
@@ -54,6 +54,11 @@ class CredentialIsolationError(IdentityError):
 class ReviewerHome:
     """reviewer専用の一時領域。全構成要素は作成者限定権限で作成済み。
 
+    全pathは**絶対path**でなければならない: 相対pathをenvへ入れると、Controllerと子
+    processのcwdが異なる場合に、作成・検証した領域とは別の場所（子cwd配下）が
+    `HOME` / `GH_CONFIG_DIR` / `GIT_CONFIG_GLOBAL`として解決され、隔離契約が破れる。
+    構成要素はrootの配下に限る（containment）。手動構築経路でも構築時に検証する。
+
     askpass_pathは**存在しないpath**であり、gitが資格情報を対話取得しようとした時点で
     spawnに失敗させる（promptで待たずfail closedにする）。
     """
@@ -68,12 +73,32 @@ class ReviewerHome:
     git_config_file: Path
     askpass_path: Path
 
+    def __post_init__(self) -> None:
+        if not self.root.is_absolute():
+            raise CredentialIsolationError("home", "reviewer homeのrootは絶対pathでなければならない")
+        for name, path in (
+            ("tmp_dir", self.tmp_dir),
+            ("gh_config_dir", self.gh_config_dir),
+            ("xdg_config_dir", self.xdg_config_dir),
+            ("xdg_cache_dir", self.xdg_cache_dir),
+            ("xdg_state_dir", self.xdg_state_dir),
+            ("xdg_data_dir", self.xdg_data_dir),
+            ("git_config_file", self.git_config_file),
+            ("askpass_path", self.askpass_path),
+        ):
+            if not path.is_absolute() or not path.is_relative_to(self.root):
+                raise CredentialIsolationError("home", f"{name}がreviewer home配下の絶対pathでない")
+
 
 def prepare_reviewer_home(parent: Path, name: str) -> ReviewerHome:
-    """reviewer専用領域を作成者限定権限で作成する（既存pathはerror = fail closed）。"""
+    """reviewer専用領域を作成者限定権限で作成する（既存pathはerror = fail closed）。
+
+    parentは絶対path・symlink解決済みへ正規化してから使う（子processのcwdに依存しない
+    隔離先を固定するため）。
+    """
     if not name or name in {".", ".."} or "/" in name or "\\" in name or os.path.isabs(name):
         raise CredentialIsolationError("home", "reviewer home名は単一のpath要素でなければならない")
-    root = parent / name
+    root = Path(parent).resolve() / name
     create_private_dir(root)
     home = ReviewerHome(
         root=root,
@@ -148,7 +173,11 @@ def build_reviewer_env(
     baseからは`COPY_ENV_NAMES`だけを複写する（token変数は値を読むことすらない）。
     extraはC-09 / C-12が足す追加変数で、隔離overlayより先に適用するためoverlayを
     上書きできない。結果keyがtoken変数名と一致した場合はerror（二重防御）。
+
+    envを組む前にreviewer homeの実在と権限を再確認する（`ReviewerHome`は手動でも構築
+    できるため、隔離先が実在しない・作成者限定でない状態でenvを配らない = fail closed）。
     """
+    verify_private_dir(home.root)
     env: dict[str, str] = {}
     for name in COPY_ENV_NAMES:
         value = base.get(name)

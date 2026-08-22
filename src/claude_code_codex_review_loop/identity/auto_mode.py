@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +27,7 @@ from typing import Final
 from ..policy.permission_profile import ensure_argv_allowed
 from ..process import Completed, SpawnError, SpawnSpec, run_tree
 from .errors import IdentityError
+from .fs_permissions import create_private_dir
 
 # probe出力の機構上限（設定値ではない）。超過は「解釈できない出力」として利用不可へ倒す
 MAX_PROBE_OUTPUT_BYTES: Final = 1_048_576
@@ -72,22 +75,29 @@ def probe_auto_mode(
 
     claude_commandはargv prefix（先頭は絶対path。envが非継承でPATH解決に依存しない
     ため）。実行はC-03のrun_tree経由で、argvは`ensure_argv_allowed`を通す（P-006）。
+
+    出力は呼び出しごとに**排他作成した専用のprivate directory**へ書く。workdirの既存
+    file（symlinkを含む）をtruncateせず、並行probe同士も衝突しない。後始末は自分が
+    作成したdirectoryだけを削除する。
     """
     if not claude_command or not os.path.isabs(claude_command[0]):
         raise IdentityError("probe", "claude_commandの先頭は絶対pathでなければならない")
     argv = (*claude_command, *_PROBE_SUBCOMMAND)
     ensure_argv_allowed(argv)
-    stdout_path = workdir / "auto-mode-probe.out"
-    stderr_path = workdir / "auto-mode-probe.err"
-    spec = SpawnSpec(argv=argv, cwd=workdir, env=env, stdout_path=stdout_path, stderr_path=stderr_path)
+    probe_dir = workdir / f"auto-mode-probe-{uuid.uuid4().hex}"
+    create_private_dir(probe_dir)
     try:
-        outcome = run_tree(spec, timeout_seconds=timeout_seconds, grace_seconds=grace_seconds)
-    except SpawnError:
-        return AutoModeProbe(exit_code=None, config_json_valid=False)
-    try:
+        stdout_path = probe_dir / "stdout"
+        stderr_path = probe_dir / "stderr"
+        spec = SpawnSpec(argv=argv, cwd=workdir, env=env, stdout_path=stdout_path, stderr_path=stderr_path)
+        try:
+            outcome = run_tree(spec, timeout_seconds=timeout_seconds, grace_seconds=grace_seconds)
+        except SpawnError:
+            return AutoModeProbe(exit_code=None, config_json_valid=False)
         if not isinstance(outcome, Completed):
             return AutoModeProbe(exit_code=None, config_json_valid=False)
         return AutoModeProbe(exit_code=outcome.exit_code, config_json_valid=_read_probe_output(stdout_path))
     finally:
-        stdout_path.unlink(missing_ok=True)
-        stderr_path.unlink(missing_ok=True)
+        # 自分が作成したdirectoryのみを削除する。残存しても隔離領域内であり害はないため、
+        # 後始末の失敗でprobe結果を捨てない
+        shutil.rmtree(probe_dir, ignore_errors=True)

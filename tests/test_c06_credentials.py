@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -132,3 +133,56 @@ class TestTokenNameRegistry:
             result = redact(f"{name}=super-secret-value")
             assert "super-secret-value" not in result.text, name
             assert result.hits and result.hits[0].name == "env-assignment"
+
+
+class TestAbsolutePathContainment:
+    """相対pathは子processのcwd次第で別の場所を指すため、構築時に絶対path化・検証する。"""
+
+    def test_relative_parent_is_resolved_to_absolute(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        home = prepare_reviewer_home(Path("."), "reviewer-1")
+        assert home.root.is_absolute()
+        assert home.root == (tmp_path.resolve() / "reviewer-1")
+        env = build_reviewer_env({}, home)
+        for name in ("HOME", "GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME", "TMPDIR"):
+            assert Path(env[name]).is_absolute(), name
+
+    def test_relative_home_cannot_be_constructed(self, tmp_path: Path) -> None:
+        with pytest.raises(CredentialIsolationError) as excinfo:
+            ReviewerHome(
+                root=Path("relative-root"),
+                tmp_dir=Path("relative-root/tmp"),
+                gh_config_dir=Path("relative-root/gh-config"),
+                xdg_config_dir=Path("relative-root/config"),
+                xdg_cache_dir=Path("relative-root/cache"),
+                xdg_state_dir=Path("relative-root/state"),
+                xdg_data_dir=Path("relative-root/data"),
+                git_config_file=Path("relative-root/gitconfig"),
+                askpass_path=Path("relative-root/askpass-unavailable"),
+            )
+        assert excinfo.value.stage == "home"
+
+    def test_member_outside_root_is_rejected(self, tmp_path: Path) -> None:
+        """手動構築でも構成要素はroot配下に限る（隔離先のすり替えを防ぐ）。"""
+        root = tmp_path / "reviewer-1"
+        with pytest.raises(CredentialIsolationError) as excinfo:
+            ReviewerHome(
+                root=root,
+                tmp_dir=root / "tmp",
+                gh_config_dir=tmp_path / "outside-gh",
+                xdg_config_dir=root / "config",
+                xdg_cache_dir=root / "cache",
+                xdg_state_dir=root / "state",
+                xdg_data_dir=root / "data",
+                git_config_file=root / "gitconfig",
+                askpass_path=root / "askpass-unavailable",
+            )
+        assert "gh_config_dir" in excinfo.value.detail
+
+    def test_env_build_requires_existing_private_home(self, tmp_path: Path) -> None:
+        """隔離先が実在しない状態ではenvを配らない（fail closed）。"""
+        home = prepare_reviewer_home(tmp_path, "reviewer-1")
+        shutil.rmtree(home.root)
+        with pytest.raises(Exception) as excinfo:
+            build_reviewer_env({}, home)
+        assert "verify" in str(excinfo.value)

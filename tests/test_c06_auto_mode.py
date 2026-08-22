@@ -16,6 +16,7 @@ from claude_code_codex_review_loop.identity import (
     detect_auto_mode,
     probe_auto_mode,
 )
+from claude_code_codex_review_loop.identity import auto_mode as auto_mode_module
 from claude_code_codex_review_loop.identity.auto_mode import MAX_PROBE_OUTPUT_BYTES
 from claude_code_codex_review_loop.policy import PermissionProfile, ProfilePurpose, select_profile
 
@@ -56,10 +57,46 @@ class TestProbe:
         assert probe == AutoModeProbe(exit_code=0, config_json_valid=True)
         assert detect_auto_mode(probe) is True
 
-    def test_probe_output_files_are_cleaned_up(self, tmp_path: Path) -> None:
+    def test_probe_leaves_no_directory_behind(self, tmp_path: Path) -> None:
+        write_fake_claude(tmp_path)
+        before = set(tmp_path.iterdir())
         _probe(tmp_path, "ok")
-        assert not (tmp_path / "auto-mode-probe.out").exists()
-        assert not (tmp_path / "auto-mode-probe.err").exists()
+        assert set(tmp_path.iterdir()) == before
+
+    def test_existing_workdir_files_are_untouched(self, tmp_path: Path) -> None:
+        """出力先は呼び出しごとの専用directory。workdirの既存fileを壊さない。"""
+        victim = tmp_path / "auto-mode-probe.out"
+        victim.write_text("既存の成果物", encoding="utf-8")
+        other = tmp_path / "notes.txt"
+        other.write_text("大事なfile", encoding="utf-8")
+        probe = _probe(tmp_path, "ok")
+        assert probe.exit_code == 0
+        assert victim.read_text(encoding="utf-8") == "既存の成果物"
+        assert other.read_text(encoding="utf-8") == "大事なfile"
+
+    def test_concurrent_probes_do_not_share_output(self, tmp_path: Path) -> None:
+        """同一workdirでの連続probeが互いの出力先を共有しない。"""
+        script = write_fake_claude(tmp_path)
+        env = child_env()
+        env["CC_REVIEW_FAKE_CLAUDE_MODE"] = "ok"
+        seen: set[str] = set()
+        real_create = auto_mode_module.create_private_dir
+
+        def _record(path: Path) -> None:
+            seen.add(path.name)
+            real_create(path)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(auto_mode_module, "create_private_dir", _record)
+            for _ in range(3):
+                probe_auto_mode(
+                    (sys.executable, str(script)),
+                    workdir=tmp_path,
+                    env=env,
+                    timeout_seconds=30.0,
+                    grace_seconds=1.0,
+                )
+        assert len(seen) == 3
 
     def test_failure_exit_code_is_preserved(self, tmp_path: Path) -> None:
         probe = _probe(tmp_path, "fail")
