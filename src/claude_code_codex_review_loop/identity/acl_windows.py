@@ -42,6 +42,12 @@ _SE_FILE_OBJECT = 1
 _DACL_SECURITY_INFORMATION = 0x00000004
 _ACCESS_ALLOWED_ACE_TYPE = 0
 _INHERITED_ACE = 0x10
+# directoryのACEは自分自身へ適用され、かつ子（file / directory）へ継承される形だけを許す。
+# INHERIT_ONLY（0x8）はACEを対象自身へ適用せず、NO_PROPAGATE_INHERIT（0x4）は孫への
+# 継承を止めるため、いずれもprivate storageの保証を崩す。完全一致で拒否する
+_DIRECTORY_ACE_FLAGS = _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE
+# private directory内のfileは、親の(OI) ACEを継承した形（INHERITEDのみ）になる
+_FILE_ACE_FLAGS = _INHERITED_ACE
 _ERROR_SUCCESS = 0
 # ACL header(8) + ACE header/mask(8) + SID(最大68)に余裕を持たせた固定長
 _ACL_BYTES = 256
@@ -303,15 +309,14 @@ def _verify(path: Path, expect_dir: bool) -> None:
     if ace.mask != _FILE_ALL_ACCESS:
         raise FsPermissionError("verify", f"ACEのaccess maskが期待と異なる: {path}")
     if expect_dir:
-        inherit = _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE
-        if ace.ace_flags & inherit != inherit:
-            raise FsPermissionError("verify", f"ACEが子へ継承される設定でない: {path}")
+        if ace.ace_flags != _DIRECTORY_ACE_FLAGS:
+            raise FsPermissionError("verify", f"ACEの継承flagが期待と異なる: {path}")
         if not summary.protected:
             raise FsPermissionError("verify", f"DACLが親からの継承を遮断していない: {path}")
-    elif not ace.ace_flags & _INHERITED_ACE:
-        # private directory内で作成したfileは親の(OI) ACEを継承する。継承ACEでない場合、
-        # 想定した親の配下に無い（= 権限の出所が不明な）fileである
-        raise FsPermissionError("verify", f"ACEがprivate directoryからの継承でない: {path}")
+    elif ace.ace_flags != _FILE_ACE_FLAGS:
+        # private directory内で作成したfileは親の(OI) ACEを継承する。それ以外のflag構成は
+        # 権限の出所が想定と異なる（継承元が別、または対象自身へ適用されない）
+        raise FsPermissionError("verify", f"ACEの継承flagが期待と異なる: {path}")
 
 
 def create_private_dir(path: Path) -> None:

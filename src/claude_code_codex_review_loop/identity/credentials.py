@@ -27,7 +27,12 @@ from typing import Final
 
 from ..policy.redaction import TOKEN_ENV_NAMES
 from .errors import IdentityError
-from .fs_permissions import create_private_dir, verify_private_dir, write_private_text
+from .fs_permissions import (
+    create_private_dir,
+    verify_private_dir,
+    verify_private_file,
+    write_private_text,
+)
 
 # 親envから複写してよい基本変数（credentialを運ばない実行基盤の変数だけ）。
 # 両OSの名前の和集合を単一listで扱い、存在しない名前は単に複写されない
@@ -54,10 +59,12 @@ class CredentialIsolationError(IdentityError):
 class ReviewerHome:
     """reviewer専用の一時領域。全構成要素は作成者限定権限で作成済み。
 
-    全pathは**絶対path**でなければならない: 相対pathをenvへ入れると、Controllerと子
-    processのcwdが異なる場合に、作成・検証した領域とは別の場所（子cwd配下）が
-    `HOME` / `GH_CONFIG_DIR` / `GIT_CONFIG_GLOBAL`として解決され、隔離契約が破れる。
-    構成要素はrootの配下に限る（containment）。手動構築経路でも構築時に検証する。
+    全pathは**canonical（正規化済み・symlink解決済み）な絶対path**でなければならない:
+    相対pathをenvへ入れると、Controllerと子processのcwdが異なる場合に、作成・検証した
+    領域とは別の場所（子cwd配下）が`HOME` / `GH_CONFIG_DIR` / `GIT_CONFIG_GLOBAL`として
+    解決され、隔離契約が破れる。また`..`やsymlinkを含むpathは字句上rootの配下に見えても
+    実体はroot外を指し得るため、**正規化した実体で**containmentを判定する。手動構築
+    経路でも構築時に検証する。
 
     askpass_pathは**存在しないpath**であり、gitが資格情報を対話取得しようとした時点で
     spawnに失敗させる（promptで待たずfail closedにする）。
@@ -74,9 +81,16 @@ class ReviewerHome:
     askpass_path: Path
 
     def __post_init__(self) -> None:
-        if not self.root.is_absolute():
-            raise CredentialIsolationError("home", "reviewer homeのrootは絶対pathでなければならない")
-        for name, path in (
+        if not self.root.is_absolute() or self.root != self.root.resolve():
+            raise CredentialIsolationError("home", "reviewer homeのrootは正規化済みの絶対pathでなければならない")
+        for name, path in self._members():
+            # `..`やsymlinkは字句上の包含判定を素通りするため、実体（resolve結果）で判定する
+            if not path.is_absolute() or path != path.resolve() or not path.is_relative_to(self.root):
+                raise CredentialIsolationError("home", f"{name}がreviewer home配下の正規化済み絶対pathでない")
+
+    def _members(self) -> tuple[tuple[str, Path], ...]:
+        """rootを除く構成要素（名前つき）。containment検証と実体検証で共有する。"""
+        return (
             ("tmp_dir", self.tmp_dir),
             ("gh_config_dir", self.gh_config_dir),
             ("xdg_config_dir", self.xdg_config_dir),
@@ -85,9 +99,20 @@ class ReviewerHome:
             ("xdg_data_dir", self.xdg_data_dir),
             ("git_config_file", self.git_config_file),
             ("askpass_path", self.askpass_path),
-        ):
-            if not path.is_absolute() or not path.is_relative_to(self.root):
-                raise CredentialIsolationError("home", f"{name}がreviewer home配下の絶対pathでない")
+        )
+
+    @property
+    def private_dirs(self) -> tuple[Path, ...]:
+        """作成者限定であることを要求するdirectory全体。"""
+        return (
+            self.root,
+            self.tmp_dir,
+            self.gh_config_dir,
+            self.xdg_config_dir,
+            self.xdg_cache_dir,
+            self.xdg_state_dir,
+            self.xdg_data_dir,
+        )
 
 
 def prepare_reviewer_home(parent: Path, name: str) -> ReviewerHome:
@@ -124,6 +149,16 @@ def prepare_reviewer_home(parent: Path, name: str) -> ReviewerHome:
     # 壊れるため実fileを使う。ADR-0009）
     write_private_text(home.git_config_file, "")
     return home
+
+
+def _verify_home(home: ReviewerHome) -> None:
+    """envを配る直前の実体検証（containmentは構築時に済み、ここではfs側の状態を見る）。"""
+    for directory in home.private_dirs:
+        verify_private_dir(directory)
+    verify_private_file(home.git_config_file)
+    # symlink自体の存在も検出する（実体の無いsymlinkはexists()がFalseになる）
+    if os.path.lexists(home.askpass_path):
+        raise CredentialIsolationError("home", "askpass pathが存在する（対話的な資格情報取得が成立し得る）")
 
 
 def _isolation_overlay(home: ReviewerHome) -> dict[str, str]:
@@ -174,10 +209,11 @@ def build_reviewer_env(
     extraはC-09 / C-12が足す追加変数で、隔離overlayより先に適用するためoverlayを
     上書きできない。結果keyがtoken変数名と一致した場合はerror（二重防御）。
 
-    envを組む前にreviewer homeの実在と権限を再確認する（`ReviewerHome`は手動でも構築
-    できるため、隔離先が実在しない・作成者限定でない状態でenvを配らない = fail closed）。
+    envを組む前にreviewer homeの全不変条件を再確認する（`ReviewerHome`は手動でも構築
+    でき、fs側の状態は構築後にも変わり得るため。隔離先が実在しない・作成者限定でない・
+    askpassが存在する状態ではenvを配らない = fail closed）。
     """
-    verify_private_dir(home.root)
+    _verify_home(home)
     env: dict[str, str] = {}
     for name in COPY_ENV_NAMES:
         value = base.get(name)

@@ -18,6 +18,8 @@ _ACCESS_ALLOWED_ACE_TYPE = 0
 _OBJECT_INHERIT_ACE = 0x1
 _CONTAINER_INHERIT_ACE = 0x2
 _INHERITED_ACE = 0x10
+_NO_PROPAGATE_INHERIT_ACE = 0x4
+_INHERIT_ONLY_ACE = 0x8
 _FILE_ALL_ACCESS = 0x1F01FF
 # 「Everyone」well-known SID（表示名はlocaleで変わるためSIDで指定する）
 _EVERYONE_SID = "*S-1-1-0"
@@ -203,6 +205,11 @@ def _summary(**overrides: object) -> object:
         {"mask": 0x1},
         {"ace_flags": 0},  # 子へ継承されない
         {"ace_flags": _OBJECT_INHERIT_ACE},  # container継承が欠ける
+        # 余分なflagも拒否する: INHERIT_ONLYはACEを当該directory自身へ適用せず、
+        # NO_PROPAGATE_INHERITは孫への継承を止める
+        {"ace_flags": _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE | _INHERIT_ONLY_ACE},
+        {"ace_flags": _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE | _NO_PROPAGATE_INHERIT_ACE},
+        {"ace_flags": _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE | _INHERITED_ACE},
         {"protected": False},  # 親からの継承を遮断していない
         {"ace_type": 1},  # ACCESS_DENIED
         {"is_current_user": False},
@@ -220,13 +227,24 @@ def test_verify_rejects_non_canonical_dacl(
     assert excinfo.value.stage == "verify"
 
 
-def test_verify_file_requires_inherited_ace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """fileはprivate directoryからの継承ACEであることを要求する（出所不明の権限を拒否）。"""
+@pytest.mark.parametrize(
+    "ace_flags",
+    [
+        0,  # 継承ACEでない（出所不明の権限）
+        _INHERITED_ACE | _INHERIT_ONLY_ACE,  # 対象自身へ適用されない
+        _INHERITED_ACE | _OBJECT_INHERIT_ACE,  # fileに継承flagが付く構成は想定外
+        _INHERITED_ACE | _NO_PROPAGATE_INHERIT_ACE,
+    ],
+)
+def test_verify_file_requires_exact_inherited_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ace_flags: int
+) -> None:
+    """fileはprivate directoryからの継承ACE（INHERITEDのみ）であることを完全一致で要求する。"""
     root = tmp_path / "artifacts"
     acl_windows.create_private_dir(root)
     note = root / "notes.txt"
     acl_windows.write_private_text(note, "x")
-    monkeypatch.setattr(acl_windows, "read_dacl", lambda path: _summary(ace_flags=0), raising=True)
+    monkeypatch.setattr(acl_windows, "read_dacl", lambda path: _summary(ace_flags=ace_flags), raising=True)
     with pytest.raises(FsPermissionError) as excinfo:
         acl_windows.verify_private_file(note)
     assert excinfo.value.stage == "verify"

@@ -186,3 +186,88 @@ class TestAbsolutePathContainment:
         with pytest.raises(Exception) as excinfo:
             build_reviewer_env({}, home)
         assert "verify" in str(excinfo.value)
+
+    def test_parent_traversal_member_is_rejected(self, tmp_path: Path) -> None:
+        """`..`を含むpathは字句上root配下に見えても実体はroot外を指すため拒否する。"""
+        root = tmp_path / "reviewer-1"
+        with pytest.raises(CredentialIsolationError) as excinfo:
+            ReviewerHome(
+                root=root,
+                tmp_dir=root / "tmp",
+                gh_config_dir=root / "gh-config",
+                xdg_config_dir=root / "config",
+                xdg_cache_dir=root / "cache",
+                xdg_state_dir=root / "state",
+                xdg_data_dir=root / "data",
+                git_config_file=root / ".." / "outside-gitconfig",
+                askpass_path=root / "askpass-unavailable",
+            )
+        assert "git_config_file" in excinfo.value.detail
+
+    def test_non_canonical_root_is_rejected(self, tmp_path: Path) -> None:
+        base = tmp_path / "base"
+        base.mkdir()
+        root = base / ".." / "base" / "reviewer-1"
+        with pytest.raises(CredentialIsolationError) as excinfo:
+            ReviewerHome(
+                root=root,
+                tmp_dir=root / "tmp",
+                gh_config_dir=root / "gh-config",
+                xdg_config_dir=root / "config",
+                xdg_cache_dir=root / "cache",
+                xdg_state_dir=root / "state",
+                xdg_data_dir=root / "data",
+                git_config_file=root / "gitconfig",
+                askpass_path=root / "askpass-unavailable",
+            )
+        assert excinfo.value.stage == "home"
+
+    def test_symlinked_member_is_rejected(self, tmp_path: Path) -> None:
+        """symlink経由でroot外へ抜けるmemberも実体判定で拒否する。"""
+        home = prepare_reviewer_home(tmp_path, "reviewer-1")
+        outside = tmp_path / "outside-config"
+        outside.mkdir()
+        link = home.root / "linked-config"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):  # pragma: no cover - symlink不可の環境
+            pytest.skip("symlinkを作成できない環境")
+        with pytest.raises(CredentialIsolationError) as excinfo:
+            ReviewerHome(
+                root=home.root,
+                tmp_dir=home.tmp_dir,
+                gh_config_dir=link,
+                xdg_config_dir=home.xdg_config_dir,
+                xdg_cache_dir=home.xdg_cache_dir,
+                xdg_state_dir=home.xdg_state_dir,
+                xdg_data_dir=home.xdg_data_dir,
+                git_config_file=home.git_config_file,
+                askpass_path=home.askpass_path,
+            )
+        assert "gh_config_dir" in excinfo.value.detail
+
+
+class TestEnvBuildRevalidatesHome:
+    """envを配る直前に、fs側の状態（実在・権限・askpass不在）を再検証する。"""
+
+    def test_missing_member_directory_is_rejected(self, tmp_path: Path) -> None:
+        home = prepare_reviewer_home(tmp_path, "reviewer-1")
+        shutil.rmtree(home.gh_config_dir)
+        with pytest.raises(Exception) as excinfo:
+            build_reviewer_env({}, home)
+        assert "verify" in str(excinfo.value)
+
+    def test_missing_git_config_file_is_rejected(self, tmp_path: Path) -> None:
+        home = prepare_reviewer_home(tmp_path, "reviewer-1")
+        home.git_config_file.unlink()
+        with pytest.raises(Exception) as excinfo:
+            build_reviewer_env({}, home)
+        assert "verify" in str(excinfo.value)
+
+    def test_existing_askpass_is_rejected(self, tmp_path: Path) -> None:
+        """askpassが存在すると対話的な資格情報取得が成立し得るため配らない。"""
+        home = prepare_reviewer_home(tmp_path, "reviewer-1")
+        home.askpass_path.write_text("#!/bin/sh\necho secret\n", encoding="utf-8")
+        with pytest.raises(CredentialIsolationError) as excinfo:
+            build_reviewer_env({}, home)
+        assert excinfo.value.stage == "home"
