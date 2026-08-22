@@ -88,6 +88,9 @@ _SECTIONS: dict[str, Field] = {
     "conversation": obj(
         {
             "cursor": _optional_opaque(),
+            # high_water_markはPhase 6（C-06）のadditive追加: 確認済み最大sequence `N`
+            # （AC-C06-07。既知recordの再構成はseq付きrecords entryから行う）
+            "high_water_mark": integer(required=False),
             "records": Field(
                 types=(list,),
                 required=False,
@@ -98,6 +101,10 @@ _SECTIONS: dict[str, Field] = {
                         # thread操作の再開用にcomment IDと種別を分離して保持する）
                         "review_id": _optional_opaque(),
                         "thread_id": _optional_opaque(),
+                        # seq / kindはPhase 6（C-06）のadditive追加: chain checkpointの
+                        # 既知record（KnownRecord）をseq付きentryから再構成する
+                        "seq": integer(required=False),
+                        "kind": _optional_text(),
                         "url": _optional_opaque(),
                         "reply_to": _optional_opaque(),
                         "body_hash": _optional_opaque(),
@@ -173,6 +180,10 @@ _SECTIONS: dict[str, Field] = {
             "codex_position": _optional_text(),
             "user_answer": _optional_text(),
             "answer_head_sha": _optional_sha(),
+            # answer_comment_id / answer_body_hashはPhase 6（C-06）のadditive追加:
+            # GitHub直接comment経路（external evidence）の失効照合用（ADR-0008）
+            "answer_comment_id": _optional_opaque(),
+            "answer_body_hash": _optional_opaque(),
         },
         required=False,
     ),
@@ -226,6 +237,11 @@ _SECTIONS: dict[str, Field] = {
             "approved_head_sha": _optional_sha(),
             "input_route": _optional_text(),
             "approval_comment_id": _optional_opaque(),
+            # approval_body_hash / candidate_fingerprint / approval_bindingはPhase 6
+            # （C-06）のadditive追加: 承認bind情報（D-031。編集・削除・head変更の失効照合用）
+            "approval_body_hash": _optional_opaque(),
+            "candidate_fingerprint": _optional_opaque(),
+            "approval_binding": _optional_opaque(),
             "merge_method": _optional_text(),
             "api_result": _optional_text(),
             "merged_commit_sha": _optional_sha(),
