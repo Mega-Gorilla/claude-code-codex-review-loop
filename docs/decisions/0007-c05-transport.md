@@ -55,6 +55,10 @@ implementation planはC-05を「未検証のGitHub metadataの取得・投稿・
 - C-01の`PersistRecord`（冪等な永続化）は`ensure_comment_posted` / `ensure_thread_reply`がそのまま実装になる。C-05はC-01 eventのproducerにならない（VERIFIED系はC-06が生成する）
 - fake gh（P-011）は`--include`形式・exit code・`-F body=@file`のfile読みを実仕様どおり模倣し、全ACをlive接続なしで検証する
 
+## 追補（2026-08-23、ADR-0010）
+
+決定1の許可key集合を拡張する。markerは**構造key**（`key` / `kind` / `run` / `head` / `seq` / `prev`）に加えて、C-02が定義する**projection key**（`res` / `round` / `turn` / `fp` / `sid` / `tgt` / `pay` / `dig` / `cnt`）を持てる。projection keyの値は検証済みpayloadに実在するfieldの射影に限り、語彙もschemaの`enum`をそのまま使う。値の型（str / int）と2048 byte上限は変更しない。key集合の正本は`schema/projection.py`であり、C-05は許可key・型・上限だけを見る責務のまま変わらない（ADR-0010 決定1〜7）。
+
 ## 実装への反映
 
 `src/claude_code_codex_review_loop/errors.py`、`src/claude_code_codex_review_loop/transport/`（gh / marker / render / conversation / threads）、`tests/c05_support/`（fake gh）、`tests/test_c05_*.py`が本ADRを実装する。

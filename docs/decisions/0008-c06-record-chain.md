@@ -50,6 +50,12 @@ implementation planはC-06を「C-05が取得した未検証metadataから検証
 
 21. `conversation`sectionへ`high_water_mark`（int）、`records[]`へ`seq`（int）/ `kind`（text）を追加する。既知recordの再構成（`KnownRecord`）は**seq付きentryのみ**を対象とし、Phase 5以前のseqなしentryはchain checkpointに関与しない。`decision`sectionへ`answer_comment_id` / `answer_body_hash`、`merge`sectionへ`approval_body_hash` / `candidate_fingerprint` / `approval_binding`を追加する（承認bind情報。すべてoptional、version bumpなし）
 
+## 追補（2026-08-23、ADR-0010）
+
+条件2（非正規marker）の判定範囲へ、projectionの正規性を含める。`_parse_chain_payload`は構造的canonical判定（許可key・canonical encoding・末尾1行・型・kind）を行った後、`decode_record_projection`（C-02）へ委譲し、失敗理由をそのまま条件2の根拠にする。判定対象は「そのkindが持たないprojection key」「必須projection keyの欠如」「値の型・形式違反」「`res`が語彙に無い」である。chain hash（`prev` = marker込み全body hash）の意味論は変わらず、projectionもhash chainに覆われる。
+
+`compose_record_marker_payload`はprojection引数を受け取り、構造keyの上書きと2048 byte上限超過を拒否する。markerの`key`はADR-0010の`derive_record_binding`が導出するrecord bindingと同一値である。
+
 ## Consequences
 
 - C-08はrecord投稿時に`compose_record_marker_payload`で`seq` / `prev`を構成し、C-07はresume時に`verify_record_chain`の`is_intact`をgateにする。chain specの変更は本ADRの改訂を要する

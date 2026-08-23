@@ -7,7 +7,7 @@ import json
 
 import pytest
 from c01_support.helpers import to_waiting_ci
-from c06_support.helpers import HEAD, RUN, chain_bodies, chain_comments, make_comment
+from c06_support.helpers import HEAD, RUN, chain_bodies, chain_comments, make_comment, marker_payload
 
 from claude_code_codex_review_loop.domain import State, transition
 from claude_code_codex_review_loop.domain import events as ev
@@ -27,6 +27,7 @@ from claude_code_codex_review_loop.identity import (
     verify_record_chain,
 )
 from claude_code_codex_review_loop.identity.record_chain import _parse_chain_payload
+from claude_code_codex_review_loop.schema.projection import DecodedProjection
 from claude_code_codex_review_loop.transport.conversation import UnverifiedComment, body_hash_of
 from claude_code_codex_review_loop.transport.marker import attach_marker
 
@@ -87,19 +88,49 @@ class TestCheckpointConstruction:
 class TestComposePayload:
     def test_round_trip_with_parser(self) -> None:
         """composeした payloadはparserで同値へ戻る（producerとverifierの共有規約）。"""
-        payload = compose_record_marker_payload(
-            key="turn-2", kind=RecordKind.FIX_RESULT, run_id=RUN, head_sha=HEAD, seq=2, prev_body_hash="e" * 64
-        )
+        payload = marker_payload(kind=RecordKind.FIX_RESULT, seq=2, prev="e" * 64)
         comment = make_comment(1, attach_marker("body", payload))
         parsed = _parse_chain_payload(comment)
         assert parsed == ChainPayload(
-            key="turn-2", kind=RecordKind.FIX_RESULT, run=RUN, head=HEAD, seq=2, prev="e" * 64
+            key=str(payload["key"]),
+            kind=RecordKind.FIX_RESULT,
+            run=RUN,
+            head=HEAD,
+            seq=2,
+            prev="e" * 64,
+            projection=DecodedProjection(payload_hash=str(payload["pay"])),
         )
 
     def test_empty_key_is_rejected(self) -> None:
         with pytest.raises(IdentityError):
             compose_record_marker_payload(
                 key="", kind=RecordKind.REVIEW_RESULT, run_id=RUN, head_sha=HEAD, seq=1, prev_body_hash=None
+            )
+
+    def test_projection_cannot_override_structural_keys(self) -> None:
+        """意味情報の射影が識別・順序・連結のkeyを書き換えられない（ADR-0010）。"""
+        with pytest.raises(IdentityError, match="構造key"):
+            compose_record_marker_payload(
+                key="k",
+                kind=RecordKind.REVIEW_RESULT,
+                run_id=RUN,
+                head_sha=HEAD,
+                seq=1,
+                prev_body_hash=None,
+                projection={"run": "other-run"},
+            )
+
+    def test_oversized_projection_is_rejected(self) -> None:
+        """markerが本文の代替へ肥大化する方向を、本文render前に塞ぐ。"""
+        with pytest.raises(IdentityError, match="上限byte数"):
+            compose_record_marker_payload(
+                key="k",
+                kind=RecordKind.REVIEW_RESULT,
+                run_id=RUN,
+                head_sha=HEAD,
+                seq=1,
+                prev_body_hash=None,
+                projection={"sid": "x" * 2100},
             )
 
     def test_seq_below_one_is_rejected(self) -> None:
@@ -259,9 +290,7 @@ class TestSevenConditions:
 
     def test_6_reorder_chain_mismatch(self) -> None:
         first = chain_comments(1)[0]
-        forged_payload = compose_record_marker_payload(
-            key="turn-2", kind=RecordKind.REVIEW_RESULT, run_id=RUN, head_sha=HEAD, seq=2, prev_body_hash="e" * 64
-        )
+        forged_payload = marker_payload(seq=2, prev="e" * 64)
         second = make_comment(1002, attach_marker("record 2", forged_payload))
         verification = _verify((first, second))
         violation = self._single(verification, f"iv:chain:{RUN}:s00000002")
@@ -368,9 +397,7 @@ class TestDuplicateCanonical:
         assert tuple(record.comment_id for record in verification.records) == ("999",)
 
     def test_conflicting_duplicate_is_violation(self) -> None:
-        genesis = compose_record_marker_payload(
-            key="turn-1", kind=RecordKind.REVIEW_RESULT, run_id=RUN, head_sha=HEAD, seq=1, prev_body_hash=None
-        )
+        genesis = marker_payload(seq=1)
         first = make_comment(1001, attach_marker("正のrecord", genesis))
         second = make_comment(1002, attach_marker("差し替えられたrecord", genesis))
         verification = _verify((first, second))
@@ -425,7 +452,9 @@ class TestVerifiedRecords:
         verification = _verify(comments)
         assert verification.is_intact
         record = verification.records[1]
-        assert (record.seq, record.kind, record.key) == (2, RecordKind.REVIEW_RESULT, "turn-2")
+        expected_key = marker_payload(seq=2, prev=body_hash_of(comments[0].body))["key"]
+        assert (record.seq, record.kind, record.key) == (2, RecordKind.REVIEW_RESULT, expected_key)
+        assert record.projection.result == "CHANGES_REQUESTED" and record.projection.round == 1
         assert record.comment_id == "1002" and record.author_login == "controller-bot"
         assert record.head_sha == HEAD and record.body_hash == body_hash_of(comments[1].body)
         assert record.url == comments[1].url and record.created_at == comments[1].created_at

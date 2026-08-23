@@ -8,6 +8,9 @@
 genesis（seq=1）はprevの欠如が正規形式で、sentinelを使わない。prevが前recordのmarker行
 （そのseq / prev）を推移的に被覆するため、並べ替え・差し替えがhash照合で検出できる。
 
+構造keyに加えて、C-02が定義するprojection key（検証済みpayloadからのscalar射影。ADR-0010）
+を持つ。projectionの正規性判定は`decode_record_projection`へ委譲し、失敗は条件2として扱う。
+
 検出する7条件（実装plan Section 5のthreat model表）:
 
 1. 不正actor: producer allowlistと完全一致しないactorのchain record投稿（`iv:actor:`）
@@ -44,6 +47,7 @@ from ..domain.values import (
     canonicalize_integrity,
 )
 from ..errors import ErrorCategory
+from ..schema.projection import DecodedProjection, decode_record_projection
 from ..transport.conversation import UnverifiedComment, get_issue_comment
 from ..transport.gh import GhApiError, GhContext, RepoRef, RetryPolicy
 from ..transport.marker import (
@@ -51,6 +55,7 @@ from ..transport.marker import (
     MARKER_TOKEN,
     MARKER_VERSION,
     MAX_PAYLOAD_BYTES,
+    STRUCTURAL_PAYLOAD_KEYS,
 )
 from .actor import ActorClass, resolve_actor
 from .allowlist import ProducerAllowlist
@@ -102,6 +107,7 @@ class ChainPayload:
     head: str
     seq: int
     prev: str | None
+    projection: DecodedProjection
 
 
 @dataclass(frozen=True)
@@ -118,6 +124,7 @@ class VerifiedRecord:
     author_login: str
     head_sha: str
     created_at: str
+    projection: DecodedProjection
 
 
 @dataclass(frozen=True)
@@ -154,8 +161,14 @@ def compose_record_marker_payload(
     head_sha: str,
     seq: int,
     prev_body_hash: str | None,
+    projection: Mapping[str, str | int] | None = None,
 ) -> dict[str, str | int]:
-    """chain recordのmarker payloadを合成する（`attach_marker`へ渡す形。ADR-0008）。"""
+    """chain recordのmarker payloadを合成する（`attach_marker`へ渡す形。ADR-0008）。
+
+    projectionはC-02の`build_record_projection`が作る意味情報の射影で、構造keyを
+    上書きできない。合成後のpayloadが上限byte数を超える場合はここで停止する
+    （本文をrenderする前に落とし、markerが本文の代替へ肥大化する方向を塞ぐ）。
+    """
     for name, value in (("key", key), ("run", run_id), ("head", head_sha)):
         if not value:
             raise IdentityError("compose", f"{name}は空にできない")
@@ -174,6 +187,13 @@ def compose_record_marker_payload(
         if _HASH_PATTERN.fullmatch(prev_body_hash) is None:
             raise IdentityError("compose", "prevはSHA-256 hex（64桁小文字）でなければならない")
         payload["prev"] = prev_body_hash
+    for projection_key, projection_value in (projection or {}).items():
+        if projection_key in STRUCTURAL_PAYLOAD_KEYS:
+            raise IdentityError("compose", f"projectionは構造keyを上書きできない: {projection_key}")
+        payload[projection_key] = projection_value
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if len(encoded.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        raise IdentityError("compose", "marker payloadが上限byte数を超える")
     return payload
 
 
@@ -219,6 +239,10 @@ def _parse_chain_payload(comment: UnverifiedComment) -> ChainPayload | str:
         kind = RecordKind(values["kind"])
     except ValueError:
         return "markerのkindが未知の種別"
+    # 意味情報（projection）の正規性判定はC-02へ委譲する（定義を1箇所に保つ。ADR-0010）
+    projection = decode_record_projection(kind, payload)
+    if isinstance(projection, str):
+        return projection
     return ChainPayload(
         key=values["key"],
         kind=kind,
@@ -226,6 +250,7 @@ def _parse_chain_payload(comment: UnverifiedComment) -> ChainPayload | str:
         head=values["head"],
         seq=seq,
         prev=prev if isinstance(prev, str) else None,
+        projection=projection,
     )
 
 
@@ -464,6 +489,7 @@ def verify_record_chain(
             author_login=candidate.author_login,
             head_sha=candidate.payload.head,
             created_at=candidate.comment.created_at,
+            projection=candidate.payload.projection,
         )
         for seq, candidate in sorted(reliable.items())
         if seq not in chain_broken and candidate.comment.comment_id not in tampered_ids

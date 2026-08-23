@@ -25,6 +25,20 @@ from .merge import (
     MERGE_OUTCOME,
 )
 from .migrate import load_with_migration
+from .projection import (
+    PROJECTION_KEYS,
+    PROJECTION_SPECS,
+    DecodedProjection,
+    ProjectionError,
+    ProjectionSpec,
+    build_record_projection,
+    canonical_payload_hash,
+    canonical_set_digest,
+    decode_record_projection,
+    derive_record_binding,
+    result_vocabulary,
+    schema_kind_of,
+)
 from .records import (
     BLOCK_INTERVENTION,
     CI_CODE_FAILURE,
@@ -93,6 +107,18 @@ REGISTRY: dict[SchemaKind, SchemaDefinition] = build_registry(_DEFINITIONS)
 
 __all__ = [
     "build_registry",
+    "PROJECTION_KEYS",
+    "PROJECTION_SPECS",
+    "DecodedProjection",
+    "ProjectionError",
+    "ProjectionSpec",
+    "build_record_projection",
+    "canonical_payload_hash",
+    "canonical_set_digest",
+    "decode_record_projection",
+    "derive_record_binding",
+    "result_vocabulary",
+    "schema_kind_of",
     "HOST_ACTION_KINDS",
     "REGISTRY",
     "Field",
