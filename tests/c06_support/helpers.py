@@ -55,9 +55,14 @@ def make_comment(
     )
 
 
-def record_projection(kind: RecordKind = RecordKind.REVIEW_RESULT, *, head: str = HEAD) -> dict[str, str | int]:
-    """kindのrepresentative payloadから作るprojection（C-02の製品関数を使う）。"""
-    return build_record_projection(kind, record_payload(kind, head_sha=head), head_sha=head)
+def record_projection(
+    kind: RecordKind = RecordKind.REVIEW_RESULT, *, head: str = HEAD, body: str = "record"
+) -> dict[str, str | int]:
+    """kindのrepresentative payloadから作るprojection（C-02の製品関数を使う）。
+
+    bodyはmarker付加前の公開本文で、`pay`の入力になる（ADR-0010）。
+    """
+    return build_record_projection(kind, record_payload(kind, head_sha=head), head_sha=head, body=body)
 
 
 def marker_payload(
@@ -67,9 +72,10 @@ def marker_payload(
     head: str = HEAD,
     seq: int,
     prev: str | None = None,
+    body: str = "record",
 ) -> dict[str, str | int]:
     """正規marker payload（projection付き。keyは製品側の導出関数で決まる）。"""
-    projection = record_projection(kind, head=head)
+    projection = record_projection(kind, head=head, body=body)
     key = derive_record_binding(
         run_id=run_id, seq=seq, kind=kind, head_sha=head, payload_hash=str(projection["pay"])
     )
@@ -99,8 +105,9 @@ def chain_bodies(
     bodies: list[str] = []
     prev: str | None = None
     for seq in range(1, count + 1):
-        payload = marker_payload(kind=kind, run_id=run_id, head=head, seq=seq, prev=prev)
-        body = attach_marker(f"record {seq}", payload)
+        text = f"record {seq}"
+        payload = marker_payload(kind=kind, run_id=run_id, head=head, seq=seq, prev=prev, body=text)
+        body = attach_marker(text, payload)
         bodies.append(body)
         prev = body_hash_of(body)
     return bodies

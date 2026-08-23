@@ -452,7 +452,7 @@ class TestVerifiedRecords:
         verification = _verify(comments)
         assert verification.is_intact
         record = verification.records[1]
-        expected_key = marker_payload(seq=2, prev=body_hash_of(comments[0].body))["key"]
+        expected_key = marker_payload(seq=2, prev=body_hash_of(comments[0].body), body="record 2")["key"]
         assert (record.seq, record.kind, record.key) == (2, RecordKind.REVIEW_RESULT, expected_key)
         assert record.projection.result == "CHANGES_REQUESTED" and record.projection.round == 1
         assert record.comment_id == "1002" and record.author_login == "controller-bot"

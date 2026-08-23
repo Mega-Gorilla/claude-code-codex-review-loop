@@ -12,9 +12,11 @@ GitHubへ永続化される機械情報はmarker payloadだけで、公開本文
   すべて既存schemaのfieldの写しで、語彙もschemaのenumをそのまま使う
 - list値はcanonical digest（sorted unique）と要素数だけを載せ、内容は公開本文と
   local artifactへ置く。artifactはpayload hash（`pay`）へbindして照合する
-- payload hashはmarker付加より**前**の入力（検証済みpayload）だけから決まる。したがって
-  record binding（= idempotency key）の導出がbody hashへ依存せず、
-  `key -> marker -> body hash -> key`の循環にならない
+- semantic payload hash（`pay`）はmarker付加より**前**の入力（検証済みpayload・射影・
+  render済み公開本文）だけから決まる。したがってrecord binding（= idempotency key）の
+  導出がbody hashへ依存せず、`key -> marker -> body hash -> key`の循環にならない
+- `pay`は本文を入力に含むため、**同一keyのrecordは同一本文**である（同一payloadを別の
+  本文へrenderすれば別key）。C-05のsearch-first（key一致 AND body hash一致）と整合する
 - 検証はschemaのvalidatorを再利用する。projection側で意味的fieldを捏造しない
 """
 
@@ -80,7 +82,6 @@ _SHA_PATTERN: Final = re.compile(r"[0-9a-f]{40}\Z")
 # record bindingへ埋め込むrun IDの文字集合（`:`区切りのbindingを一意に読めるようにする）
 _RUN_ID_PATTERN: Final = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
 BINDING_PREFIX: Final = "cr:"
-_BINDING_DIGEST_CHARS: Final = 16
 
 
 class ProjectionError(Exception):
@@ -234,8 +235,37 @@ def canonical_json(value: object) -> str:
 
 
 def canonical_payload_hash(payload: Mapping[str, object]) -> str:
-    """検証済みpayloadのcanonical encodingのSHA-256 hex（`pay`の値）。"""
+    """検証済みpayloadのcanonical encodingのSHA-256 hex。"""
     return hashlib.sha256(canonical_json(dict(payload)).encode("utf-8")).hexdigest()
+
+
+def normalize_body_for_hash(body: str) -> str:
+    """hash対象の公開本文（marker付加時に埋め込まれる形と同一の正規化）。
+
+    `attach_marker`は改行正規化済み本文の末尾改行を落としてmarker行を足すため、
+    同じ正規化を行えばGitHub上のrecord本文からmarker行を除いた文字列と一致する
+    （local artifactの照合が成立する）。transport側との一致はtestで常設検証する。
+    """
+    return body.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+
+
+def semantic_payload_hash(
+    *, body: str, payload: Mapping[str, object], projection: Mapping[str, str | int]
+) -> str:
+    """`pay`の値: 公開本文・検証済みpayload・射影を覆うSHA-256 hex。
+
+    marker付加**前**に確定する3つの入力だけから決まる（`pay`自身は入力に含まない）。
+    payload hashを含めるのは、local artifact（完全payload）をGitHub上のrecordへ
+    bindできるようにするため（ADR-0010 決定13）。
+    """
+    material = canonical_json(
+        {
+            "body": normalize_body_for_hash(body),
+            "payload": canonical_payload_hash(payload),
+            "projection": dict(projection),
+        }
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def canonical_set_digest(values: Sequence[str]) -> tuple[str, int]:
@@ -256,12 +286,15 @@ def result_vocabulary(kind: RecordKind) -> tuple[str, ...] | None:
 
 
 def build_record_projection(
-    kind: RecordKind, payload: Mapping[str, object], *, head_sha: str
+    kind: RecordKind, payload: Mapping[str, object], *, head_sha: str, body: str
 ) -> dict[str, str | int]:
     """検証済みpayloadからmarker projectionを構築する（未検証payloadは受理しない）。
 
     `head_sha`はmarkerの`head`に載る値で、payloadの対象head fieldと一致しなければ
     errorにする（markerと本文の対象headが食い違うrecordを作らせない）。
+
+    `body`は**sanitize -> redact -> render後・marker attach前**の公開本文で、`pay`の
+    入力になる。同一payloadを別の本文へrenderしたrecordは別のbinding（= key）を持つ。
     """
     spec = PROJECTION_SPECS.get(kind)
     if spec is None:  # pragma: no cover - 全RecordKindを登録済み（testで常設検証する）
@@ -273,7 +306,7 @@ def build_record_projection(
         raise ProjectionError(f"payloadがschema検証を通らない（stage={result.stage}, codes={codes}）")
     if spec.head_source is not None and data.get(spec.head_source) != head_sha:
         raise ProjectionError(f"payloadの{spec.head_source}がmarkerのheadと一致しない")
-    projection: dict[str, str | int] = {PAYLOAD_HASH_KEY: canonical_payload_hash(data)}
+    projection: dict[str, str | int] = {}
     for field in spec.fields:
         if field.source not in data:
             if field.required:
@@ -281,8 +314,9 @@ def build_record_projection(
             continue
         value = data[field.source]
         if field.key in _INTEGER_KEYS:
-            if not isinstance(value, int) or isinstance(value, bool):
-                raise ProjectionError(f"{field.source}はintでなければならない")
+            # 1始まりはdecode側の制約と揃える（builderだけが通す値を作らない）
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ProjectionError(f"{field.source}は1以上のintでなければならない")
         elif not isinstance(value, str) or not value:
             raise ProjectionError(f"{field.source}は非空のstrでなければならない")
         projection[field.key] = value
@@ -293,6 +327,7 @@ def build_record_projection(
         digest, count = canonical_set_digest(values)
         projection[DIGEST_KEY] = digest
         projection[COUNT_KEY] = count
+    projection[PAYLOAD_HASH_KEY] = semantic_payload_hash(body=body, payload=data, projection=projection)
     return projection
 
 
@@ -303,6 +338,9 @@ def derive_record_binding(
 
     引数はいずれもmarker付加**前**に確定する値で、body hashを受け取れない。これにより
     `key -> marker -> body hash -> key`の循環が型として成立しない（ADR-0010）。
+
+    digestは切り詰めない（record identity・idempotency key・block参照に使う値であり、
+    短縮digestのchosen-input衝突耐性ではADRの「衝突不在」を支えられない）。
     """
     if _RUN_ID_PATTERN.fullmatch(run_id) is None:
         raise ProjectionError("run IDは英数字と`.` `_` `-`のみ（64字以内）でなければならない")
@@ -315,7 +353,7 @@ def derive_record_binding(
     material = canonical_json(
         {"head": head_sha, "kind": kind.value, "pay": payload_hash, "run": run_id, "seq": seq}
     )
-    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:_BINDING_DIGEST_CHARS]
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
     return f"{BINDING_PREFIX}{run_id}:{seq:08d}:{digest}"
 
 

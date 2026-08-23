@@ -26,20 +26,24 @@ resumeは「GitHub canonical conversationからstateを再構築し、local chec
 3. **list値は内容を載せない**。正規化（sorted unique）した集合のdigestと要素数だけを載せ、内容は公開本文とlocal artifactへ置く。`INTEGRITY_INCIDENT.violation_bindings`が最初の利用者で、violation集合自体はresumeのたびにC-06のchain検証で再導出するため、markerはbindingとしてのdigestで足りる
 4. **markerが本文の代替へ育つ方向を塞ぐ**。projection追加後のmarker payloadが2048 byte上限（ADR-0007 決定1）を超える場合は、本文をrenderする前に`compose_record_marker_payload`が停止する。「載せたい値が増えたらcapに当たる」構造にして、projectionの肥大化を設計段階で失敗させる
 5. **構造keyを上書きできない**。projectionは`key` / `kind` / `run` / `head` / `seq` / `prev`を書き換えられない（識別・順序・連結の意味をprojectionが侵さない）
-6. **markerのheadとpayloadの対象headの一致を要求する**。`build_record_projection`はkindごとの対象head field（`target_head_sha` / `pushed_head_sha` / `approved_head_sha`）とmarkerの`head`が一致しない限りprojectionを作らない
-7. **projectionの正規性判定はC-02が持つ**。C-06の`_parse_chain_payload`は構造的canonical判定（許可key・canonical encoding・末尾1行・型）を行った後、`decode_record_projection`へ委譲し、失敗を**条件2（非正規marker）**として扱う。判定の定義を2箇所へ分散させない
+6. **builderとdecoderの制約を一致させる**。`round` / `turn` / `cnt`は1始まりで、C-02 schemaが許す`0`や負数もbuilderが拒否する（builderだけが通す値を作らず、build -> decodeを往復させる）。
+7. **markerのheadとpayloadの対象headの一致を要求する**。`build_record_projection`はkindごとの対象head field（`target_head_sha` / `pushed_head_sha` / `approved_head_sha`）とmarkerの`head`が一致しない限りprojectionを作らない
+8. **projectionの正規性判定はC-02が持つ**。C-06の`_parse_chain_payload`は構造的canonical判定（許可key・canonical encoding・末尾1行・型）を行った後、`decode_record_projection`へ委譲し、失敗を**条件2（非正規marker）**として扱う。判定の定義を2箇所へ分散させない
 
 ### payload hashとbinding導出
 
-8. `pay` = 検証済みpayloadのcanonical encoding（sorted keys / compact separators / UTF-8）のSHA-256 hex。**markerより前に確定する入力だけ**から決まる
-9. **record binding = markerの`key` = idempotency key**（同一値、変換規則を持たない）。`OpaqueBinding`の採番はC-06 / C-08と定義済みで（`domain/values.py`）、`PersistRecord(kind, binding)`が既に冪等identityを持つ以上、markerのkeyを別namespaceにする理由がない。同一化により、C-05の検索predicate（key一致 AND body hash一致）がそのままdomainのbinding一致になる
-10. 導出は`cr:{run}:{seq:08d}:{16 hex}`で、hexは`{run, seq, kind, head, pay}`のcanonical encodingのSHA-256前16桁。**`derive_record_binding`はbody hashを引数に取れない**（signatureが循環を型として排除する）。run IDは`[A-Za-z0-9._-]{1,64}`に限り、`:`区切りのbindingを一意に読めるようにする
-11. 適用範囲はControllerが投稿するrecordのみ。GitHubへ直接入力されたuser record（D-021）はmarkerを持たず、bindingはC-06の`ud:`導出（Phase 6実装済み）のままとする
+9. `pay`（semantic payload hash）= **公開本文・検証済みpayload・射影の3つ**を覆うSHA-256 hex。入力は`{"body": 正規化済み公開本文, "payload": payloadのcanonical hash, "projection": `pay`を除く射影}`のcanonical encodingで、いずれも**markerより前に確定する**。
+   - **本文を含める理由**: 含めないと、同一payloadを別の本文へrenderしたrecordが同一key・異なるbody hashになる。C-05のsearch-firstはkey一致 **AND** body hash一致を要求するため既存recordを発見できず再投稿し、C-06は同一seqの異なる`(key, body_hash)`をseq conflictとして`BLOCKED`にする。本文を含めることで「同一key ⇒ 同一本文」が成立する
+   - **payload hashを含める理由**: 射影は損失のある部分集合であり、これが無いとlocal artifact（完全payload）をGitHub上のrecordへbindできない（決定14）
+   - **正規化**: 改行をLFへ揃え、末尾改行を落とす（`attach_marker`が埋め込む形と同一）。GitHub上のrecord本文からmarker行を除いた文字列がそのままhash対象になり、消費側が再計算できる
+10. **record binding = markerの`key` = idempotency key**（同一値、変換規則を持たない）。`OpaqueBinding`の採番はC-06 / C-08と定義済みで（`domain/values.py`）、`PersistRecord(kind, binding)`が既に冪等identityを持つ以上、markerのkeyを別namespaceにする理由がない。同一化により、C-05の検索predicate（key一致 AND body hash一致）がそのままdomainのbinding一致になる
+11. 導出は`cr:{run}:{seq:08d}:{64 hex}`で、hexは`{run, seq, kind, head, pay}`のcanonical encodingのSHA-256（**切り詰めない**。record identity・idempotency key・block参照に使う値であり、短縮digestのchosen-input衝突耐性では本ADRが掲げる衝突不在を支えられない）。**`derive_record_binding`はbody hashを引数に取れない**（signatureが循環を型として排除する）。run IDは`[A-Za-z0-9._-]{1,64}`に限り、`:`区切りのbindingを一意に読めるようにする
+12. 適用範囲はControllerが投稿するrecordのみ。GitHubへ直接入力されたuser record（D-021）はmarkerを持たず、bindingはC-06の`ud:`導出（Phase 6実装済み）のままとする
 
 ### crash windowとlocal artifact（Phase 7後続PRへの前提）
 
-12. **pending recordのtransaction値をcheckpointへ保存する**。同一`seq`で再composeした結果がbyte一致しないと、search-firstが既存recordを見つけられずC-06の重複検出（seq conflict）でBLOCKEDになる。したがって投稿前・投稿成否不明で中断したrecordは、binding・`pay`・render済み本文・seq・headをlocal checkpointへ保存し、resumeは**同一keyで**再発行する（決定9と併せてAC-C07-02の重複投稿防止が構造的に成立する）
-13. **local artifactはrecordへbindする**。artifactは「`pay` + head SHA + comment ID + body hash」へbindし、不一致なら破棄する（canonicalへ昇格させない）。完全payloadの置き場はlocal artifactであり、GitHubへ載せるのはprojectionだけ
+13. **pending recordのtransaction値をcheckpointへ保存する**。同一`seq`で再composeした結果がbyte一致しないと、search-firstが既存recordを見つけられずC-06の重複検出（seq conflict）でBLOCKEDになる。したがって投稿前・投稿成否不明で中断したrecordは、binding・`pay`・render済み本文・seq・headをlocal checkpointへ保存し、resumeは**同一keyで**再発行する（決定10と併せてAC-C07-02の重複投稿防止が構造的に成立する）
+14. **local artifactはrecordへbindする**。artifactは「`pay` + head SHA + comment ID + body hash」へbindし、不一致なら破棄する（canonicalへ昇格させない）。完全payloadの置き場はlocal artifactであり、GitHubへ載せるのはprojectionだけ
 
 ## Consequences
 

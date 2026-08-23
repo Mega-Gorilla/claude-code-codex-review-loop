@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 from c02_support.helpers import REPRESENTATIVE, record_payload
+from c06_support.helpers import marker_payload
 
 from claude_code_codex_review_loop.domain.values import RecordKind
 from claude_code_codex_review_loop.schema import REGISTRY, SchemaKind
@@ -37,9 +38,13 @@ from claude_code_codex_review_loop.schema.projection import (
     canonical_set_digest,
     decode_record_projection,
     derive_record_binding,
+    normalize_body_for_hash,
     result_vocabulary,
     schema_kind_of,
+    semantic_payload_hash,
 )
+from claude_code_codex_review_loop.transport.marker import attach_marker
+from claude_code_codex_review_loop.transport.render import normalize_newlines
 
 HEAD = "a" * 40
 RUN = "run-1"
@@ -53,8 +58,11 @@ _ATTRIBUTE: dict[str, str] = {
 }
 
 
-def _projection(kind: RecordKind, *, head: str = HEAD) -> dict[str, str | int]:
-    return build_record_projection(kind, record_payload(kind, head_sha=head), head_sha=head)
+BODY = "公開本文"
+
+
+def _projection(kind: RecordKind, *, head: str = HEAD, body: str = BODY) -> dict[str, str | int]:
+    return build_record_projection(kind, record_payload(kind, head_sha=head), head_sha=head, body=body)
 
 
 class TestSpecIntegrity:
@@ -99,10 +107,14 @@ class TestRoundTrip:
     @pytest.mark.parametrize("kind", list(RecordKind), ids=lambda k: k.value)
     def test_build_then_decode_is_identity(self, kind: RecordKind) -> None:
         payload = record_payload(kind, head_sha=HEAD)
-        projection = build_record_projection(kind, payload, head_sha=HEAD)
+        projection = build_record_projection(kind, payload, head_sha=HEAD, body=BODY)
         decoded = decode_record_projection(kind, projection)
         assert isinstance(decoded, DecodedProjection)
-        assert decoded.payload_hash == canonical_payload_hash(payload)
+        # 消費側（local artifactの照合）と同じ手順で再計算する: `pay`自身は入力に含まない
+        without_pay = {key: value for key, value in projection.items() if key != PAYLOAD_HASH_KEY}
+        assert decoded.payload_hash == semantic_payload_hash(
+            body=BODY, payload=payload, projection=without_pay
+        )
         for field in PROJECTION_SPECS[kind].fields:
             if field.source in payload:
                 assert getattr(decoded, _ATTRIBUTE[field.key]) == payload[field.source]
@@ -125,7 +137,7 @@ class TestRoundTrip:
 
     def test_integrity_incident_projects_set_digest(self) -> None:
         payload = record_payload(RecordKind.INTEGRITY_INCIDENT, head_sha=HEAD)
-        projection = build_record_projection(RecordKind.INTEGRITY_INCIDENT, payload, head_sha=HEAD)
+        projection = build_record_projection(RecordKind.INTEGRITY_INCIDENT, payload, head_sha=HEAD, body=BODY)
         bindings = payload["violation_bindings"]
         assert isinstance(bindings, list)
         digest, count = canonical_set_digest([str(item) for item in bindings])
@@ -135,7 +147,7 @@ class TestRoundTrip:
         payload = dict(REPRESENTATIVE[SchemaKind.DECISION_VERDICT])
         payload["target_head_sha"] = HEAD
         payload.pop("fingerprint", None)
-        projection = build_record_projection(RecordKind.DECISION_VERDICT, payload, head_sha=HEAD)
+        projection = build_record_projection(RecordKind.DECISION_VERDICT, payload, head_sha=HEAD, body=BODY)
         assert FINGERPRINT_KEY not in projection
         decoded = decode_record_projection(RecordKind.DECISION_VERDICT, projection)
         assert isinstance(decoded, DecodedProjection) and decoded.fingerprint is None
@@ -163,13 +175,13 @@ class TestBuildRejections:
         payload = dict(REPRESENTATIVE[SchemaKind.REVIEW_RESULT])
         del payload["verdict"]
         with pytest.raises(ProjectionError, match="schema検証"):
-            build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha=HEAD)
+            build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha=HEAD, body=BODY)
 
     def test_head_mismatch_is_rejected(self) -> None:
         """markerのheadとpayloadの対象headが食い違うrecordを作らせない。"""
         payload = record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD)
         with pytest.raises(ProjectionError, match="target_head_sha"):
-            build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha="b" * 40)
+            build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha="b" * 40, body=BODY)
 
     def test_required_source_missing_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """specが必須と宣言したfieldがpayloadに無ければ、markerを作らず停止する。"""
@@ -181,7 +193,7 @@ class TestBuildRejections:
         payload = record_payload(RecordKind.DECISION_VERDICT, head_sha=HEAD)
         payload.pop("fingerprint", None)
         with pytest.raises(ProjectionError, match="fingerprint"):
-            build_record_projection(RecordKind.DECISION_VERDICT, payload, head_sha=HEAD)
+            build_record_projection(RecordKind.DECISION_VERDICT, payload, head_sha=HEAD, body=BODY)
 
     def test_integer_key_bound_to_text_field_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         spec = ProjectionSpec(
@@ -190,7 +202,9 @@ class TestBuildRejections:
         monkeypatch.setitem(PROJECTION_SPECS, RecordKind.REVIEW_RESULT, spec)
         with pytest.raises(ProjectionError, match="int"):
             build_record_projection(
-                RecordKind.REVIEW_RESULT, record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD), head_sha=HEAD
+                RecordKind.REVIEW_RESULT, record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD),
+                head_sha=HEAD,
+                body=BODY,
             )
 
     def test_text_key_bound_to_integer_field_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,7 +214,9 @@ class TestBuildRejections:
         monkeypatch.setitem(PROJECTION_SPECS, RecordKind.REVIEW_RESULT, spec)
         with pytest.raises(ProjectionError, match="str"):
             build_record_projection(
-                RecordKind.REVIEW_RESULT, record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD), head_sha=HEAD
+                RecordKind.REVIEW_RESULT, record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD),
+                head_sha=HEAD,
+                body=BODY,
             )
 
     def test_digest_source_must_be_string_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,7 +228,61 @@ class TestBuildRejections:
                 RecordKind.INTEGRITY_INCIDENT,
                 record_payload(RecordKind.INTEGRITY_INCIDENT, head_sha=HEAD),
                 head_sha=HEAD,
+                body=BODY,
             )
+
+
+class TestBodyBinding:
+    """`pay`が公開本文を覆うこと（同一key = 同一本文）。ADR-0010 決定8。"""
+
+    def test_same_payload_different_body_yields_different_binding(self) -> None:
+        payload = record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD)
+        first = build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha=HEAD, body="本文A")
+        second = build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha=HEAD, body="本文B")
+        assert first[PAYLOAD_HASH_KEY] != second[PAYLOAD_HASH_KEY]
+        arguments = {"run_id": RUN, "seq": 1, "kind": RecordKind.REVIEW_RESULT, "head_sha": HEAD}
+        assert derive_record_binding(payload_hash=str(first[PAYLOAD_HASH_KEY]), **arguments) != (
+            derive_record_binding(payload_hash=str(second[PAYLOAD_HASH_KEY]), **arguments)
+        )
+
+    def test_same_body_and_payload_is_stable(self) -> None:
+        payload = record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD)
+        first = build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha=HEAD, body=BODY)
+        second = build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha=HEAD, body=BODY)
+        assert first == second
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [("a\r\nb", "a\nb"), ("a\rb", "a\nb"), ("a\n\n", "a")],
+        ids=["crlf", "cr", "trailing_newlines"],
+    )
+    def test_body_normalization_matches_marker_attachment(self, left: str, right: str) -> None:
+        """hash対象の正規化がattach_markerの埋め込み形と一致する（transportとの整合）。"""
+        assert normalize_body_for_hash(left) == normalize_body_for_hash(right)
+
+    def test_hashed_body_is_recoverable_from_the_posted_record(self) -> None:
+        """GitHub上の本文からmarker行を除いた文字列が、hash対象と一致する。"""
+        text = "本文\r\n末尾\n\n"
+        payload = marker_payload(seq=1, body=text)
+        posted = attach_marker(normalize_newlines(text), payload)
+        marker_line = posted[posted.rindex("\n\n<!-- ") :]
+        assert posted[: -len(marker_line)] == normalize_body_for_hash(text)
+
+    def test_payload_hash_excludes_itself(self) -> None:
+        """`pay`は自身を入力に含まない（消費側が同じ手順で再計算できる）。"""
+        payload = record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD)
+        projection = build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha=HEAD, body=BODY)
+        without_pay = {key: value for key, value in projection.items() if key != PAYLOAD_HASH_KEY}
+        assert projection[PAYLOAD_HASH_KEY] == semantic_payload_hash(
+            body=BODY, payload=payload, projection=without_pay
+        )
+
+    @pytest.mark.parametrize("value", [0, -1], ids=["zero", "negative"])
+    def test_non_positive_counter_is_rejected_by_builder(self, value: int) -> None:
+        """schema上は妥当でも、decoderが受理しない値をbuilderが作らない（往復の一致）。"""
+        payload = dict(record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD), round=value)
+        with pytest.raises(ProjectionError, match="1以上"):
+            build_record_projection(RecordKind.REVIEW_RESULT, payload, head_sha=HEAD, body=BODY)
 
 
 class TestBindingDerivation:
@@ -230,6 +300,11 @@ class TestBindingDerivation:
     def test_is_deterministic(self) -> None:
         assert self._binding() == self._binding()
         assert self._binding().startswith(f"{BINDING_PREFIX}{RUN}:00000001:")
+
+    def test_digest_is_not_truncated(self) -> None:
+        """record identityのdigestを切り詰めない（衝突耐性を短縮で下げない）。"""
+        digest = self._binding().rsplit(":", 1)[1]
+        assert len(digest) == 64 and set(digest) <= set("0123456789abcdef")
 
     @pytest.mark.parametrize(
         "override",
