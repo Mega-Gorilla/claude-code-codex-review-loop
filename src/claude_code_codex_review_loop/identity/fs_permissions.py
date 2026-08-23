@@ -40,6 +40,24 @@ class FsPermissionError(IdentityError):
         self.os_error = os_error
 
 
+def write_all(descriptor: int, data: bytes, path: Path) -> None:
+    """fd全体へ書き切る（`os.write`のpartial writeを成功扱いにしない）。
+
+    `os.write`は例外を出さずに要求より少ないbyte数を返し得る。戻り値を無視すると、
+    短く書かれたfileがそのままfsync・`os.replace`され、atomic replaceの
+    「旧内容か**完全な**新内容」という契約が破れる（ADR-0011）。
+    """
+    written = 0
+    while written < len(data):
+        try:
+            count = os.write(descriptor, data[written:])
+        except OSError as error:
+            raise FsPermissionError("write", f"fileへ書き込めない: {path}", error.errno) from error
+        if count <= 0:
+            raise FsPermissionError("write", f"fileへ書き進められない: {path}")
+        written += count
+
+
 if sys.platform == "win32":  # pragma: no cover - OS dispatch(単一分岐点。各backendは自OSのCIで検証する)
     from . import acl_windows
 
@@ -73,6 +91,31 @@ def write_private_text(path: Path, text: str) -> None:
     """private directory内へ、作成者のみが読書きできるfileを排他的に作成する。"""
     _backend.write_private_text(path, text)
     _reject_shared_file_entity(path)
+
+
+def publish_private_text(path: Path, text: str) -> bool:
+    """内容を書き切ってから**原子的かつ排他的に**publishする（lockの取得経路）。
+
+    `O_CREAT | O_EXCL`での直接作成は「作成」と「書込」の間に空のfileが見えるため、
+    別processが読むと内容の無いfileを観測してしまう（lockでは破損と区別できない）。
+    一時fileへ全内容を書いてから`os.link`で公開すると、他processからは
+    「存在しない」か「完全な内容」のどちらかしか見えず、既存pathがあればlinkが
+    失敗するので排他性も保てる（ADR-0011）。
+
+    publishできた場合はTrue、既にpathが存在する場合はFalseを返す。
+    """
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.new"
+    write_private_text(temporary, text)
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        return False
+    except OSError as error:
+        raise FsPermissionError("publish", f"fileを公開できない: {path}", error.errno) from error
+    finally:
+        temporary.unlink(missing_ok=True)
+    verify_private_file(path)
+    return True
 
 
 def replace_private_text(path: Path, text: str) -> None:

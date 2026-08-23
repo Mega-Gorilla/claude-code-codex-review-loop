@@ -16,7 +16,7 @@ from claude_code_codex_review_loop.identity import (
     verify_private_file,
     write_private_text,
 )
-from claude_code_codex_review_loop.identity.fs_permissions import replace_private_text
+from claude_code_codex_review_loop.identity.fs_permissions import publish_private_text, replace_private_text
 
 
 class TestExclusiveCreation:
@@ -156,3 +156,85 @@ class TestReplacePrivateText:
         replace_private_text(target, "new")
         assert target.read_text(encoding="utf-8") == "new"
         verify_private_file(target)
+
+class TestPartialWrite:
+    """`os.write`のpartial writeを成功扱いにしない（ADR-0011 決定1）。"""
+
+    def test_short_write_is_completed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """1回のwriteが短くても、全byteを書き切ってから確定する。"""
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "checkpoint.json"
+        real_write = os.write
+
+        def _short_write(descriptor: int, data: bytes) -> int:
+            return real_write(descriptor, data[:1])
+
+        monkeypatch.setattr(fs_permissions.os, "write", _short_write)
+        text = "x" * 100
+        write_private_text(target, text)
+        assert target.read_text(encoding="utf-8") == text
+
+    def test_failed_write_leaves_no_partial_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """途中で書けなくなった場合、短い内容のfileを残さない。"""
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "checkpoint.json"
+
+        def _stalled_write(descriptor: int, data: bytes) -> int:
+            return 0
+
+        monkeypatch.setattr(fs_permissions.os, "write", _stalled_write)
+        with pytest.raises(FsPermissionError, match="書き進められない"):
+            write_private_text(target, "x" * 100)
+        assert not target.exists()
+
+    def test_write_error_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "checkpoint.json"
+
+        def _failing_write(descriptor: int, data: bytes) -> int:
+            raise OSError(28, "no space left")
+
+        monkeypatch.setattr(fs_permissions.os, "write", _failing_write)
+        with pytest.raises(FsPermissionError, match="書き込めない"):
+            write_private_text(target, "x")
+        assert not target.exists()
+
+class TestPublishPrivateText:
+    """原子的かつ排他的なpublish（lockの取得経路。ADR-0011 決定17）。"""
+
+    def test_publishes_complete_content(self, tmp_path: Path) -> None:
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "run.lock"
+        assert publish_private_text(target, "content") is True
+        assert target.read_text(encoding="utf-8") == "content"
+        verify_private_file(target)
+        assert [entry.name for entry in directory.iterdir()] == [target.name]
+
+    def test_existing_path_is_not_overwritten(self, tmp_path: Path) -> None:
+        """既存pathがあればlinkが失敗し、内容を保ったままFalseを返す（排他性）。"""
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "run.lock"
+        write_private_text(target, "first")
+        assert publish_private_text(target, "second") is False
+        assert target.read_text(encoding="utf-8") == "first"
+        assert [entry.name for entry in directory.iterdir()] == [target.name]
+
+    def test_link_failure_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """link自体の失敗（EEXIST以外）は成功と推測せずerrorにする。"""
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "run.lock"
+
+        def _fail(source: object, destination: object) -> None:
+            raise OSError(1, "operation not permitted")
+
+        monkeypatch.setattr(fs_permissions.os, "link", _fail)
+        with pytest.raises(FsPermissionError, match="公開できない"):
+            publish_private_text(target, "content")
+        assert not target.exists()
+        assert list(directory.iterdir()) == []

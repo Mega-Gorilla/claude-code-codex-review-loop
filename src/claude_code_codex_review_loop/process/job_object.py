@@ -47,6 +47,7 @@ _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
 _ERROR_FILE_NOT_FOUND = 2
 _ERROR_ACCESS_DENIED = 5
+_WAIT_OBJECT_0 = 0x00000000
 _WAIT_TIMEOUT = 0x00000102
 _ERROR_BAD_LENGTH = 24
 _ERROR_ALREADY_EXISTS = 183
@@ -171,7 +172,8 @@ def is_process_alive(pid: int) -> bool:
     """pidのprocessが生存しているか（handleのsignal状態で判定する）。
 
     exit codeの`STILL_ACTIVE`（259）は正当な終了codeとしても現れ得るため、
-    `WaitForSingleObject`のtimeoutで判定する（handleがsignal済み = 終了）。
+    `WaitForSingleObject`で判定する。**明確にsignal済み（`WAIT_OBJECT_0`）の場合だけ
+    「不在」**とし、`WAIT_FAILED`や未知の戻り値は曖昧として生存扱いにする。
     OpenProcessが権限不足で失敗した場合は「存在するが触れない」であり**生存扱い**に
     する（stale lockの回収可否では、迷ったら回収しない側が安全）。pidの再利用も
     生存と誤判定し得るが、同じく回収しない側へ倒れる（ADR-0011）。
@@ -180,7 +182,7 @@ def is_process_alive(pid: int) -> bool:
     if not handle:
         return _last_error() == _ERROR_ACCESS_DENIED
     try:
-        return bool(_kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT)
+        return bool(_kernel32.WaitForSingleObject(handle, 0) != _WAIT_OBJECT_0)
     finally:
         _close_handle(handle)
 

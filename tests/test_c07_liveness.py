@@ -61,3 +61,14 @@ def test_other_open_failure_is_not_alive(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(job_object._kernel32, "OpenProcess", lambda access, inherit, pid: 0)
     monkeypatch.setattr(job_object, "_last_error", lambda: 87)
     assert is_process_alive(os.getpid()) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows backendの分岐")
+def test_wait_failure_is_treated_as_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`WAIT_FAILED`や未知の戻り値を「不在」に倒さない（回収しない側へ倒す）。"""
+    from claude_code_codex_review_loop.process import job_object
+
+    monkeypatch.setattr(
+        job_object._kernel32, "WaitForSingleObject", lambda handle, timeout: 0xFFFFFFFF
+    )
+    assert is_process_alive(os.getpid()) is True

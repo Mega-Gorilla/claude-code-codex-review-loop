@@ -27,7 +27,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
-from .fs_permissions import FsPermissionError
+from .fs_permissions import FsPermissionError, write_all
 
 _TOKEN_QUERY = 0x0008
 _TOKEN_USER_CLASS = 1
@@ -334,10 +334,15 @@ def write_private_text(path: Path, text: str) -> None:
     except OSError as error:
         raise FsPermissionError("create_file", f"fileを作成できない: {path}", error.errno) from error
     try:
-        os.write(descriptor, text.encode("utf-8"))
+        write_all(descriptor, text.encode("utf-8"), path)
         # 作成も置換も耐久性を持たせる（checkpointのatomic replaceの前提）
         os.fsync(descriptor)
-    finally:
+    except BaseException:
+        # 書き切れなかったfileを残さない（短い内容がreplaceされるのを防ぐ）
+        os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
+    else:
         os.close(descriptor)
     _verify(path, expect_dir=False)
 
