@@ -24,6 +24,22 @@ from typing import Final
 _L = r"(?<![0-9A-Za-z_])"
 _R = r"(?![0-9A-Za-z_])"
 
+# credentialを運ぶ環境変数名の正本。redactionのenv-assignment patternと、C-06の
+# reviewer env denylist（identity/credentials.py）が同じ集合を参照し、片方だけが
+# 更新されるdriftを防ぐ（test_c06_credentials.pyが両者の一致を常設検証する）
+TOKEN_ENV_NAMES: Final[tuple[str, ...]] = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENAI_KEY",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+)
+
 
 @dataclass(frozen=True)
 class RedactionPattern:
@@ -103,8 +119,9 @@ REDACTION_PATTERNS: Final[tuple[RedactionPattern, ...]] = (
         "env-assignment",
         re.compile(
             _L
-            + r"(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN"
-            + r"|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENAI_KEY|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)"
+            + r"(?:"
+            + "|".join(TOKEN_ENV_NAMES)
+            + r")"
             + r"[\"']?\s*[=:]\s*"
             + r"(?:\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|\"[^\r\n]*|'[^\r\n]*|(?!\$\{)\S+)"
         ),

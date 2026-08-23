@@ -56,12 +56,12 @@ jobs:
         shell: bash
         run: |
           floor=$(python -c "import tomllib; print(tomllib.load(open('quality-baseline.toml','rb'))['coverage']['floor'])")
-          # C-03のOS専用backendは自OSのjobでのみ実行できるため、異OS側moduleだけを
+          # C-03 / C-06のOS専用backendは自OSのjobでのみ実行できるため、異OS側moduleだけを
           # report対象から除外する（floor値は変更しない）。CONTRIBUTING「品質ゲートの運用」を参照。
           if [ "$RUNNER_OS" = "Windows" ]; then
-            omit="*/process/process_group.py"
+            omit="*/process/process_group.py,*/identity/mode_posix.py"
           else
-            omit="*/process/job_object.py"
+            omit="*/process/job_object.py,*/identity/acl_windows.py"
           fi
           python -m coverage report --fail-under="$floor" --omit="$omit"
 
