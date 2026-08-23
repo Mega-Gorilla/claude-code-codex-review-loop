@@ -50,6 +50,7 @@ from .records import (
 from .registry import SchemaDefinition, SchemaKind, validate_object
 from .report import FINAL_REPORT
 from .review import CLARIFICATION_ANSWER, CLARIFICATION_QUESTION, FIX_RESULT, REVIEW_RESULT
+from .validate import is_integer_token
 
 # markerへ載せるprojection key（構造key `key` / `kind` / `run` / `head` / `seq` / `prev`とは別）
 RESULT_KEY: Final = "res"
@@ -299,6 +300,8 @@ def build_record_projection(
     spec = PROJECTION_SPECS.get(kind)
     if spec is None:  # pragma: no cover - 全RecordKindを登録済み（testで常設検証する）
         raise ProjectionError(f"projection specが未登録のkind: {kind.value}")
+    if not isinstance(body, str):
+        raise ProjectionError("bodyはstrでなければならない")
     data = dict(payload)
     result = validate_object(RECORD_DEFINITIONS[kind], data)
     if not result.ok:
@@ -341,14 +344,21 @@ def derive_record_binding(
 
     digestは切り詰めない（record identity・idempotency key・block参照に使う値であり、
     短縮digestのchosen-input衝突耐性ではADRの「衝突不在」を支えられない）。
+
+    identityの入口として、型もruntimeで検証する（型注釈だけに依存しない）。`bool`は
+    Pythonでは`int`のsubclassであり、`float` / `str`はformat・比較の段階で
+    `ProjectionError`以外のexceptionを漏らすため、C-02の`is_integer_token`
+    （JSON integer意味論）で先に拒否する。
     """
-    if _RUN_ID_PATTERN.fullmatch(run_id) is None:
+    if not isinstance(kind, RecordKind):
+        raise ProjectionError("kindはRecordKindでなければならない")
+    if not isinstance(run_id, str) or _RUN_ID_PATTERN.fullmatch(run_id) is None:
         raise ProjectionError("run IDは英数字と`.` `_` `-`のみ（64字以内）でなければならない")
-    if seq < 1:
-        raise ProjectionError("seqは1始まりの正の整数でなければならない")
-    if _SHA_PATTERN.fullmatch(head_sha) is None:
+    if not is_integer_token(seq) or seq < 1:
+        raise ProjectionError("seqは1以上のJSON integer（bool / floatを含まない）でなければならない")
+    if not isinstance(head_sha, str) or _SHA_PATTERN.fullmatch(head_sha) is None:
         raise ProjectionError("head SHAは40桁の小文字hexでなければならない")
-    if _HASH_PATTERN.fullmatch(payload_hash) is None:
+    if not isinstance(payload_hash, str) or _HASH_PATTERN.fullmatch(payload_hash) is None:
         raise ProjectionError("payload hashはSHA-256 hex（64桁小文字）でなければならない")
     material = canonical_json(
         {"head": head_sha, "kind": kind.value, "pay": payload_hash, "run": run_id, "seq": seq}

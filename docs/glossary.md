@@ -51,7 +51,7 @@
 | producer allowlist | 内部record（chain）の正当な投稿者login集合（通常はControllerの認証login）。承認受理用のallowlistとは別の集合 |
 | canonical projection | markerへ載せる、検証済みpayloadからのscalar射影（結果値・round / turn・fingerprint・対象binding・payload hash等）。GitHubだけでrecordの意味を復元するための最小情報で、規約の正本はADR-0010 |
 | record binding | canonical recordの決定論的識別子（`cr:{run}:{seq}:{hash}`）。markerの`key`（idempotency key）と`PersistRecord`のbindingは同一値で、marker付加前の入力だけから導出する |
-| semantic payload hash | 検証済みpayloadのcanonical encodingのSHA-256（markerの`pay`）。local artifactをGitHub上のrecordへbindし、binding導出の材料にもなる |
+| semantic payload hash | 正規化済み公開本文・検証済みpayloadのhash・`pay`を除く射影を覆うSHA-256（markerの`pay`）。marker付加前の入力だけで決まり、local artifactをGitHub上のrecordへbindし、binding導出の材料にもなる |
 | external evidence | ユーザーがGitHubへ直接記入したcommentを、C-06がcomment ID・body hash・actor（allowlist完全一致）・対象headで検証して受理したevidence。再投稿（PersistRecord）を伴わない |
 
 ## security policy

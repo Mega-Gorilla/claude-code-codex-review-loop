@@ -219,6 +219,16 @@ class TestBuildRejections:
                 body=BODY,
             )
 
+    def test_non_string_body_is_rejected(self) -> None:
+        """`pay`の入力である公開本文も型をruntimeで検証する。"""
+        with pytest.raises(ProjectionError, match="body"):
+            build_record_projection(
+                RecordKind.REVIEW_RESULT,
+                record_payload(RecordKind.REVIEW_RESULT, head_sha=HEAD),
+                head_sha=HEAD,
+                body=None,  # type: ignore[arg-type]
+            )
+
     def test_digest_source_must_be_string_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(
             PROJECTION_SPECS, RecordKind.INTEGRITY_INCIDENT, ProjectionSpec(digest_source="summary")
@@ -332,6 +342,28 @@ class TestBindingDerivation:
         ids=["run_charset", "run_empty", "seq", "head", "payload_hash"],
     )
     def test_invalid_input_is_rejected(self, override: dict[str, object]) -> None:
+        with pytest.raises(ProjectionError):
+            self._binding(**override)
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"seq": True},
+            {"seq": 1.0},
+            {"seq": "1"},
+            {"run_id": 123},
+            {"head_sha": 40},
+            {"payload_hash": 64},
+            {"kind": "REVIEW_RESULT"},
+        ],
+        ids=["seq_bool", "seq_float", "seq_str", "run_id_int", "head_int", "hash_int", "kind_str"],
+    )
+    def test_wrong_type_raises_projection_error(self, override: dict[str, object]) -> None:
+        """identityの入口は型もruntimeで拒否する（`bool`は`int`のsubclassである）。
+
+        以前は`seq=True`が`seq=1`のbindingを生成し、`float` / `str`は`ValueError` /
+        `TypeError`を漏らして構造化errorを迂回していた。
+        """
         with pytest.raises(ProjectionError):
             self._binding(**override)
 

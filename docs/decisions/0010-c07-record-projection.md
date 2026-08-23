@@ -24,7 +24,7 @@ resumeは「GitHub canonical conversationからstateを再構築し、local chec
 1. **markerへprojection keyを追加する**。projectionは**検証済みpayloadからの決定論的な射影**であり、新しい値を作らない。marker keyの値はすべてC-02 schemaに実在するfieldの写しで、語彙もschemaの`enum`をそのまま使う（`schema/projection.py`の`result_vocabulary`）。specの参照先が実在fieldであることと、C-02 registryとの一致はtestで常設検証する
 2. 追加するkeyは9種: `res`（結果値）/ `round` / `turn` / `fp`（fingerprint）/ `sid`（subject ID: decision ID・permission ID等）/ `tgt`（対象binding・対象finding）/ `pay`（payload hash、**全kind必須**）/ `dig` + `cnt`（list値のdigestと要素数）。kindごとの必須・任意はProjection specが持ち、そのkindが持たないkeyの出現は非正規形式とする
 3. **list値は内容を載せない**。正規化（sorted unique）した集合のdigestと要素数だけを載せ、内容は公開本文とlocal artifactへ置く。`INTEGRITY_INCIDENT.violation_bindings`が最初の利用者で、violation集合自体はresumeのたびにC-06のchain検証で再導出するため、markerはbindingとしてのdigestで足りる
-4. **markerが本文の代替へ育つ方向を塞ぐ**。projection追加後のmarker payloadが2048 byte上限（ADR-0007 決定1）を超える場合は、本文をrenderする前に`compose_record_marker_payload`が停止する。「載せたい値が増えたらcapに当たる」構造にして、projectionの肥大化を設計段階で失敗させる
+4. **markerが本文の代替へ育つ方向を塞ぐ**。projection追加後のmarker payloadが2048 byte上限（ADR-0007 決定1）を超える場合は、`compose_record_marker_payload`が停止する（marker attachと投稿より前。`build_record_projection`はrender済み本文を入力にするため、順序は render -> build -> compose -> attach -> post である）。「載せたい値が増えたらcapに当たる」構造にして、projectionの肥大化を設計段階で失敗させる
 5. **構造keyを上書きできない**。projectionは`key` / `kind` / `run` / `head` / `seq` / `prev`を書き換えられない（識別・順序・連結の意味をprojectionが侵さない）
 6. **builderとdecoderの制約を一致させる**。`round` / `turn` / `cnt`は1始まりで、C-02 schemaが許す`0`や負数もbuilderが拒否する（builderだけが通す値を作らず、build -> decodeを往復させる）。
 7. **markerのheadとpayloadの対象headの一致を要求する**。`build_record_projection`はkindごとの対象head field（`target_head_sha` / `pushed_head_sha` / `approved_head_sha`）とmarkerの`head`が一致しない限りprojectionを作らない
