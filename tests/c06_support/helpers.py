@@ -11,8 +11,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from c02_support.helpers import record_payload
+
 from claude_code_codex_review_loop.domain.values import RecordKind
 from claude_code_codex_review_loop.identity import compose_record_marker_payload
+from claude_code_codex_review_loop.schema.projection import build_record_projection, derive_record_binding
 from claude_code_codex_review_loop.transport.conversation import UnverifiedComment, body_hash_of
 from claude_code_codex_review_loop.transport.marker import attach_marker, extract_marker
 
@@ -52,6 +55,41 @@ def make_comment(
     )
 
 
+def record_projection(
+    kind: RecordKind = RecordKind.REVIEW_RESULT, *, head: str = HEAD, body: str = "record"
+) -> dict[str, str | int]:
+    """kindのrepresentative payloadから作るprojection（C-02の製品関数を使う）。
+
+    bodyはmarker付加前の公開本文で、`pay`の入力になる（ADR-0010）。
+    """
+    return build_record_projection(kind, record_payload(kind, head_sha=head), head_sha=head, body=body)
+
+
+def marker_payload(
+    *,
+    kind: RecordKind = RecordKind.REVIEW_RESULT,
+    run_id: str = RUN,
+    head: str = HEAD,
+    seq: int,
+    prev: str | None = None,
+    body: str = "record",
+) -> dict[str, str | int]:
+    """正規marker payload（projection付き。keyは製品側の導出関数で決まる）。"""
+    projection = record_projection(kind, head=head, body=body)
+    key = derive_record_binding(
+        run_id=run_id, seq=seq, kind=kind, head_sha=head, payload_hash=str(projection["pay"])
+    )
+    return compose_record_marker_payload(
+        key=key,
+        kind=kind,
+        run_id=run_id,
+        head_sha=head,
+        seq=seq,
+        prev_body_hash=prev,
+        projection=projection,
+    )
+
+
 def chain_bodies(
     count: int,
     *,
@@ -59,14 +97,17 @@ def chain_bodies(
     head: str = HEAD,
     kind: RecordKind = RecordKind.REVIEW_RESULT,
 ) -> list[str]:
-    """prev連結済みの正規chain本文列（seq=1..count）を生成する。"""
+    """prev連結済みの正規chain本文列（seq=1..count）を生成する。
+
+    projectionとbindingは製品側の導出関数（C-02）で作る。fixtureへ直書きせず、
+    producer側の規約が変わればhelper経由で全testへ波及させる。
+    """
     bodies: list[str] = []
     prev: str | None = None
     for seq in range(1, count + 1):
-        payload = compose_record_marker_payload(
-            key=f"turn-{seq}", kind=kind, run_id=run_id, head_sha=head, seq=seq, prev_body_hash=prev
-        )
-        body = attach_marker(f"record {seq}", payload)
+        text = f"record {seq}"
+        payload = marker_payload(kind=kind, run_id=run_id, head=head, seq=seq, prev=prev, body=text)
+        body = attach_marker(text, payload)
         bodies.append(body)
         prev = body_hash_of(body)
     return bodies
