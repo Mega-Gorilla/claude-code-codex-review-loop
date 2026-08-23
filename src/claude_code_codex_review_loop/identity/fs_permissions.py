@@ -12,6 +12,8 @@ acl_windows）が実装する。OS分岐は本module末尾のconditional import 
   （攻撃者が緩い権限で先に作ったdirectoryをそのまま使う経路を作らない = fail closed）
 - 作成後に実効権限を**読み戻して検証**する。検証に失敗した場合はsilentに続行せず
   `FsPermissionError`とする
+- 繰り返し更新するfile（checkpoint）は`replace_private_text`で**原子的に置換**する。
+  中断してもtruncateされた中間状態を作らない（ADR-0011）
 - private fileはlink数が1であること（他のpathと**file実体を共有しない**こと）も要求する。
   hard linkはpath正規化では検出できず（`resolve()`してもlink側のpathのまま）、mode /
   owner / DACLも同じ実体から読み出されるため、権限検証だけでは素通りしてしまう
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from .errors import IdentityError
@@ -70,6 +73,30 @@ def write_private_text(path: Path, text: str) -> None:
     """private directory内へ、作成者のみが読書きできるfileを排他的に作成する。"""
     _backend.write_private_text(path, text)
     _reject_shared_file_entity(path)
+
+
+def replace_private_text(path: Path, text: str) -> None:
+    """既存fileを作成者限定のまま**原子的に**置き換える（checkpointの更新経路）。
+
+    同一private directory内へ一時fileを排他作成して書き、`os.replace`で差し替える。
+    どの時点で中断しても、pathには「置換前の内容」か「置換後の内容」のどちらかだけが
+    見える（truncateされた中間状態を作らない）。世代は残さない（GitHubがcanonicalで、
+    local checkpointはcacheであるため。ADR-0011）。
+
+    置換後は権限とlink数を読み戻して検証する（backendのwrite / verifyと同じ契約）。
+    """
+    directory = path.parent
+    temporary = directory / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    _backend.write_private_text(temporary, text)
+    _reject_shared_file_entity(temporary)
+    try:
+        os.replace(temporary, path)
+    except OSError as error:
+        # 置換に失敗したら一時fileを残さない（次回の排他作成を妨げない）
+        temporary.unlink(missing_ok=True)
+        raise FsPermissionError("replace", f"fileを置換できない: {path}", error.errno) from error
+    _backend.sync_directory(directory)
+    verify_private_file(path)
 
 
 def verify_private_dir(path: Path) -> None:

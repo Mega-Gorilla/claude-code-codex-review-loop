@@ -11,10 +11,12 @@ import pytest
 from claude_code_codex_review_loop.identity import (
     FsPermissionError,
     create_private_dir,
+    fs_permissions,
     verify_private_dir,
     verify_private_file,
     write_private_text,
 )
+from claude_code_codex_review_loop.identity.fs_permissions import replace_private_text
 
 
 class TestExclusiveCreation:
@@ -106,4 +108,51 @@ class TestSharedFileEntity:
         target = root / "notes.txt"
         write_private_text(target, "x")
         assert os.stat(target).st_nlink == 1
+        verify_private_file(target)
+
+
+class TestReplacePrivateText:
+    """atomic replace（checkpointの更新経路。ADR-0011）。"""
+
+    def test_replaces_content_and_keeps_permissions(self, tmp_path: Path) -> None:
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "checkpoint.json"
+        write_private_text(target, "old")
+        replace_private_text(target, "new")
+        assert target.read_text(encoding="utf-8") == "new"
+        verify_private_file(target)
+
+    def test_leaves_no_temporary_file(self, tmp_path: Path) -> None:
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "checkpoint.json"
+        write_private_text(target, "old")
+        replace_private_text(target, "new")
+        assert [entry.name for entry in directory.iterdir()] == [target.name]
+
+    def test_replace_failure_removes_temporary_and_keeps_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "checkpoint.json"
+        write_private_text(target, "old")
+
+        def _fail(source: object, destination: object) -> None:
+            raise OSError(13, "replace failed")
+
+        monkeypatch.setattr(fs_permissions.os, "replace", _fail)
+        with pytest.raises(FsPermissionError, match="置換できない"):
+            replace_private_text(target, "new")
+        assert target.read_text(encoding="utf-8") == "old"
+        assert [entry.name for entry in directory.iterdir()] == [target.name]
+
+    def test_creates_target_when_absent(self, tmp_path: Path) -> None:
+        """置換先が無い場合も、作成者限定のfileとして落ち着く。"""
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "checkpoint.json"
+        replace_private_text(target, "new")
+        assert target.read_text(encoding="utf-8") == "new"
         verify_private_file(target)

@@ -8,6 +8,7 @@ resume）で子孫を1つのtreeとして扱う。責務はspawn・wait・timeou
 停止機構の設計判断はADR-0005を正本とする。
 """
 
+from .liveness import is_process_alive
 from .spawn import (
     Completed,
     JobObjectRef,
@@ -38,6 +39,7 @@ __all__ = [
     "TimedOut",
     "TreeHandle",
     "TreeRef",
+    "is_process_alive",
     "run_tree",
     "spawn_tree",
     "stop_tree",

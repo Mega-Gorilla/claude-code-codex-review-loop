@@ -313,6 +313,18 @@ REPRESENTATIVE: dict[SchemaKind, dict[str, object]] = {
 }
 
 
+REPRESENTATIVE[SchemaKind.RUN_LOCK] = {
+    "schema_version": 1,
+    "run_id": "run-1",
+    "repository": "owner/repo",
+    "number": 12,
+    "pid": 4242,
+    "host": "build-host",
+    "acquired_at": "2026-08-23T10:00:00Z",
+    "head_sha": SHA,
+}
+
+
 def record_payload(kind: RecordKind, *, head_sha: str) -> dict[str, object]:
     """canonical record kindのrepresentative payload（対象head fieldを差し替えた複製）。"""
     payload = dict(REPRESENTATIVE[schema_kind_of(kind)])

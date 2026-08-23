@@ -58,9 +58,23 @@ def write_private_text(path: Path, text: str) -> None:
     try:
         os.fchmod(descriptor, _FILE_MODE)
         os.write(descriptor, text.encode("utf-8"))
+        # 作成も置換も耐久性を持たせる（checkpointのatomic replaceの前提）
+        os.fsync(descriptor)
     finally:
         os.close(descriptor)
     _check(path, _FILE_MODE, expect_dir=False)
+
+
+def sync_directory(path: Path) -> None:
+    """directory entryの更新をdiskへ確定させる（`os.replace`後の耐久性）。"""
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError as error:  # pragma: no cover - 直前に検証済みのprivate dirで実質起きない
+        raise FsPermissionError("sync", f"directoryを開けない: {path}", error.errno) from error
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def verify_private_dir(path: Path) -> None:

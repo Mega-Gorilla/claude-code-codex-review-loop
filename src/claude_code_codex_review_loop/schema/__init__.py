@@ -16,6 +16,7 @@ from .decision import (
 )
 from .envelope import CHECKPOINT
 from .followup import FOLLOWUP_CANDIDATES, FOLLOWUP_EVALUATION, FOLLOWUP_PERMISSION
+from .lock import RUN_LOCK
 from .merge import (
     GATE_ANSWER,
     GATE_CHANGES,
@@ -38,6 +39,7 @@ from .projection import (
     derive_record_binding,
     result_vocabulary,
     schema_kind_of,
+    validate_run_id,
 )
 from .records import (
     BLOCK_INTERVENTION,
@@ -89,6 +91,7 @@ _DEFINITIONS: tuple[SchemaDefinition, ...] = (
     INTEGRITY_INCIDENT,
     USER_CANCEL,
     CHECKPOINT,
+    RUN_LOCK,
 )
 
 def build_registry(
@@ -107,6 +110,7 @@ REGISTRY: dict[SchemaKind, SchemaDefinition] = build_registry(_DEFINITIONS)
 
 __all__ = [
     "build_registry",
+    "RUN_LOCK",
     "PROJECTION_KEYS",
     "PROJECTION_SPECS",
     "DecodedProjection",
@@ -119,6 +123,7 @@ __all__ = [
     "derive_record_binding",
     "result_vocabulary",
     "schema_kind_of",
+    "validate_run_id",
     "HOST_ACTION_KINDS",
     "REGISTRY",
     "Field",

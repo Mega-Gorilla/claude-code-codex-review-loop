@@ -13,6 +13,7 @@ additive変更とし、非互換な変更のみversionをbumpしてmigrationを�
 from __future__ import annotations
 
 from ..domain.states import State
+from ..domain.values import Awaiting, RecordKind
 from .registry import (
     SchemaDefinition,
     SchemaKind,
@@ -32,6 +33,10 @@ from .validate import Field, VersionSpec
 CHECKPOINT_MAX_INPUT_BYTES = 262_144
 
 _STATE_VALUES = tuple(sorted(state.value for state in State))
+_AWAITING_VALUES = tuple(sorted(awaiting.value for awaiting in Awaiting))
+_RECORD_KIND_VALUES = tuple(sorted(kind.value for kind in RecordKind))
+# 未投稿recordの本文は公開本文と同じ上限（C-05のMAX_COMMENT_CHARS）まで保持する
+MAX_PENDING_BODY_CHARS = 65_536
 
 
 def _optional_text() -> Field:
@@ -64,6 +69,21 @@ _SECTIONS: dict[str, Field] = {
             "round": integer(required=False),
             "agent_role": _optional_text(),
             "session_id": _optional_opaque(),
+            # awaiting / return_to / recovery_to / pending_recordはPhase 7（C-07）の
+            # additive追加: 中断点を一意に再開するためのMachineState断片（AC-C07-01 / 02）。
+            # procedure / block / deferred_integrityは完全replayを行うPhaseで追加する
+            # （blockはC-06のchain検証で毎回再導出するため保存しない。ADR-0011）
+            "awaiting": enum_field(_AWAITING_VALUES, required=False),
+            "return_to": enum_field(_STATE_VALUES, required=False),
+            "recovery_to": enum_field(_STATE_VALUES, required=False),
+            "pending_record": obj(
+                {
+                    "kind": enum_field(_RECORD_KIND_VALUES),
+                    "binding": opaque(),
+                    "source_state": enum_field(_STATE_VALUES),
+                },
+                required=False,
+            ),
         },
         required=False,
     ),
@@ -154,6 +174,37 @@ _SECTIONS: dict[str, Field] = {
     ),
     # 10. artifactとlogへのpath
     "artifacts": array(text(), required=False),
+    # artifact_recordsはPhase 7（C-07）のadditive追加: artifactをapproved headと
+    # canonical recordへbindする（AC-C07-05）。既存`artifacts`のitem型は変えない
+    # （array itemの型変更は非互換でversion bumpを要するため。ADR-0004）
+    "artifact_records": array(
+        obj(
+            {
+                "path": text(),
+                "kind": text(),
+                "content_hash": opaque(),
+                "approved_head_sha": sha(),
+                "record_binding": opaque(required=False),
+                "comment_id": opaque(required=False),
+            }
+        ),
+        required=False,
+    ),
+    # transactionはPhase 7（C-07）のadditive追加: 投稿前 / 投稿成否不明で中断した
+    # recordを**同一key**で再発行するためのcrash window保存値（ADR-0010 決定13）。
+    # bodyはredact済みのrender出力（marker付加前）だけを保持する
+    "transaction": obj(
+        {
+            "binding": opaque(),
+            "kind": enum_field(_RECORD_KIND_VALUES),
+            "seq": integer(),
+            "head_sha": sha(),
+            "payload_hash": opaque(),
+            "body": text(max_len=MAX_PENDING_BODY_CHARS),
+            "body_hash": _optional_opaque(),
+        },
+        required=False,
+    ),
     # 11. 最後に成功したGitHub mutation、idempotency marker、read-after-write確認結果
     "mutation": obj(
         {

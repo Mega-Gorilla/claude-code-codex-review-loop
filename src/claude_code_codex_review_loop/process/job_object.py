@@ -38,11 +38,16 @@ _JOB_OBJECT_QUERY = 0x0004
 _JOB_OBJECT_TERMINATE = 0x0008
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+# handleを待機可能にする（QUERY_LIMITED_INFORMATIONだけではWaitForSingleObjectがWAIT_FAILEDになる）
+_SYNCHRONIZE = 0x00100000
 _THREAD_SUSPEND_RESUME = 0x0002
 _TH32CS_SNAPTHREAD = 0x00000004
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
 _ERROR_FILE_NOT_FOUND = 2
+_ERROR_ACCESS_DENIED = 5
+_WAIT_TIMEOUT = 0x00000102
 _ERROR_BAD_LENGTH = 24
 _ERROR_ALREADY_EXISTS = 183
 _INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
@@ -150,6 +155,8 @@ _kernel32.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ThreadEntry
 _kernel32.Thread32First.restype = wintypes.BOOL
 _kernel32.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32))
 _kernel32.Thread32Next.restype = wintypes.BOOL
+_kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+_kernel32.WaitForSingleObject.restype = wintypes.DWORD
 _kernel32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
 _kernel32.OpenThread.restype = wintypes.HANDLE
 _kernel32.ResumeThread.argtypes = (wintypes.HANDLE,)
@@ -158,6 +165,24 @@ _kernel32.ResumeThread.restype = wintypes.DWORD
 
 def _close_handle(handle: int) -> None:
     _kernel32.CloseHandle(handle)
+
+
+def is_process_alive(pid: int) -> bool:
+    """pidのprocessが生存しているか（handleのsignal状態で判定する）。
+
+    exit codeの`STILL_ACTIVE`（259）は正当な終了codeとしても現れ得るため、
+    `WaitForSingleObject`のtimeoutで判定する（handleがsignal済み = 終了）。
+    OpenProcessが権限不足で失敗した場合は「存在するが触れない」であり**生存扱い**に
+    する（stale lockの回収可否では、迷ったら回収しない側が安全）。pidの再利用も
+    生存と誤判定し得るが、同じく回収しない側へ倒れる（ADR-0011）。
+    """
+    handle = _kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return _last_error() == _ERROR_ACCESS_DENIED
+    try:
+        return bool(_kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT)
+    finally:
+        _close_handle(handle)
 
 
 def _create_named_job(name: str) -> int:

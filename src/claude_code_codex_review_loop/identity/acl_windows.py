@@ -335,9 +335,19 @@ def write_private_text(path: Path, text: str) -> None:
         raise FsPermissionError("create_file", f"fileを作成できない: {path}", error.errno) from error
     try:
         os.write(descriptor, text.encode("utf-8"))
+        # 作成も置換も耐久性を持たせる（checkpointのatomic replaceの前提）
+        os.fsync(descriptor)
     finally:
         os.close(descriptor)
     _verify(path, expect_dir=False)
+
+
+def sync_directory(path: Path) -> None:
+    """Windowsではdirectory handleへのfsyncができないためno-op（契約を揃えるための空実装）。
+
+    `os.replace`自体がNTFS上でatomicであり、file側は`write_private_text`のfsyncで
+    確定済みである。POSIX backendとinterfaceを合わせるためだけに存在する。
+    """
 
 
 def verify_private_dir(path: Path) -> None:

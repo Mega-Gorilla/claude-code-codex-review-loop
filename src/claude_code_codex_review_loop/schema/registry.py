@@ -32,7 +32,7 @@ class SchemaKind(Enum):
 
     C-01の`RecordKind` 21種（canonical record）に、record化されないprotocol message
     （merge intent / merge outcome / follow-up候補と評価 / HOST_ACTION envelope /
-    submit envelope / checkpoint envelope）を加えた集合。schemaをtransportや各workflowへ
+    submit envelope / checkpoint envelope / PR lock file）を加えた集合。schemaをtransportや各workflowへ
     分散させないため、canonical recordの全kindをここで所有する。
     """
 
@@ -68,6 +68,7 @@ class SchemaKind(Enum):
     HOST_ACTION = "HOST_ACTION"
     SUBMIT = "SUBMIT"
     CHECKPOINT = "CHECKPOINT"
+    RUN_LOCK = "RUN_LOCK"
 
 
 # 損失のないpure関数によるversion間変換（v_n -> v_n+1のpayload変換。ADR-0004）

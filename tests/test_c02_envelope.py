@@ -196,3 +196,64 @@ def test_unknown_section_is_rejected() -> None:
     result = validate(CHECKPOINT, _raw(payload))
     assert not result.ok
     assert any(e.code == "unknown_field" for e in result.errors)
+
+
+def test_phase7_state_fields_are_accepted() -> None:
+    """中断点の再開に要るfield（Phase 7のadditive追加）が受理される。"""
+    payload = dict(_BASE)
+    payload["state"] = {
+        "state": "AWAITING_USER_DECISION",
+        "awaiting": "USER_INPUT_DECISION",
+        "return_to": "RUNNING_REVIEW",
+        "recovery_to": "APPLYING_FIXES",
+        "pending_record": {
+            "kind": "DECISION_BRIEF",
+            "binding": "cr:run-1:00000004:" + "a" * 64,
+            "source_state": "REVIEWING_DECISION_REQUEST",
+        },
+    }
+    assert validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_phase7_transaction_section_is_accepted() -> None:
+    """crash windowの再発行に要る値（ADR-0010 決定13）を保持できる。"""
+    payload = dict(_BASE)
+    payload["transaction"] = {
+        "binding": "cr:run-1:00000004:" + "a" * 64,
+        "kind": "CLARIFICATION_QUESTION",
+        "seq": 4,
+        "head_sha": "b" * 40,
+        "payload_hash": "c" * 64,
+        "body": "公開本文（redact済みのrender出力）",
+        "body_hash": "d" * 64,
+    }
+    assert validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_phase7_artifact_records_bind_to_approved_head() -> None:
+    """artifactがapproved headとrecordへbindされる（AC-C07-05の器）。"""
+    payload = dict(_BASE)
+    payload["artifacts"] = ["logs/reviewer.log"]
+    payload["artifact_records"] = [
+        {
+            "path": "artifacts/review.json",
+            "kind": "REVIEW_RESULT",
+            "content_hash": "e" * 64,
+            "approved_head_sha": "b" * 40,
+            "record_binding": "cr:run-1:00000004:" + "a" * 64,
+        }
+    ]
+    assert validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_artifacts_item_type_is_unchanged() -> None:
+    """既存`artifacts`はtext arrayのまま（item型変更は非互換になるため）。"""
+    payload = dict(_BASE)
+    payload["artifacts"] = [{"path": "artifacts/review.json"}]
+    assert not validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_unknown_state_field_is_still_rejected() -> None:
+    payload = dict(_BASE)
+    payload["state"] = {"state": "MERGED", "unknown_field": "x"}
+    assert not validate(CHECKPOINT, _raw(payload)).ok

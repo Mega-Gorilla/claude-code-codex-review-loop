@@ -46,6 +46,7 @@ REQUIRED_PROBE: dict[SchemaKind, str] = {
     SchemaKind.BLOCK_INTERVENTION: "target_block_binding",
     SchemaKind.INTEGRITY_INCIDENT: "violation_bindings",
     SchemaKind.USER_CANCEL: "input_route",
+    SchemaKind.RUN_LOCK: "run_id",
     SchemaKind.CHECKPOINT: "run_id",
 }
 
