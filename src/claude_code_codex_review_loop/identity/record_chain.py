@@ -167,7 +167,7 @@ def compose_record_marker_payload(
 
     projectionはC-02の`build_record_projection`が作る意味情報の射影で、構造keyを
     上書きできない。合成後のpayloadが上限byte数を超える場合はここで停止する
-    （本文をrenderする前に落とし、markerが本文の代替へ肥大化する方向を塞ぐ）。
+    （marker attachと投稿より前に落とし、markerが本文の代替へ肥大化する方向を塞ぐ）。
     """
     for name, value in (("key", key), ("run", run_id), ("head", head_sha)):
         if not value:

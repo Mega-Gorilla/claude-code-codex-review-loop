@@ -121,7 +121,7 @@ class TestComposePayload:
             )
 
     def test_oversized_projection_is_rejected(self) -> None:
-        """markerが本文の代替へ肥大化する方向を、本文render前に塞ぐ。"""
+        """markerが本文の代替へ肥大化する方向を、marker attach / 投稿より前に塞ぐ。"""
         with pytest.raises(IdentityError, match="上限byte数"):
             compose_record_marker_payload(
                 key="k",
