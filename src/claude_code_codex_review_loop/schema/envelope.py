@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from ..domain.states import State
 from ..domain.values import Awaiting, RecordKind
-from .action import HOST_ACTION_KINDS, SUBMIT_OUTCOMES
+from .action import HOST_ACTION_KINDS, SUBMIT_ERROR_CATEGORIES, SUBMIT_OUTCOMES
 from .projection import (
     COUNT_KEY,
     DIGEST_KEY,
@@ -236,8 +236,12 @@ _SECTIONS: dict[str, Field] = {
         required=False,
     ),
     # host_actionはPhase 8（C-08）のadditive追加: 未完了の`HOST_ACTION`と、受理済みsubmitの
-    # fingerprint。別processからのresume（AC-C08-06）が**同じaction ID / nonce / result path**を
-    # 再提示し、新しいactionを生成しないために要る（ADR-0014）
+    # fingerprint。別processからのresume（AC-C08-06）が**同じactionを再提示**し、新しい
+    # actionを生成しないために要る（ADR-0014）。
+    #
+    # binding 8項目だけでは、payload / verified recordsが違う2つの有効なactionが同じ保存値へ
+    # 潰れる。envelope全体をcanonical hashで固定し、実体はrun directory内のenvelope fileから
+    # 読み直す（hashが一致しなければ再提示しない）。submitも同様にenvelope全体のhashを持つ
     "host_action": obj(
         {
             "action_id": opaque(),
@@ -245,12 +249,19 @@ _SECTIONS: dict[str, Field] = {
             "nonce": opaque(),
             "expected_head_sha": sha(),
             "result_path": text(),
+            # 発行した`HOST_ACTION` envelopeの実体（run directory相対）とcanonical hash
+            "envelope_path": text(),
+            "envelope_hash": opaque(),
             "issued_at": _optional_text(),
             # 受理済みsubmitの記録。同一内容の再送を冪等に扱い、内容の異なる再送を止める
+            # （判定は`submit_hash`。`outcome` / `result_kind`はeventの組み立てに使う）
             "submit": obj(
                 {
                     "outcome": enum_field(SUBMIT_OUTCOMES),
+                    "submit_hash": opaque(),
                     "result_hash": opaque(),
+                    "result_kind": enum_field(_RECORD_KIND_VALUES, required=False),
+                    "error_category": enum_field(SUBMIT_ERROR_CATEGORIES, required=False),
                     "accepted_at": _optional_text(),
                 },
                 required=False,

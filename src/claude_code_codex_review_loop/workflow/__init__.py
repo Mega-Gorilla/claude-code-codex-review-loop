@@ -10,12 +10,22 @@ Section 2の制御反転）。この構造は全workflowの前提で、覆すと
 追加する。registryの正本はADR-0014。
 """
 
-from .actions import ACTION_SPECS, ActionRegistryError, ActionSpec, spec_for, spec_for_kind
+from .actions import (
+    ACTION_SPECS,
+    RESULT_VARIANTS,
+    ActionRegistryError,
+    ActionSpec,
+    ResultVariant,
+    spec_for,
+    spec_for_kind,
+)
 
 __all__ = [
     "ACTION_SPECS",
+    "RESULT_VARIANTS",
     "ActionRegistryError",
     "ActionSpec",
+    "ResultVariant",
     "spec_for",
     "spec_for_kind",
 ]

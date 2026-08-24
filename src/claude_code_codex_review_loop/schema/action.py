@@ -24,6 +24,8 @@ from collections.abc import Mapping
 from typing import Final
 
 from ..domain.commands import HostAction
+from ..domain.values import RecordKind
+from ..errors import ErrorCategory
 from .registry import (
     SchemaDefinition,
     SchemaKind,
@@ -58,6 +60,10 @@ _V1_ACTION_KINDS: Final = (
 )
 
 SUBMIT_OUTCOMES = ("COMPLETED", "FAILED")
+# 失敗分類はP-003の語彙をそのまま使う（componentごとに別vocabularyを作らない）
+SUBMIT_ERROR_CATEGORIES: Final = tuple(sorted(category.value for category in ErrorCategory))
+# hostが返し得るrecordの種別。actionごとに許可される集合はaction registryが持つ（ADR-0014）
+_RECORD_KINDS: Final = tuple(sorted(kind.value for kind in RecordKind))
 
 # actionごとの入力payload。**そのactionを実行するために必要な識別子だけ**を持ち、成果物の
 # 形はresult schema（既存のrecord schema）が定める。追加が必要になった場合、optional field
@@ -140,12 +146,46 @@ HOST_ACTION = SchemaDefinition(
 
 
 def _rule_failed_requires_error_category(data: dict[str, object]) -> list[PublicError]:
+    """v1: FAILEDのみerror_categoryを要求する（v2は排他ruleへ置き換えた）。"""
     if data.get("outcome") == "FAILED" and "error_category" not in data:
         return [PublicError("cross_field", "error_category")]
     return []
 
 
-def _submit_fields(kinds: tuple[str, ...]) -> dict[str, Field]:
+def _rule_outcome_fields_are_exclusive(data: dict[str, object]) -> list[PublicError]:
+    """v2: `COMPLETED`は結果、`FAILED`は分類を持つ（取り違えと同時保持を拒否する）。
+
+    engineはsubmit結果を「どのresult variantか」または「どの失敗分類か」へ決定論的に写す。
+    どちらでもない組み合わせ（成功なのに失敗分類がある、失敗なのに結果種別がある）を
+    受理すると、P-003の構造化分類の境界が成立しない。
+    """
+    outcome = data.get("outcome")
+    errors: list[PublicError] = []
+    if outcome == "COMPLETED":
+        if "result_kind" not in data:
+            errors.append(PublicError("cross_field", "result_kind"))
+        if "error_category" in data:
+            errors.append(PublicError("cross_field", "error_category"))
+    elif outcome == "FAILED":
+        if "error_category" not in data:
+            errors.append(PublicError("cross_field", "error_category"))
+        if "result_kind" in data:
+            errors.append(PublicError("cross_field", "result_kind"))
+    return errors
+
+
+def _submit_fields(kinds: tuple[str, ...], *, typed_result: bool) -> dict[str, Field]:
+    """submit envelopeのfield。v2はresult variantの識別子と有限の失敗分類を持つ。"""
+    result_fields: dict[str, Field] = (
+        {
+            # hostが返したrecordの種別（result variantの識別子）。当該actionで許可される
+            # 集合の検査はaction registryを持つC-08が行う
+            "result_kind": enum_field(_RECORD_KINDS, required=False),
+            "error_category": enum_field(SUBMIT_ERROR_CATEGORIES, required=False),
+        }
+        if typed_result
+        else {"error_category": text(required=False)}
+    )
     return {
         "schema_version": schema_version_field(),
         # HOST_ACTION envelopeのbinding echo（一致しないsubmitはC-08が拒否する）
@@ -157,7 +197,7 @@ def _submit_fields(kinds: tuple[str, ...]) -> dict[str, Field]:
         # resultはControllerが払い出したrun directory内のfileで受け渡し、hashで照合する
         "result_hash": opaque(),
         "outcome": enum_field(SUBMIT_OUTCOMES),
-        "error_category": text(required=False),
+        **result_fields,
     }
 
 
@@ -165,10 +205,12 @@ SUBMIT = SchemaDefinition(
     kind=SchemaKind.SUBMIT,
     versions={
         1: VersionSpec(
-            fields=_submit_fields(_V1_ACTION_KINDS), rules=(_rule_failed_requires_error_category,)
+            fields=_submit_fields(_V1_ACTION_KINDS, typed_result=False),
+            rules=(_rule_failed_requires_error_category,),
         ),
         2: VersionSpec(
-            fields=_submit_fields(HOST_ACTION_KINDS), rules=(_rule_failed_requires_error_category,)
+            fields=_submit_fields(HOST_ACTION_KINDS, typed_result=True),
+            rules=(_rule_outcome_fields_are_exclusive,),
         ),
     },
 )

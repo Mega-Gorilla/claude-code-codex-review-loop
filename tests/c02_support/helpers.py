@@ -254,6 +254,7 @@ REPRESENTATIVE: dict[SchemaKind, dict[str, object]] = {
         "nonce": "nonce-1",
         "result_hash": "rh-1",
         "outcome": "COMPLETED",
+        "result_kind": "FIX_RESULT",
     },
     SchemaKind.PERMISSION_BLOCK: {
         "schema_version": 1,

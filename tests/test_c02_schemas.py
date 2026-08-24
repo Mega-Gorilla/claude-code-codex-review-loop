@@ -195,12 +195,18 @@ class TestCrossFieldRules:
         result = validate(REGISTRY[SchemaKind.MERGE_APPROVAL], _raw(payload))
         assert any(e.code == "enum_invalid" and e.path == "intent" for e in result.errors)
 
-    def test_failed_submit_requires_error_category(self) -> None:
-        payload = dict(REPRESENTATIVE[SchemaKind.SUBMIT])
-        payload["outcome"] = "FAILED"
-        self._reject(SchemaKind.SUBMIT, payload, "error_category")
-        payload["error_category"] = "network"
-        assert validate(REGISTRY[SchemaKind.SUBMIT], _raw(payload)).ok
+    def test_submit_outcome_fields_are_exclusive(self) -> None:
+        """v2: COMPLETEDは結果種別、FAILEDは失敗分類を持つ（ADR-0014）。"""
+        failed = dict(REPRESENTATIVE[SchemaKind.SUBMIT])
+        failed["outcome"] = "FAILED"
+        self._reject(SchemaKind.SUBMIT, failed, "result_kind")
+        del failed["result_kind"]
+        self._reject(SchemaKind.SUBMIT, failed, "error_category")
+        failed["error_category"] = "TRANSIENT"
+        assert validate(REGISTRY[SchemaKind.SUBMIT], _raw(failed)).ok
+        completed = dict(REPRESENTATIVE[SchemaKind.SUBMIT])
+        completed["error_category"] = "TRANSIENT"
+        self._reject(SchemaKind.SUBMIT, completed, "error_category")
 
     def test_approved_followup_permission_requires_authority(self) -> None:
         """APPROVEDは入力経路と承認comment IDなしでは受理されない（TE L510のbind）。"""

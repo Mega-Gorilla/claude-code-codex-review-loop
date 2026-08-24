@@ -12,14 +12,18 @@ import dataclasses
 
 import pytest
 
+from claude_code_codex_review_loop.domain import events as ev
 from claude_code_codex_review_loop.domain._ruledefs import AWAITING_COMMANDS
+from claude_code_codex_review_loop.domain._rules_workflow import PRODUCED_RULES
 from claude_code_codex_review_loop.domain.commands import HostAction, RequestHostAction
 from claude_code_codex_review_loop.domain.values import AWAITING_HOME, Awaiting, RecordKind
 from claude_code_codex_review_loop.schema import REGISTRY
 from claude_code_codex_review_loop.schema.action import HOST_ACTION_KINDS, HOST_ACTION_PAYLOADS
 from claude_code_codex_review_loop.workflow import (
     ACTION_SPECS,
+    RESULT_VARIANTS,
     ActionSpec,
+    ResultVariant,
     spec_for,
     spec_for_kind,
 )
@@ -61,47 +65,113 @@ class TestRegistryCoversC01:
         assert set(HOST_ACTION_PAYLOADS) == set(HOST_ACTION_KINDS)
 
 
+def _allowed_by_c01(awaiting: Awaiting) -> set[RecordKind]:
+    """C-01が当該awaitingの`RecordProduced`で受理するrecord kind集合（rule registryから導出）。"""
+    allowed: set[RecordKind] = set()
+    for rule in PRODUCED_RULES:
+        if awaiting in (rule.match.awaiting or frozenset()):
+            allowed |= set(rule.match.record_kinds or frozenset())
+    return allowed
+
+
+class TestResultVariantsMatchC01:
+    """**registryの結果集合はC-01が許可するkind集合と完全一致する**（driftを止める）。"""
+
+    @pytest.mark.parametrize("spec", list(ACTION_SPECS.values()), ids=lambda spec: spec.kind)
+    def test_result_kinds_match_the_produced_rules(self, spec: ActionSpec) -> None:
+        assert set(spec.result_kinds) == _allowed_by_c01(spec.awaiting)
+
+    def test_apply_findings_has_five_result_kinds(self) -> None:
+        """修正完了だけでなく、質問・判断依頼・外部依存・permission停止も正規経路。"""
+        spec = spec_for(HostAction.APPLY_FINDINGS)
+        assert set(spec.result_kinds) == {
+            RecordKind.FIX_RESULT,
+            RecordKind.CLARIFICATION_QUESTION,
+            RecordKind.DECISION_REQUEST,
+            RecordKind.EXTERNAL_DEPENDENCY,
+            RecordKind.PERMISSION_BLOCK,
+        }
+
+    def test_result_kinds_are_deterministic_and_unique(self) -> None:
+        for spec in ACTION_SPECS.values():
+            assert len(set(spec.result_kinds)) == len(spec.result_kinds)
+
+    def test_every_result_kind_has_a_variant(self) -> None:
+        used = {kind for spec in ACTION_SPECS.values() for kind in spec.result_kinds}
+        assert used <= set(RESULT_VARIANTS)
+
+    def test_no_unused_variant_is_declared(self) -> None:
+        """使われないvariantを残さない（registryの語彙を実態と一致させる）。"""
+        used = {kind for spec in ACTION_SPECS.values() for kind in spec.result_kinds}
+        assert set(RESULT_VARIANTS) == used
+
+
 class TestResultAndEvent:
-    @pytest.mark.parametrize("spec", list(ACTION_SPECS.values()), ids=lambda spec: spec.kind)
-    def test_result_schema_exists(self, spec: ActionSpec) -> None:
+    @pytest.mark.parametrize(
+        "variant", list(RESULT_VARIANTS.values()), ids=lambda variant: variant.record_kind.value
+    )
+    def test_result_schema_exists(self, variant: ResultVariant) -> None:
         """結果payloadは既存のrecord schemaを再利用する（新規schemaを作らない）。"""
-        assert spec.result_schema in REGISTRY
+        assert variant.result_schema in REGISTRY
 
-    @pytest.mark.parametrize("spec", list(ACTION_SPECS.values()), ids=lambda spec: spec.kind)
-    def test_result_schema_matches_the_record_kind(self, spec: ActionSpec) -> None:
-        assert spec.result_schema.value == spec.record_kind.value
+    @pytest.mark.parametrize(
+        "variant", list(RESULT_VARIANTS.values()), ids=lambda variant: variant.record_kind.value
+    )
+    def test_result_schema_matches_the_record_kind(self, variant: ResultVariant) -> None:
+        assert variant.result_schema.value == variant.record_kind.value
 
-    @pytest.mark.parametrize("spec", list(ACTION_SPECS.values()), ids=lambda spec: spec.kind)
-    def test_event_expects_the_same_record_kind(self, spec: ActionSpec) -> None:
-        """actionとeventは1対1（値によるdiscriminationを持ち込まない）。"""
-        assert spec.event.EXPECTED_KIND is spec.record_kind  # type: ignore[attr-defined]
+    @pytest.mark.parametrize(
+        "variant", list(RESULT_VARIANTS.values()), ids=lambda variant: variant.record_kind.value
+    )
+    def test_event_expects_the_same_record_kind(self, variant: ResultVariant) -> None:
+        """record kindとeventは1対1（値によるdiscriminationを持ち込まない）。"""
+        assert variant.event.EXPECTED_KIND is variant.record_kind  # type: ignore[attr-defined]
 
-    @pytest.mark.parametrize("spec", list(ACTION_SPECS.values()), ids=lambda spec: spec.kind)
-    def test_extra_event_inputs_match_the_event_fields(self, spec: ActionSpec) -> None:
+    @pytest.mark.parametrize(
+        "variant", list(RESULT_VARIANTS.values()), ids=lambda variant: variant.record_kind.value
+    )
+    def test_extra_event_inputs_match_the_event_fields(self, variant: ResultVariant) -> None:
         """`evidence`以外に要る値を宣言と一致させる（C-08が作らない値の明示）。"""
         fields = tuple(
-            field.name for field in dataclasses.fields(spec.event) if field.name != "evidence"
+            field.name for field in dataclasses.fields(variant.event) if field.name != "evidence"
         )
-        assert fields == spec.extra_event_inputs
+        assert fields == variant.extra_event_inputs
 
-    def test_progress_report_is_declared_for_apply_findings(self) -> None:
-        """`ProgressReport`はC-10 / C-11由来なので、C-08は自分で作らないことを明示する。"""
-        assert spec_for(HostAction.APPLY_FINDINGS).extra_event_inputs == ("report",)
-
-    def test_other_actions_need_only_the_evidence(self) -> None:
-        others = [spec for spec in ACTION_SPECS.values() if spec.action is not HostAction.APPLY_FINDINGS]
-        assert all(spec.extra_event_inputs == () for spec in others)
+    def test_c10_owned_inputs_are_declared(self) -> None:
+        """`ProgressReport` / `head`はC-10 / C-11由来で、C-08は自分で作らない。"""
+        declared = {
+            kind.value: variant.extra_event_inputs for kind, variant in RESULT_VARIANTS.items()
+        }
+        assert declared["FIX_RESULT"] == ("report",)
+        assert declared["CLARIFICATION_QUESTION"] == ("report",)
+        assert declared["EXTERNAL_DEPENDENCY"] == ("head",)
+        assert declared["GATE_ANSWER"] == ()
 
     def test_record_kinds_are_internal(self) -> None:
         """host actionが投稿するrecordは内部record（user-input recordではない）。"""
         from claude_code_codex_review_loop.domain.values import INTERNAL_RECORD_KINDS
 
-        assert all(spec.record_kind in INTERNAL_RECORD_KINDS for spec in ACTION_SPECS.values())
+        assert set(RESULT_VARIANTS) <= INTERNAL_RECORD_KINDS
+
+
+class TestVariantLookup:
+    def test_variant_for_allowed_kind(self) -> None:
+        spec = spec_for(HostAction.APPLY_FINDINGS)
+        variant = spec.variant_for(RecordKind.PERMISSION_BLOCK)
+        assert variant is not None and variant.event is ev.ToolPermissionBlocked
+
+    def test_variant_for_disallowed_kind_is_none(self) -> None:
+        """当該actionで許可されないrecord種別は引けない（engineが拒否できる）。"""
+        assert spec_for(HostAction.RECORD_DECISION).variant_for(RecordKind.FIX_RESULT) is None
+
+    def test_variants_property_follows_the_declared_order(self) -> None:
+        spec = spec_for(HostAction.APPLY_FINDINGS)
+        assert tuple(variant.record_kind for variant in spec.variants) == spec.result_kinds
 
 
 class TestLookup:
     def test_spec_for_returns_the_entry(self) -> None:
-        assert spec_for(HostAction.RECORD_DECISION).record_kind is RecordKind.DECISION_RECORD
+        assert spec_for(HostAction.RECORD_DECISION).result_kinds == (RecordKind.DECISION_RECORD,)
 
     def test_spec_for_kind_resolves_envelope_values(self) -> None:
         spec = spec_for_kind("ANSWER_GATE_QUESTION")

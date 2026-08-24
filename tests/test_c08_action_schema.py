@@ -16,6 +16,7 @@ from claude_code_codex_review_loop.domain.commands import HostAction
 from claude_code_codex_review_loop.schema import REGISTRY, SchemaKind, validate
 from claude_code_codex_review_loop.schema.action import HOST_ACTION, SUBMIT
 from claude_code_codex_review_loop.schema.migrate import load_with_migration
+from claude_code_codex_review_loop.schema.projection import canonical_payload_hash
 
 SHA = "0123abcd"
 
@@ -53,9 +54,18 @@ def _submit(**overrides: object) -> dict[str, object]:
         "nonce": "nonce-1",
         "result_hash": "rh-1",
         "outcome": "COMPLETED",
+        "result_kind": "FIX_RESULT",
     }
     payload.update(overrides)
     return payload
+
+
+def _failed(**overrides: object) -> dict[str, object]:
+    """FAILED submit（result_kindを持たず、error_categoryを持つ）。"""
+    payload = _submit(outcome="FAILED", error_category="TRANSIENT")
+    del payload["result_kind"]
+    payload.update(overrides)
+    return {name: value for name, value in payload.items() if value is not None}
 
 
 def _codes(payload: dict[str, object], definition: object = None) -> set[str]:
@@ -130,14 +140,114 @@ class TestSubmitEnvelope:
     def test_accepts_the_binding_echo(self) -> None:
         assert validate(SUBMIT, _raw(_submit())).ok
 
+    def test_completed_requires_the_result_kind(self) -> None:
+        """どのresult variantを返したかをsubmitへbindする（engineが決定論的に写せる）。"""
+        payload = _submit()
+        del payload["result_kind"]
+        assert not validate(SUBMIT, _raw(payload)).ok
+
+    def test_completed_rejects_an_error_category(self) -> None:
+        """成功なのに失敗分類がある組み合わせを受理しない。"""
+        assert not validate(SUBMIT, _raw(_submit(error_category="AUTH"))).ok
+
     def test_failed_requires_an_error_category(self) -> None:
-        assert not validate(SUBMIT, _raw(_submit(outcome="FAILED"))).ok
-        assert validate(SUBMIT, _raw(_submit(outcome="FAILED", error_category="TRANSIENT"))).ok
+        assert not validate(SUBMIT, _raw(_failed(error_category=None))).ok
+        assert validate(SUBMIT, _raw(_failed())).ok
+
+    def test_failed_rejects_a_result_kind(self) -> None:
+        """失敗なのに結果種別がある組み合わせを受理しない。"""
+        assert not validate(SUBMIT, _raw(_failed(result_kind="FIX_RESULT"))).ok
+
+    @pytest.mark.parametrize("category", ["TRANSIENT", "NOT_FOUND", "AUTH", "PERMANENT"])
+    def test_error_category_vocabulary_is_p003(self, category: str) -> None:
+        """失敗分類はP-003の`ErrorCategory`をそのまま使う（別vocabularyを作らない）。"""
+        assert validate(SUBMIT, _raw(_failed(error_category=category))).ok
+
+    @pytest.mark.parametrize("category", ["TRANSIET", "transient", "UNKNOWN", ""])
+    def test_unknown_error_category_is_rejected(self, category: str) -> None:
+        """自由文字列だった頃に通っていたtypoを受理しない。"""
+        assert "enum_invalid" in {
+            error.code for error in validate(SUBMIT, _raw(_failed(error_category=category))).errors
+        }
+
+    def test_unknown_result_kind_is_rejected(self) -> None:
+        assert "enum_invalid" in {
+            error.code for error in validate(SUBMIT, _raw(_submit(result_kind="NOT_A_KIND"))).errors
+        }
 
     def test_v1_only_kind_is_rejected(self) -> None:
         assert "enum_invalid" in {
             error.code for error in validate(SUBMIT, _raw(_submit(action_kind="IMPLEMENT_ISSUE"))).errors
         }
+
+    def test_unknown_outcome_is_only_an_enum_error(self) -> None:
+        """outcome自体が不正なら、排他ruleは追加報告しない（二重報告を避ける）。"""
+        result = validate(SUBMIT, _raw(_submit(outcome="UNKNOWN")))
+        assert {error.code for error in result.errors} == {"enum_invalid"}
+
+
+class TestSubmitV1:
+    """v1は自由文字列の失敗分類とresult_kind無しを受理していた（歴史的形状）。"""
+
+    def _v1(self, **overrides: object) -> dict[str, object]:
+        payload = _submit(schema_version=1)
+        del payload["result_kind"]
+        payload.update(overrides)
+        return payload
+
+    def test_v1_completed_needs_no_result_kind(self) -> None:
+        assert validate(SUBMIT, _raw(self._v1())).ok
+
+    def test_v1_failed_requires_error_category(self) -> None:
+        assert not validate(SUBMIT, _raw(self._v1(outcome="FAILED"))).ok
+        assert validate(SUBMIT, _raw(self._v1(outcome="FAILED", error_category="network"))).ok
+
+    def test_v1_cannot_be_migrated(self) -> None:
+        """COMPLETEDのv1 submitはresult_kindを捏造できないため持ち上げられない。"""
+        result = load_with_migration(SUBMIT, _raw(self._v1()))
+        assert (result.ok, result.stage) == (False, "migration")
+
+
+class TestFingerprintsDistinguishActions:
+    """異なる有効なenvelopeが同じfingerprintへ潰れない（checkpointの照合に使う）。"""
+
+    def _hash(self, payload: dict[str, object]) -> str:
+        return canonical_payload_hash(payload)
+
+    def test_payload_difference_changes_the_hash(self) -> None:
+        first = _action(payload={"round": 1, "finding_ids": ["F-1"]})
+        second = _action(payload={"round": 2, "finding_ids": ["F-2"]})
+        assert validate(HOST_ACTION, _raw(first)).ok and validate(HOST_ACTION, _raw(second)).ok
+        assert self._hash(first) != self._hash(second)
+
+    def test_verified_records_difference_changes_the_hash(self) -> None:
+        second = _action(verified_records=[{"comment_id": "c-2", "head_sha": SHA}])
+        assert validate(HOST_ACTION, _raw(second)).ok
+        assert self._hash(_action()) != self._hash(second)
+
+    def test_payload_hash_difference_changes_the_hash(self) -> None:
+        assert self._hash(_action()) != self._hash(_action(payload_hash="ph-2"))
+
+    def test_binding_alone_does_not_identify_the_action(self) -> None:
+        """action ID / kind / nonce / head / result pathが同じでも別actionであり得る。"""
+        first = _action(payload={"round": 1, "finding_ids": ["F-1"]})
+        second = _action(payload={"round": 2, "finding_ids": ["F-2"]})
+        binding = ("action_id", "action_kind", "nonce", "expected_head_sha", "result_path")
+        assert all(first[name] == second[name] for name in binding)
+        assert self._hash(first) != self._hash(second)
+
+    def test_error_category_difference_changes_the_submit_hash(self) -> None:
+        """同じresult hashの失敗でも、分類が違えば別のsubmitとして扱える。"""
+        transient = _failed(error_category="TRANSIENT")
+        permanent = _failed(error_category="PERMANENT")
+        assert validate(SUBMIT, _raw(transient)).ok and validate(SUBMIT, _raw(permanent)).ok
+        assert transient["result_hash"] == permanent["result_hash"]
+        assert self._hash(transient) != self._hash(permanent)
+
+    def test_result_kind_difference_changes_the_submit_hash(self) -> None:
+        first = _submit(result_kind="FIX_RESULT")
+        second = _submit(result_kind="CLARIFICATION_QUESTION")
+        assert self._hash(first) != self._hash(second)
 
 
 class TestVersioning:
