@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import pytest
-from c06_support.helpers import HEAD
+from c06_support.helpers import HEAD, PRODUCER, make_comment, marker_payload
 from c07_support.helpers import RUN, chain_comments_of, pending_fixture, verified_chain
 
 from claude_code_codex_review_loop.domain.values import RecordKind
+from claude_code_codex_review_loop.identity import ProducerAllowlist, verify_record_chain
 from claude_code_codex_review_loop.identity.record_chain import VerifiedRecord
 from claude_code_codex_review_loop.state import (
     PendingAlreadyPosted,
@@ -23,6 +24,7 @@ from claude_code_codex_review_loop.state import (
     read_transaction,
 )
 from claude_code_codex_review_loop.transport.conversation import body_hash_of
+from claude_code_codex_review_loop.transport.marker import attach_marker
 
 _K = RecordKind
 _QUESTION = _K.CLARIFICATION_QUESTION
@@ -114,6 +116,32 @@ class TestEvaluatePending:
         outcome = evaluate_pending(transaction, run_id=RUN, records=records)
         assert isinstance(outcome, PendingAlreadyPosted)
         assert outcome.record.seq == 2 and outcome.record.key == transaction.binding
+
+    def test_same_binding_with_a_different_body_stops(self) -> None:
+        """**同一key・別本文**のrecordを投稿済みとして受理しない（AC-C07-02の契約）。
+
+        C-06はmarkerのkeyを本文から再導出しないため、intactなchainでもこの差異は
+        chain検証では検出できない。ここで照合しないと、中断したturnの内容が永久に
+        GitHubへ載らないままtransactionが消費される。
+        """
+        prev = _prev_hash(1)
+        fixture = pending_fixture(seq=2, prev=prev)
+        forged = attach_marker(
+            "DIFFERENT BODY",
+            marker_payload(kind=_QUESTION, run_id=RUN, head=HEAD, seq=2, prev=prev, body="record 2"),
+        )
+        verification = verify_record_chain(
+            (*chain_comments_of([_K.REVIEW_RESULT]), make_comment(2002, forged)),
+            run_id=RUN,
+            detection_head=HEAD,
+            producers=ProducerAllowlist(logins=frozenset({PRODUCER})),
+            checkpoint=None,
+            probes={},
+        )
+        assert verification.is_intact  # 正規producerの正規markerなのでchain検証は通る
+        assert verification.records[1].key == fixture.binding  # 同一key
+        outcome = evaluate_pending(_read(fixture.transaction), run_id=RUN, records=verification.records)
+        assert isinstance(outcome, PendingUnavailable) and "一致しない" in outcome.detail
 
     def test_other_record_on_the_same_seq_stops(self) -> None:
         """同一seqを別bindingのrecordが占有していれば停止する（seq conflictを作らない）。"""

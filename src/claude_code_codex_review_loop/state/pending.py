@@ -9,9 +9,11 @@
   C-01のR-P（pending保持中の明示resume -> `PersistRecord`）を経てC-08が行う。C-05の
   `ensure_comment_posted`が投稿直前にsearch-firstを行うため、重複防止は二重に効く
 - **投稿済み判定は検証済みrecordで行う**（marker `key` = `PersistRecord.binding` = ここの
-  `binding`。ADR-0010 決定7）。未検証markerを根拠にしない
-- **推測して再投稿しない**: 直前seqの欠落、同一seqの別record、再compose結果が記録した
-  body hashと一致しない場合は、いずれも理由つきで停止する
+  `binding`。ADR-0010 決定7）。未検証markerを根拠にしない。ただしbindingの一致だけでは
+  足りず、**本文が期待する完成形と一致すること**まで確認する（C-06はkeyを本文から
+  再導出しないため、「同一key・別本文」のrecordを投稿済みと誤認できてしまう）
+- **推測して再投稿しない**: 直前seqの欠落、同一seqの別record、投稿済みrecordの本文不一致、
+  再compose結果が記録したbody hashと一致しない場合は、いずれも理由つきで停止する
 """
 
 from __future__ import annotations
@@ -136,16 +138,20 @@ def evaluate_pending(
 ) -> PendingOutcome:
     """中断中recordの再発行可否を判定する（pure）。
 
-    `records`は当該runの**検証済み**record列。同一`seq`が既に埋まっていれば、bindingが
-    一致する場合だけ「投稿済み」とし、別bindingならseq conflictとして停止する。
-    未投稿の場合は`prev`（直前seqのbody hash。GitHub由来）からmarkerを再構成し、
-    記録したbody hashと一致することを確認してからdirectiveを返す。
+    `records`は当該runの**検証済み**record列。まず`prev`（直前seqのbody hash。GitHub由来）
+    からmarkerを再構成し、期待する完成形を求める。
+
+    - 同一`seq`を別bindingのrecordが占有していればseq conflictとして停止する
+    - 同一bindingのrecordがあっても、**本文が期待する完成形と一致しなければ停止する**。
+      C-06はmarkerのkeyを本文から再導出しないため、ここで照合しないと「同一key・別本文」の
+      recordを投稿済みとして受理し、中断したturnの内容が永久にGitHubへ載らない
+      （AC-C07-02の「同一key ⇒ 同一本文」に反する）。body hashはmarker行（kind・head・
+      seq・prev・projection）まで覆うため、この1回の照合で全要素の一致を判定できる
+    - 未投稿なら、記録したbody hashとの一致を確認してからdirectiveを返す
     """
     by_seq = {record.seq: record for record in records}
     occupant = by_seq.get(transaction.seq)
-    if occupant is not None:
-        if occupant.key == transaction.binding:
-            return PendingAlreadyPosted(record=occupant)
+    if occupant is not None and occupant.key != transaction.binding:
         return PendingUnavailable(
             detail=f"seq {transaction.seq}を別bindingのrecordが占有している（{occupant.key}）"
         )
@@ -171,4 +177,10 @@ def evaluate_pending(
     digest = body_hash_of(body)
     if transaction.body_hash is not None and transaction.body_hash != digest:
         return PendingUnavailable(detail="再composeした本文が記録したbody hashと一致しない")
+    if occupant is not None:
+        if occupant.body_hash != digest:
+            return PendingUnavailable(
+                detail=f"seq {transaction.seq}の投稿済みrecordの本文がtransactionと一致しない"
+            )
+        return PendingAlreadyPosted(record=occupant)
     return PendingReissueRequired(transaction=transaction, body=body, body_hash=digest)

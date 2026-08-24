@@ -20,7 +20,7 @@ Phase 7はPR-1（ADR-0010: recordのcanonical projection）、PR-2（ADR-0011: c
 ### 再発行directive（AC-C07-02）
 
 1. **C-07は投稿しない**。resumeは「この本文をこのkeyで投稿する」というdirectiveまでを返し、実際の再投稿はC-01のR-P（pending保持中の明示resume -> `PersistRecord`）を経てC-08が実行する。C-07が独自の投稿経路を持つと、state machineの外側にGitHub mutationが1つ増える。**「resumeは投稿しない」という以前の誤った主張とは別物**で、再発行そのものは必須（禁止されるのは重複投稿と別keyでの再投稿）
-2. **投稿済み判定は検証済みrecordで行う**。marker `key` = `PersistRecord.binding`（ADR-0010 決定7）なので、bindingの一致だけで判定できる。C-05の`ensure_comment_posted`も投稿直前にsearch-firstを行うため、重複防止は二重に効く
+2. **投稿済み判定は検証済みrecordで行い、bindingの一致だけで確定しない**。marker `key` = `PersistRecord.binding`（ADR-0010 決定7）だが、**C-06はkeyを本文から再導出しない**ため、「同一key・別本文」のrecordはintactなchainとして通ってしまう。これを投稿済みと受理すると、中断したturnの内容が永久にGitHubへ載らないままtransactionが消費される（AC-C07-02の「同一key ⇒ 同一本文」に反する）。占有recordがある場合も期待する完成形を再composeし、**body hashの一致まで確認する**。body hashはmarker行（kind・head・seq・prev・projection）を覆うため、この1回の照合で全要素の一致を判定できる。C-05の`ensure_comment_posted`も投稿直前にsearch-firstを行うため、重複防止は二重に効く
 3. **markerは製品関数で再構成する**（`compose_record_marker_payload` -> `attach_marker`）。`prev`は検証済みchainの`seq-1`のbody hash（**GitHub由来**）で、checkpointに保存した値を使わない。chainが進んでprevが変わっていれば、次の決定4で検出される
 4. **byte一致を検証する**。`transaction.body_hash`が記録されていれば、再compose結果の`body_hash_of`と一致することを要求する。不一致は`PendingUnavailable`で停止する（同一seqで異なる本文を投稿すると、C-06のseq conflictで`BLOCKED`になる。ADR-0010 決定13）
 5. **推測して再投稿しない**。直前seqがchainに無い（gap）／同一seqを別bindingのrecordが占有している（seq conflict）／composeがADR-0007の上限に触れる、はいずれも理由つきで停止する
@@ -41,15 +41,17 @@ Phase 7はPR-1（ADR-0010: recordのcanonical projection）、PR-2（ADR-0011: c
 
 ### resume contextの組み立て（AC-C07-01）
 
-14. **pure coreとI/O収集を分ける**（`build_resume_context` / `observe_resume`）。C-06の`verify_record_chain` + `probe_known_records`と同じ構造で、判定はfixtureだけで決定論的に検証できる
-15. **段階ごとに停止する**（`ResumeStage`: `RUN_SELECTION` / `INTEGRITY` / `HEAD` / `PENDING` / `DIRECT_ANSWER`）。`ResumeStopped`は理由に加えて**原因の値そのもの**（`RunAmbiguous`や`ChainVerification`等の直和）を持ち、detail文字列だけで区別させない
-16. **chain violationは停止**（C-06の契約どおり`is_intact`でgateする）。一方、**artifactの不一致は停止ではなくcacheの破棄**として結果に載せる（GitHub側が常に上位。ADR-0012 決定19）
-17. **pendingとheadの優先順位を決めない**。C-01のR-Pがpendingを優先するため、順序の決定はC-10に属する。C-07は両方を観測結果として返す
-18. **artifactのhash読み出しは注入する**（(run ID, 記録path) -> hash）。coreを純粋に保ち、I/O側は`artifact_content_hash(paths.runs_dir / run_id, path)`を渡す（`run_directory`はdirectoryを作成するため使わない）
-19. **既定値を持たない**。`max_pages`等の設定はすべて引数で受け取る（既定値の解決はC-12）
+14. **head照合に依存しない観測を先に集める**。pending評価と直接回答の列挙はhead照合に依存しないため、head段階の停止より前に実行し、**停止結果にも同梱する**。そうしないと、(a) C-01のR-P（pending保持中の明示resumeは永続化確認を優先）へ渡すdirectiveが停止で失われ、(b) `MERGE_FAILED`で「merge承認を確認できないので停止 -> その承認が居る候補列挙へ到達できない」という循環が生じる
+15. **受理した直接回答の承認をhead照合へ注入する**。D-021のGitHub直接commentはchain recordを伴わないため（C-06は`PersistRecord`を発行しない）、`external_approvals`として`reconcile_head`へ渡さないとmerge承認が存在しないものとして扱われる（ADR-0012 決定16がPR-4へ残した配線）。注入するのは`DecisionContext.kind`が`MERGE_APPROVAL`の場合だけで、他のuser-input recordは承認ではない
+16. **pure coreとI/O収集を分ける**（`build_resume_context` / `observe_resume`）。C-06の`verify_record_chain` + `probe_known_records`と同じ構造で、判定はfixtureだけで決定論的に検証できる
+17. **段階ごとに停止する**（`ResumeStage`: `RUN_SELECTION` / `INTEGRITY` / `HEAD` / `PENDING` / `DIRECT_ANSWER`）。`ResumeStopped`は理由に加えて**原因の値そのもの**（`RunAmbiguous`や`ChainVerification`等の直和）を持ち、detail文字列だけで区別させない
+18. **chain violationは停止**（C-06の契約どおり`is_intact`でgateする）。一方、**artifactの不一致は停止ではなくcacheの破棄**として結果に載せる（GitHub側が常に上位。ADR-0012 決定19）
+19. **pendingとheadの優先順位を決めない**。C-01のR-Pがpendingを優先するため、順序の決定はC-10に属する。C-07は両方を観測結果として返す
+20. **artifactのhash読み出しは注入する**（(run ID, 記録path) -> hash）。coreを純粋に保ち、I/O側は`artifact_content_hash(paths.runs_dir / run_id, path)`を渡す（`run_directory`はdirectoryを作成するため使わない）
+21. **既定値を持たない**。`max_pages`等の設定はすべて引数で受け取る（既定値の解決はC-12）
 
 ## Consequences
 
 - C-08はturnの節目で`save_checkpoint`し、投稿前に`transaction`（projection込み）を保存してから`PersistRecord`を実行する。resume時は`PendingReissueRequired.body`をそのまま`ensure_comment_posted`へ渡せばよい
-- C-10は`ResumeContext`をstateと組み合わせてC-01 eventを構築し、`ResumeStopped`はeventを発行せず理由を提示する。直接回答の`DecisionContext`（期待するuser-input record種別・head・fingerprint）はC-10 / C-11が決める
+- C-10は`ResumeContext`をstateと組み合わせてC-01 eventを構築し、`ResumeStopped`はeventを発行せず理由を提示する。停止結果に同梱された`pending`（R-P用のdirective）と`direct_answer`は、停止の提示と同時に扱える。直接回答の`DecisionContext`（期待するuser-input record種別・head・fingerprint）はC-10 / C-11が決める
 - Phase 7の受入条件（AC-C07-01 / 02 / 03 / 05 / 06）が揃う。AC-C07-04（retention / cleanup）はPhase 14（#19）が扱う

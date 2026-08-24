@@ -284,6 +284,127 @@ class TestDirectAnswerWiring:
         assert not isinstance(context.direct_answer, DirectAnswerAccepted)
 
 
+class TestObservationsSurviveStops:
+    """head照合に依存しない観測（pending / 直接回答）は、停止時も落とさない。"""
+
+    def _merge_failed_summary(self, **sections: object) -> tuple[RunSummary, ...]:
+        payload: dict[str, object] = {
+            "heads": {"observed_sha": HEAD, "approved_sha": HEAD},
+            "state": {"state": State.MERGE_FAILED.value},
+        }
+        payload.update(sections)
+        return (
+            RunSummary(
+                run_id=RUN,
+                verification=verified_chain([_K.REVIEW_RESULT], payloads={1: approved_review_payload()}),
+                checkpoint=_loaded(**payload),
+            ),
+        )
+
+    def test_direct_merge_approval_completes_the_merge_gate(self) -> None:
+        """**D-021の承認をreconcileへ注入する**。chain recordを伴わない承認でも同一headの
+        再確認が成立し、「承認が無いので停止 -> 承認は候補列挙に居るのに見えない」という
+        循環を作らない（ADR-0012 決定16の配線）。"""
+        answer = make_comment(
+            3001,
+            "approve",
+            author="mega-gorilla",
+            created_at="2026-08-24T11:00:00Z",
+            repository=REPOSITORY,
+            number=NUMBER,
+        )
+        observation = _observation(
+            summaries=self._merge_failed_summary(),
+            comments=chain_comments_of([_K.REVIEW_RESULT]) + (answer,),
+            decision_context=_CONTEXT,
+            allowlist=_ALLOWLIST,
+        )
+        context = _context(observation)
+        assert context.verdict is ResumeVerdict.SAME_HEAD_VALIDATED
+        assert [evidence.kind for evidence in context.head.valid_approvals] == [
+            _K.REVIEW_RESULT,
+            _K.MERGE_APPROVAL,
+        ]
+        assert isinstance(context.direct_answer, DirectAnswerAccepted)
+
+    def test_head_stop_still_carries_the_pending_directive(self) -> None:
+        """C-01のR-Pはpendingを優先するため、head停止でもdirectiveを返せる必要がある。"""
+        comments = chain_comments_of([_K.REVIEW_RESULT], payloads={1: approved_review_payload()})
+        fixture = pending_fixture(seq=2, prev=body_hash_of(comments[0].body))
+        summaries = (
+            RunSummary(
+                run_id=RUN,
+                verification=verified_chain([_K.REVIEW_RESULT], payloads={1: approved_review_payload()}),
+                checkpoint=_loaded(
+                    heads={"observed_sha": HEAD, "approved_sha": HEAD},
+                    state={"state": State.MERGE_FAILED.value},
+                    transaction=fixture.transaction,
+                ),
+            ),
+        )
+        stopped = _stopped(_observation(summaries=summaries))
+        assert stopped.stage is ResumeStage.HEAD
+        assert isinstance(stopped.pending, PendingReissueRequired)
+        assert stopped.pending.body == fixture.body
+
+    def test_unobservable_head_still_carries_the_observations(self) -> None:
+        comments = chain_comments_of([_K.REVIEW_RESULT])
+        fixture = pending_fixture(seq=2, prev=body_hash_of(comments[0].body))
+        summaries = (
+            RunSummary(
+                run_id=RUN,
+                verification=verified_chain([_K.REVIEW_RESULT]),
+                checkpoint=_loaded(transaction=fixture.transaction),
+            ),
+        )
+        stopped = _stopped(_observation(summaries=summaries, pull=_pull("abc")))
+        assert stopped.stage is ResumeStage.HEAD
+        assert isinstance(stopped.pending, PendingReissueRequired)
+
+    def test_direct_answer_stop_carries_the_pending_directive(self) -> None:
+        comments = chain_comments_of([_K.REVIEW_RESULT])
+        fixture = pending_fixture(seq=2, prev=body_hash_of(comments[0].body))
+        summaries = (
+            RunSummary(
+                run_id=RUN,
+                verification=verified_chain([_K.REVIEW_RESULT]),
+                checkpoint=_loaded(transaction=fixture.transaction),
+            ),
+        )
+        observation = _observation(
+            summaries=summaries,
+            comments=comments,
+            decision_context=_CONTEXT,
+            allowlist=AllowlistUnavailable(detail="未設定"),
+        )
+        stopped = _stopped(observation)
+        assert stopped.stage is ResumeStage.DIRECT_ANSWER
+        assert isinstance(stopped.pending, PendingReissueRequired)
+
+    def test_non_approval_direct_answers_are_not_injected(self) -> None:
+        """承認以外のuser-input record（例: GATE_QUESTION）は承認として注入しない。"""
+        context = DecisionContext(
+            kind=_K.GATE_QUESTION, repository=REPOSITORY, number=NUMBER, head_sha=HEAD
+        )
+        answer = make_comment(
+            3001,
+            "質問です",
+            author="mega-gorilla",
+            created_at="2026-08-24T11:00:00Z",
+            repository=REPOSITORY,
+            number=NUMBER,
+        )
+        observation = _observation(
+            summaries=self._merge_failed_summary(),
+            comments=chain_comments_of([_K.REVIEW_RESULT]) + (answer,),
+            decision_context=context,
+            allowlist=_ALLOWLIST,
+        )
+        stopped = _stopped(observation)
+        assert stopped.stage is ResumeStage.HEAD
+        assert isinstance(stopped.direct_answer, DirectAnswerAccepted)
+
+
 class TestStops:
     def test_ambiguous_run_stops(self) -> None:
         summaries = (

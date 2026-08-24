@@ -23,6 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, unique
 
+from ..domain.values import RecordKind
 from ..identity.allowlist import DecisionAllowlistState, DecisionContext, ProducerAllowlist
 from ..identity.errors import IdentityError
 from ..identity.record_chain import (
@@ -38,6 +39,7 @@ from ..transport.gh import GhContext, RepoRef, RetryPolicy
 from ..transport.pull_request import UnverifiedPullRequest, get_pull_request
 from .artifacts import ArtifactCheck, artifact_content_hash, read_artifact_bindings, verify_artifact_bindings
 from .direct_answer import (
+    DirectAnswerAccepted,
     DirectAnswerAmbiguous,
     DirectAnswerOutcome,
     DirectAnswerUnavailable,
@@ -62,6 +64,7 @@ from .pending import (
     read_transaction,
 )
 from .reconcile import (
+    ApprovalEvidence,
     HeadReconciliation,
     HeadUnobservable,
     ReconciliationStopped,
@@ -123,12 +126,19 @@ ResumeStopCause = (
 
 @dataclass(frozen=True)
 class ResumeStopped:
-    """再開できない（推測して前進しない）。causeは停止させた値そのもの。"""
+    """再開できない（推測して前進しない）。causeは停止させた値そのもの。
+
+    停止より前に取れた**独立な観測**（pending directiveと直接回答）は同梱する。
+    C-01のR-Pはpendingを優先するため、head段階で停止してもC-10が永続化確認を先に
+    再発行できる必要がある（ADR-0013 決定17。C-07は優先順位を決めない）。
+    """
 
     stage: ResumeStage
     detail: str
     cause: ResumeStopCause
     run_id: str | None = None
+    pending: PendingOutcome | None = None
+    direct_answer: DirectAnswerOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -197,8 +207,53 @@ def _selected_summary(summaries: Sequence[RunSummary], run_id: str) -> RunSummar
     raise IdentityError("resume", f"選択したrunのsummaryが無い: {run_id}")  # pragma: no cover
 
 
+def _external_approvals(
+    answer: DirectAnswerOutcome | None, context: DecisionContext | None
+) -> tuple[ApprovalEvidence, ...]:
+    """受理した直接回答のうち、head bindingを持つ承認をreconcileへ渡す形にする。
+
+    GitHub直接commentの承認（D-021）はchain recordを伴わないため（C-06は
+    `PersistRecord`を発行しない）、`reconcile_head`へ`external_approvals`として
+    注入しないとmerge承認が存在しないものとして扱われる（ADR-0012 決定16）。
+    承認種別は`MERGE_APPROVAL`だけで、他のuser-input recordは承認ではない。
+    """
+    if not isinstance(answer, DirectAnswerAccepted) or context is None:
+        return ()
+    if context.kind is not RecordKind.MERGE_APPROVAL:
+        return ()
+    decision = answer.decision
+    return (
+        ApprovalEvidence(
+            kind=context.kind,
+            binding=decision.binding.value,
+            head_sha=decision.head_sha,
+            comment_id=decision.comment_id,
+            detail=context.merge_method,
+        ),
+    )
+
+
+def _evaluate_pending(payload: Mapping[str, object] | None, *, run_id: str,
+                      records: Sequence[VerifiedRecord]) -> PendingOutcome:
+    """checkpointのtransactionから中断recordの扱いを決める（head照合に依存しない）。"""
+    if payload is None:
+        return PendingAbsent()
+    transaction = read_transaction(payload)
+    if isinstance(transaction, PendingUnavailable):
+        return transaction
+    if transaction is None:
+        return PendingAbsent()
+    return evaluate_pending(transaction, run_id=run_id, records=records)
+
+
 def build_resume_context(observation: ResumeObservation) -> ResumeResult:
-    """観測からresume contextを組み立てる（pure）。段階ごとに停止条件を持つ。"""
+    """観測からresume contextを組み立てる（pure）。段階ごとに停止条件を持つ。
+
+    **head照合に依存しない観測（pending / 直接回答）を先に集める**。head段階で停止する
+    場合でも、C-10がR-P（pending優先）とC-11の意味解釈へ進める材料を落とさないため。
+    受理した直接回答は`external_approvals`としてhead照合へ注入する（D-021の承認は
+    chain recordを伴わない）。
+    """
     selection = select_run(observation.summaries)
     if not isinstance(selection, RunSelected):
         return ResumeStopped(
@@ -221,38 +276,49 @@ def build_resume_context(observation: ResumeObservation) -> ResumeResult:
     records = verification.records if verification is not None else ()
     payload = summary.checkpoint.payload if isinstance(summary.checkpoint, CheckpointLoaded) else None
 
+    pending = _evaluate_pending(payload, run_id=run_id, records=records)
+    answer: DirectAnswerOutcome | None = None
+    if observation.decision_context is not None and observation.decision_allowlist is not None:
+        answer = enumerate_direct_answers(
+            observation.comments,
+            allowlist=observation.decision_allowlist,
+            context=observation.decision_context,
+            consumed_comment_ids=observation.consumed_comment_ids,
+            after=records[-1].created_at if records else None,
+        )
+
+    def _stop(stage: ResumeStage, detail: str, cause: ResumeStopCause) -> ResumeStopped:
+        return ResumeStopped(
+            stage=stage,
+            detail=detail,
+            cause=cause,
+            run_id=run_id,
+            pending=pending,
+            direct_answer=answer,
+        )
+
+    if isinstance(pending, PendingUnavailable):
+        return _stop(ResumeStage.PENDING, pending.detail, pending)
+    if isinstance(answer, DirectAnswerAmbiguous | DirectAnswerUnavailable):
+        detail = (
+            f"有効な直接回答が{len(answer.decisions)}件ある"
+            if isinstance(answer, DirectAnswerAmbiguous)
+            else answer.detail
+        )
+        return _stop(ResumeStage.DIRECT_ANSWER, detail, answer)
+
     observed = observe_head(observation.pull)
     if isinstance(observed, HeadUnobservable):
-        return ResumeStopped(
-            stage=ResumeStage.HEAD, detail=observed.detail, cause=observed, run_id=run_id
-        )
+        return _stop(ResumeStage.HEAD, observed.detail, observed)
     reconciliation = reconcile_head(
         observed,
         records=records,
         heads=read_checkpoint_heads(payload or {}),
         checkpoint_state=status.checkpoint_state,
+        external_approvals=_external_approvals(answer, observation.decision_context),
     )
     if isinstance(reconciliation, ReconciliationStopped):
-        return ResumeStopped(
-            stage=ResumeStage.HEAD, detail=reconciliation.detail, cause=reconciliation, run_id=run_id
-        )
-
-    pending: PendingOutcome = PendingAbsent()
-    if payload is not None:
-        transaction = read_transaction(payload)
-        if isinstance(transaction, PendingUnavailable):
-            return ResumeStopped(
-                stage=ResumeStage.PENDING,
-                detail=transaction.detail,
-                cause=transaction,
-                run_id=run_id,
-            )
-        if transaction is not None:
-            pending = evaluate_pending(transaction, run_id=run_id, records=records)
-            if isinstance(pending, PendingUnavailable):
-                return ResumeStopped(
-                    stage=ResumeStage.PENDING, detail=pending.detail, cause=pending, run_id=run_id
-                )
+        return _stop(ResumeStage.HEAD, reconciliation.detail, reconciliation)
 
     def _digest(path: str) -> str | None:
         return observation.artifact_digest(run_id, path)
@@ -263,26 +329,6 @@ def build_resume_context(observation: ResumeObservation) -> ResumeResult:
         records=records,
         digest=_digest,
     )
-
-    answer: DirectAnswerOutcome | None = None
-    if observation.decision_context is not None and observation.decision_allowlist is not None:
-        answer = enumerate_direct_answers(
-            observation.comments,
-            allowlist=observation.decision_allowlist,
-            context=observation.decision_context,
-            consumed_comment_ids=observation.consumed_comment_ids,
-            after=records[-1].created_at if records else None,
-        )
-        if isinstance(answer, DirectAnswerAmbiguous | DirectAnswerUnavailable):
-            detail = (
-                f"有効な直接回答が{len(answer.decisions)}件ある"
-                if isinstance(answer, DirectAnswerAmbiguous)
-                else answer.detail
-            )
-            return ResumeStopped(
-                stage=ResumeStage.DIRECT_ANSWER, detail=detail, cause=answer, run_id=run_id
-            )
-
     return ResumeContext(
         run_id=run_id,
         repository=observation.repository,
