@@ -47,6 +47,7 @@ from .marker import (
     extract_marker,
     sanitize_agent_body,
 )
+from .pull_request import UnverifiedPullRequest, get_pull_request, pull_request_from_json
 from .render import PreparedBody, normalize_newlines, prepare_public_body
 from .threads import (
     ReplyOutcome,
@@ -84,6 +85,7 @@ __all__ = [
     "ThreadComment",
     "TransportError",
     "UnverifiedComment",
+    "UnverifiedPullRequest",
     "UnverifiedThread",
     "attach_marker",
     "body_hash_of",
@@ -94,11 +96,13 @@ __all__ = [
     "fetch_review_threads",
     "find_comment_by_marker",
     "get_issue_comment",
+    "get_pull_request",
     "get_pull_comment",
     "normalize_newlines",
     "post_issue_comment",
     "post_thread_reply",
     "prepare_public_body",
+    "pull_request_from_json",
     "reply_with_fallback",
     "run_gh",
     "run_gh_api",

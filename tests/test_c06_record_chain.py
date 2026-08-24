@@ -26,7 +26,7 @@ from claude_code_codex_review_loop.identity import (
     compose_record_marker_payload,
     verify_record_chain,
 )
-from claude_code_codex_review_loop.identity.record_chain import _parse_chain_payload
+from claude_code_codex_review_loop.identity.record_chain import parse_record_marker
 from claude_code_codex_review_loop.schema.projection import DecodedProjection
 from claude_code_codex_review_loop.transport.conversation import UnverifiedComment, body_hash_of
 from claude_code_codex_review_loop.transport.marker import attach_marker
@@ -90,7 +90,7 @@ class TestComposePayload:
         """composeした payloadはparserで同値へ戻る（producerとverifierの共有規約）。"""
         payload = marker_payload(kind=RecordKind.FIX_RESULT, seq=2, prev="e" * 64)
         comment = make_comment(1, attach_marker("body", payload))
-        parsed = _parse_chain_payload(comment)
+        parsed = parse_record_marker(comment)
         assert parsed == ChainPayload(
             key=str(payload["key"]),
             kind=RecordKind.FIX_RESULT,
@@ -163,7 +163,7 @@ class TestCanonicalMarkerForm:
 
     def test_token_without_trailing_marker(self) -> None:
         comment = make_comment(1, "本文に CC_REVIEW_META がある")
-        assert isinstance(_parse_chain_payload(comment), str)
+        assert isinstance(parse_record_marker(comment), str)
 
     def test_extra_token_besides_marker(self) -> None:
         body = attach_marker(
@@ -172,7 +172,7 @@ class TestCanonicalMarkerForm:
                 key="k", kind=RecordKind.REVIEW_RESULT, run_id=RUN, head_sha=HEAD, seq=1, prev_body_hash=None
             ),
         )
-        assert isinstance(_parse_chain_payload(make_comment(1, body)), str)
+        assert isinstance(parse_record_marker(make_comment(1, body)), str)
 
     @pytest.mark.parametrize(
         "payload_json",
@@ -198,7 +198,7 @@ class TestCanonicalMarkerForm:
     )
     def test_malformed_payload_variants(self, payload_json: str) -> None:
         comment = make_comment(1, _marker_body(payload_json))
-        assert isinstance(_parse_chain_payload(comment), str)
+        assert isinstance(parse_record_marker(comment), str)
 
     def test_oversized_payload_is_rejected(self) -> None:
         """canonical encodingでもpayload byte上限（2048）超過は非正規形式。"""
@@ -209,7 +209,7 @@ class TestCanonicalMarkerForm:
             ensure_ascii=False,
         )
         comment = make_comment(1, _marker_body(oversized))
-        assert isinstance(_parse_chain_payload(comment), str)
+        assert isinstance(parse_record_marker(comment), str)
 
     def test_trailing_whitespace_after_marker_is_rejected(self) -> None:
         body = attach_marker(
@@ -218,8 +218,8 @@ class TestCanonicalMarkerForm:
                 key="k", kind=RecordKind.REVIEW_RESULT, run_id=RUN, head_sha=HEAD, seq=1, prev_body_hash=None
             ),
         )
-        assert isinstance(_parse_chain_payload(make_comment(1, body + "\n")), str)
-        assert isinstance(_parse_chain_payload(make_comment(1, body + " ")), str)
+        assert isinstance(parse_record_marker(make_comment(1, body + "\n")), str)
+        assert isinstance(parse_record_marker(make_comment(1, body + " ")), str)
 
     def test_marker_not_alone_on_final_line_is_rejected(self) -> None:
         canonical = json.dumps(
@@ -229,10 +229,10 @@ class TestCanonicalMarkerForm:
             ensure_ascii=False,
         )
         inline = f"本文と同じ行 <!-- CC_REVIEW_META:v1 {canonical} -->"
-        assert isinstance(_parse_chain_payload(make_comment(1, inline)), str)
+        assert isinstance(parse_record_marker(make_comment(1, inline)), str)
 
     def test_valid_genesis_parses(self) -> None:
-        parsed = _parse_chain_payload(chain_comments(1)[0])
+        parsed = parse_record_marker(chain_comments(1)[0])
         assert isinstance(parsed, ChainPayload) and parsed.seq == 1 and parsed.prev is None
 
 

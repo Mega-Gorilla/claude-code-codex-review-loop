@@ -56,13 +56,19 @@ def make_comment(
 
 
 def record_projection(
-    kind: RecordKind = RecordKind.REVIEW_RESULT, *, head: str = HEAD, body: str = "record"
+    kind: RecordKind = RecordKind.REVIEW_RESULT,
+    *,
+    head: str = HEAD,
+    body: str = "record",
+    payload: dict[str, object] | None = None,
 ) -> dict[str, str | int]:
-    """kindのrepresentative payloadから作るprojection（C-02の製品関数を使う）。
+    """kindのpayloadから作るprojection（C-02の製品関数を使う）。
 
-    bodyはmarker付加前の公開本文で、`pay`の入力になる（ADR-0010）。
+    payload未指定ならrepresentative corpusを使う。bodyはmarker付加前の公開本文で、
+    `pay`の入力になる（ADR-0010）。
     """
-    return build_record_projection(kind, record_payload(kind, head_sha=head), head_sha=head, body=body)
+    source = payload if payload is not None else record_payload(kind, head_sha=head)
+    return build_record_projection(kind, source, head_sha=head, body=body)
 
 
 def marker_payload(
@@ -73,9 +79,10 @@ def marker_payload(
     seq: int,
     prev: str | None = None,
     body: str = "record",
+    payload: dict[str, object] | None = None,
 ) -> dict[str, str | int]:
     """正規marker payload（projection付き。keyは製品側の導出関数で決まる）。"""
-    projection = record_projection(kind, head=head, body=body)
+    projection = record_projection(kind, head=head, body=body, payload=payload)
     key = derive_record_binding(
         run_id=run_id, seq=seq, kind=kind, head_sha=head, payload_hash=str(projection["pay"])
     )

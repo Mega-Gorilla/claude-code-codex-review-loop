@@ -49,6 +49,9 @@
 | state root | 同一マシンの全worktreeから同じ場所を指すper-user領域。`runs/<run ID>/checkpoint.json`と`locks/<repository digest>/<番号>.lock`を持つ。既定pathの解決はC-12（ADR-0011） |
 | PR lock | 同一PRへの同時runを検出するためのfile。回収はpid非生存・host一致・run一致の3条件が揃った場合のみで、拒否のworkflow動作はAC-C10-03（C-10） |
 | checkpoint transaction | 投稿前 / 投稿成否不明で中断したrecordを**同一key**で再発行するためにcheckpointへ保存する値（binding・payload hash・render済み本文・seq・head） |
+| resume context | resumeがGitHubとlocal cacheの照合から組み立てる再開の判断材料（run選択・turn同一性・pending record・head binding・承認の有無・直接回答候補）。`MachineState`の完全replayではない |
+| advertised head | PRが現在advertiseしているhead SHA。C-05のPR metadata primitiveで観測し、承認のbind先と一致するかがAC-C07-03の判定になる。隔離checkout側の照合はC-09 |
+| resume verdict | resume preflightの判定3値（`VALIDATED` / `FALLBACK_REQUIRED` / `SAME_HEAD_VALIDATED`）。event名ではなく、現在のstateと組み合わせてC-10がC-01 eventへ写す。判定を返せない場合は停止結果（`ReconciliationStopped`）になる |
 | high-water mark | checkpointへ保存する確認済み最大sequence番号`N`。`N`以下の欠落は検出でき、`N`より後のtail truncationは検出できない残存risk（AC-C06-09） |
 | violation binding | integrity violationの決定論的識別子（`iv:{条件}:{run}:{対象}`）。同一違反の再検出は同一bindingになり（冪等）、C-01のcanonical orderと両立する |
 | producer allowlist | 内部record（chain）の正当な投稿者login集合（通常はControllerの認証login）。承認受理用のallowlistとは別の集合 |
