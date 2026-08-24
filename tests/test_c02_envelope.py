@@ -309,3 +309,75 @@ def test_transaction_projection_requires_the_payload_hash() -> None:
         "projection": {"turn": 2},
     }
     assert not validate(CHECKPOINT, _raw(payload)).ok
+
+
+def _host_action_section(**overrides: object) -> dict[str, object]:
+    section: dict[str, object] = {
+        "action_id": "act-1",
+        "action_kind": "APPLY_FINDINGS",
+        "nonce": "nonce-1",
+        "expected_head_sha": "b" * 40,
+        "result_path": "actions/act-1.result.json",
+        "envelope_path": "actions/act-1.action.json",
+        "envelope_hash": "e" * 64,
+    }
+    section.update(overrides)
+    return section
+
+
+def test_phase8_host_action_section_holds_the_pending_action() -> None:
+    """未完了actionの完全なfingerprint（AC-C08-06のresumeに要る）。"""
+    payload = dict(_BASE)
+    payload["host_action"] = _host_action_section(
+        issued_at="2026-08-24T12:00:00Z",
+        submit={
+            "outcome": "COMPLETED",
+            "submit_hash": "s" * 64,
+            "result_hash": "rh-1",
+            "result_kind": "FIX_RESULT",
+        },
+    )
+    assert validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_host_action_section_records_a_failed_submit() -> None:
+    payload = dict(_BASE)
+    payload["host_action"] = _host_action_section(
+        submit={"outcome": "FAILED", "submit_hash": "s" * 64, "result_hash": "rh-1",
+                "error_category": "TRANSIENT"}
+    )
+    assert validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_host_action_section_requires_the_envelope_fingerprint() -> None:
+    """payload / verified recordsの違いを潰さないため、envelope全体のhashを必須にする。"""
+    for missing in ("envelope_path", "envelope_hash", "result_path", "nonce"):
+        payload = dict(_BASE)
+        section = _host_action_section()
+        del section[missing]
+        payload["host_action"] = section
+        assert not validate(CHECKPOINT, _raw(payload)).ok, missing
+
+
+def test_host_action_submit_requires_its_own_fingerprint() -> None:
+    payload = dict(_BASE)
+    payload["host_action"] = _host_action_section(
+        submit={"outcome": "COMPLETED", "result_hash": "rh-1"}
+    )
+    assert not validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_host_action_section_rejects_unknown_kind() -> None:
+    """checkpointのaction kindもC-01のHostActionから導出した値域に従う。"""
+    payload = dict(_BASE)
+    payload["host_action"] = _host_action_section(action_kind="IMPLEMENT_ISSUE")
+    assert not validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_host_action_section_rejects_free_form_error_category() -> None:
+    payload = dict(_BASE)
+    payload["host_action"] = _host_action_section(
+        submit={"outcome": "FAILED", "submit_hash": "s" * 64, "result_hash": "rh-1",
+                "error_category": "TRANSIET"}
+    )
+    assert not validate(CHECKPOINT, _raw(payload)).ok

@@ -16,6 +16,8 @@
 | round | reviewとfixの1往復。Codexが現在headをreviewし、必要な修正を経て新headになるまで。既定の上限は3 |
 | turn | agentまたはユーザーの1つの論理的な発言。GitHubへ1 commentとして永続化する |
 | action | active hostが1回で実行する作業単位。`HOST_ACTION`として構造化する |
+| action registry | actionごとに入力payload・結果schema・投稿するrecord・組み立てるC-01 eventを対応づけた表。正本はC-01の`HostAction`で、規約はADR-0014 |
+| result path | Controllerがrun directory内へ払い出す、action結果fileのpath。呼び出し側から任意pathを受理しない |
 | clarification turn | ClaudeからCodexへの1回の質問と、Codexからの1回の回答の一往復。同一topicあたり最大5回 |
 
 ## 記録と状態
