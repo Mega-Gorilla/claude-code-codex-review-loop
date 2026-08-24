@@ -38,11 +38,19 @@ _JOB_OBJECT_QUERY = 0x0004
 _JOB_OBJECT_TERMINATE = 0x0008
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+# handleを待機可能にする（QUERY_LIMITED_INFORMATIONだけではWaitForSingleObjectがWAIT_FAILEDになる）
+_SYNCHRONIZE = 0x00100000
 _THREAD_SUSPEND_RESUME = 0x0002
 _TH32CS_SNAPTHREAD = 0x00000004
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
 _ERROR_FILE_NOT_FOUND = 2
+_ERROR_ACCESS_DENIED = 5
+_ERROR_INVALID_PARAMETER = 87
+_ERROR_NOT_ENOUGH_MEMORY = 8
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_TIMEOUT = 0x00000102
 _ERROR_BAD_LENGTH = 24
 _ERROR_ALREADY_EXISTS = 183
 _INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
@@ -150,6 +158,8 @@ _kernel32.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ThreadEntry
 _kernel32.Thread32First.restype = wintypes.BOOL
 _kernel32.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32))
 _kernel32.Thread32Next.restype = wintypes.BOOL
+_kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+_kernel32.WaitForSingleObject.restype = wintypes.DWORD
 _kernel32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
 _kernel32.OpenThread.restype = wintypes.HANDLE
 _kernel32.ResumeThread.argtypes = (wintypes.HANDLE,)
@@ -158,6 +168,33 @@ _kernel32.ResumeThread.restype = wintypes.DWORD
 
 def _close_handle(handle: int) -> None:
     _kernel32.CloseHandle(handle)
+
+
+# OpenProcessの失敗のうち、**processの不在を確定できる**errorだけを列挙する。
+# 存在しないpidに対してWindowsは`ERROR_INVALID_PARAMETER`を返す。access denied（5）や
+# 資源不足（8）等はprocessが在っても起き得るため、ここへは入れない（生存扱いになる）。
+_PROCESS_ABSENT_ERRORS = frozenset({_ERROR_INVALID_PARAMETER})
+
+
+def is_process_alive(pid: int) -> bool:
+    """pidのprocessが生存しているか（handleのsignal状態で判定する）。
+
+    exit codeの`STILL_ACTIVE`（259）は正当な終了codeとしても現れ得るため、
+    `WaitForSingleObject`で判定する。**明確にsignal済み（`WAIT_OBJECT_0`）の場合だけ
+    「不在」**とし、`WAIT_FAILED`や未知の戻り値は曖昧として生存扱いにする。
+
+    OpenProcessの失敗も同様に、**不在を確定できるerrorだけ**を「不在」とする
+    （`_PROCESS_ABSENT_ERRORS`）。権限不足・資源不足・未知errorはprocessの不在を
+    意味しないため生存扱いにする（stale lockの回収可否では、迷ったら回収しない側が
+    安全）。pidの再利用も生存と誤判定し得るが、同じく回収しない側へ倒れる（ADR-0011）。
+    """
+    handle = _kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return _last_error() not in _PROCESS_ABSENT_ERRORS
+    try:
+        return bool(_kernel32.WaitForSingleObject(handle, 0) != _WAIT_OBJECT_0)
+    finally:
+        _close_handle(handle)
 
 
 def _create_named_job(name: str) -> int:

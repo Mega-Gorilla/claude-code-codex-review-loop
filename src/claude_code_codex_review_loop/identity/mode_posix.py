@@ -17,7 +17,7 @@ if sys.platform == "win32":  # pragma: no cover - POSIX専用module(Windows側CI
 import os
 from pathlib import Path
 
-from .fs_permissions import FsPermissionError
+from .fs_permissions import FsPermissionError, write_all
 
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
@@ -57,10 +57,29 @@ def write_private_text(path: Path, text: str) -> None:
         raise FsPermissionError("create_file", f"fileを作成できない: {path}", error.errno) from error
     try:
         os.fchmod(descriptor, _FILE_MODE)
-        os.write(descriptor, text.encode("utf-8"))
-    finally:
+        write_all(descriptor, text.encode("utf-8"), path)
+        # 作成も置換も耐久性を持たせる（checkpointのatomic replaceの前提）
+        os.fsync(descriptor)
+    except BaseException:
+        # 書き切れなかったfileを残さない（短い内容がreplaceされるのを防ぐ）
+        os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
+    else:
         os.close(descriptor)
     _check(path, _FILE_MODE, expect_dir=False)
+
+
+def sync_directory(path: Path) -> None:
+    """directory entryの更新をdiskへ確定させる（`os.replace`後の耐久性）。"""
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError as error:  # pragma: no cover - 直前に検証済みのprivate dirで実質起きない
+        raise FsPermissionError("sync", f"directoryを開けない: {path}", error.errno) from error
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def verify_private_dir(path: Path) -> None:

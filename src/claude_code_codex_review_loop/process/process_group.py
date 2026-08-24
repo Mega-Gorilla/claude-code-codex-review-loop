@@ -102,6 +102,23 @@ class PosixTreeHandle:
         self._closed = True
 
 
+def is_process_alive(pid: int) -> bool:
+    """pidのprocessが生存しているか（signal 0の到達性で判定する）。
+
+    **不在を確定できる`ProcessLookupError`（ESRCH）だけ**を「不在」とする。権限不足
+    （`PermissionError`）をはじめ、processの不在を意味しないerrorはすべて**生存扱い**に
+    する（stale lockの回収可否を判定する用途では、迷ったら回収しない側が安全）。
+    pidの再利用は生存と誤判定し得るが、これも回収しない側へ倒れる（ADR-0011）。
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def spawn_tree(spec: SpawnSpec) -> PosixTreeHandle:
     """新規session / process groupで起動する。pgidはsetsidの定義によりchildのpidと等しい。"""
     files: list[IO[bytes]] = []

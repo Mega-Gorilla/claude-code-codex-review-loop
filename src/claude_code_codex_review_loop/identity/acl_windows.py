@@ -27,7 +27,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
-from .fs_permissions import FsPermissionError
+from .fs_permissions import FsPermissionError, write_all
 
 _TOKEN_QUERY = 0x0008
 _TOKEN_USER_CLASS = 1
@@ -334,10 +334,25 @@ def write_private_text(path: Path, text: str) -> None:
     except OSError as error:
         raise FsPermissionError("create_file", f"fileを作成できない: {path}", error.errno) from error
     try:
-        os.write(descriptor, text.encode("utf-8"))
-    finally:
+        write_all(descriptor, text.encode("utf-8"), path)
+        # 作成も置換も耐久性を持たせる（checkpointのatomic replaceの前提）
+        os.fsync(descriptor)
+    except BaseException:
+        # 書き切れなかったfileを残さない（短い内容がreplaceされるのを防ぐ）
+        os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
+    else:
         os.close(descriptor)
     _verify(path, expect_dir=False)
+
+
+def sync_directory(path: Path) -> None:
+    """Windowsではdirectory handleへのfsyncができないためno-op（契約を揃えるための空実装）。
+
+    `os.replace`自体がNTFS上でatomicであり、file側は`write_private_text`のfsyncで
+    確定済みである。POSIX backendとinterfaceを合わせるためだけに存在する。
+    """
 
 
 def verify_private_dir(path: Path) -> None:

@@ -80,8 +80,9 @@ PROJECTION_KEYS: Final = frozenset(
 _INTEGER_KEYS: Final = frozenset({ROUND_KEY, TURN_KEY, COUNT_KEY})
 _HASH_PATTERN: Final = re.compile(r"[0-9a-f]{64}\Z")
 _SHA_PATTERN: Final = re.compile(r"[0-9a-f]{40}\Z")
-# record bindingへ埋め込むrun IDの文字集合（`:`区切りのbindingを一意に読めるようにする）
-_RUN_ID_PATTERN: Final = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
+# record bindingへ埋め込むrun IDの文字集合（`:`区切りのbindingを一意に読めるようにする）。
+# 先頭は英数字に限り、`.` / `..` / 先頭`-`のような「pathやCLI引数として特別な意味を持つ名前」を作らせない
+_RUN_ID_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 BINDING_PREFIX: Final = "cr:"
 
 
@@ -334,6 +335,18 @@ def build_record_projection(
     return projection
 
 
+def validate_run_id(run_id: object) -> str:
+    """run IDの文字集合を検証する（binding・local pathの両方で共有する唯一の定義）。
+
+    `:`区切りのrecord bindingを一意に読めること、path要素として安全であること
+    （`.` / `..` / 先頭`-`にならないこと）の両方を満たす集合に限る。C-07の
+    `state.paths`が同じ定義を使い、二重定義を持たない。
+    """
+    if not isinstance(run_id, str) or _RUN_ID_PATTERN.fullmatch(run_id) is None:
+        raise ProjectionError("run IDは英数字で始まり、英数字と`.` `_` `-`のみ（64字以内）でなければならない")
+    return run_id
+
+
 def derive_record_binding(
     *, run_id: str, seq: int, kind: RecordKind, head_sha: str, payload_hash: str
 ) -> str:
@@ -352,8 +365,7 @@ def derive_record_binding(
     """
     if not isinstance(kind, RecordKind):
         raise ProjectionError("kindはRecordKindでなければならない")
-    if not isinstance(run_id, str) or _RUN_ID_PATTERN.fullmatch(run_id) is None:
-        raise ProjectionError("run IDは英数字と`.` `_` `-`のみ（64字以内）でなければならない")
+    validate_run_id(run_id)
     if not is_integer_token(seq) or seq < 1:
         raise ProjectionError("seqは1以上のJSON integer（bool / floatを含まない）でなければならない")
     if not isinstance(head_sha, str) or _SHA_PATTERN.fullmatch(head_sha) is None:

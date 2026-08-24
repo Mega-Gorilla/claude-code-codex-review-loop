@@ -12,6 +12,8 @@ acl_windows）が実装する。OS分岐は本module末尾のconditional import 
   （攻撃者が緩い権限で先に作ったdirectoryをそのまま使う経路を作らない = fail closed）
 - 作成後に実効権限を**読み戻して検証**する。検証に失敗した場合はsilentに続行せず
   `FsPermissionError`とする
+- 繰り返し更新するfile（checkpoint）は`replace_private_text`で**原子的に置換**する。
+  中断してもtruncateされた中間状態を作らない（ADR-0011）
 - private fileはlink数が1であること（他のpathと**file実体を共有しない**こと）も要求する。
   hard linkはpath正規化では検出できず（`resolve()`してもlink側のpathのまま）、mode /
   owner / DACLも同じ実体から読み出されるため、権限検証だけでは素通りしてしまう
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from .errors import IdentityError
@@ -35,6 +38,24 @@ class FsPermissionError(IdentityError):
     def __init__(self, stage: str, detail: str, os_error: int | None = None) -> None:
         super().__init__(stage, detail)
         self.os_error = os_error
+
+
+def write_all(descriptor: int, data: bytes, path: Path) -> None:
+    """fd全体へ書き切る（`os.write`のpartial writeを成功扱いにしない）。
+
+    `os.write`は例外を出さずに要求より少ないbyte数を返し得る。戻り値を無視すると、
+    短く書かれたfileがそのままfsync・`os.replace`され、atomic replaceの
+    「旧内容か**完全な**新内容」という契約が破れる（ADR-0011）。
+    """
+    written = 0
+    while written < len(data):
+        try:
+            count = os.write(descriptor, data[written:])
+        except OSError as error:
+            raise FsPermissionError("write", f"fileへ書き込めない: {path}", error.errno) from error
+        if count <= 0:
+            raise FsPermissionError("write", f"fileへ書き進められない: {path}")
+        written += count
 
 
 if sys.platform == "win32":  # pragma: no cover - OS dispatch(単一分岐点。各backendは自OSのCIで検証する)
@@ -70,6 +91,35 @@ def write_private_text(path: Path, text: str) -> None:
     """private directory内へ、作成者のみが読書きできるfileを排他的に作成する。"""
     _backend.write_private_text(path, text)
     _reject_shared_file_entity(path)
+
+
+def replace_private_text(path: Path, text: str) -> None:
+    """作成者限定のfileを**原子的に**確定する（checkpointの更新とlockの設置）。
+
+    同一private directory内へ一時fileを排他作成して書き、`os.replace`で差し替える。
+    pathが未作成でも同じ手順で確定できる。どの時点で中断しても、pathには
+    「置換前の内容（未作成なら不在）」か「置換後の内容」のどちらかだけが見える
+    （truncateされた中間状態も、内容の無いfileも作らない）。世代は残さない
+    （GitHubがcanonicalで、local checkpointはcacheであるため。ADR-0011）。
+
+    中断で残り得るのは一意名の一時fileだけで、これはpathの読み手からは見えず、
+    次の確定を妨げない（`os.link`でpathへ公開する方式と違い、公開直後の中断で
+    link数2のfileが残って以後の検証を恒久的に失敗させることがない）。
+
+    置換後は権限とlink数を読み戻して検証する（backendのwrite / verifyと同じ契約）。
+    """
+    directory = path.parent
+    temporary = directory / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    _backend.write_private_text(temporary, text)
+    _reject_shared_file_entity(temporary)
+    try:
+        os.replace(temporary, path)
+    except OSError as error:
+        # 置換に失敗したら一時fileを残さない（次回の排他作成を妨げない）
+        temporary.unlink(missing_ok=True)
+        raise FsPermissionError("replace", f"fileを置換できない: {path}", error.errno) from error
+    _backend.sync_directory(directory)
+    verify_private_file(path)
 
 
 def verify_private_dir(path: Path) -> None:
