@@ -59,6 +59,7 @@ from .record_chain import (
     ProbeOutcome,
     VerifiedRecord,
     compose_record_marker_payload,
+    parse_record_marker,
     probe_known_records,
     verify_record_chain,
 )
@@ -100,6 +101,7 @@ __all__ = [
     "create_private_dir",
     "detect_auto_mode",
     "normalize_login",
+    "parse_record_marker",
     "prepare_reviewer_home",
     "probe_auto_mode",
     "probe_known_records",

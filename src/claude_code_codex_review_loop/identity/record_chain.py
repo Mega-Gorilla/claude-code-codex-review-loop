@@ -197,8 +197,14 @@ def compose_record_marker_payload(
     return payload
 
 
-def _parse_chain_payload(comment: UnverifiedComment) -> ChainPayload | str:
-    """予約tokenを含むcommentの正規形式判定。非正規形式は理由文字列（条件2の根拠）。"""
+def parse_record_marker(comment: UnverifiedComment) -> ChainPayload | str:
+    """予約tokenを含むcommentの正規形式判定。非正規形式は理由文字列（条件2の根拠）。
+
+    **構造parseのみで、actor / allowlist / chainの検証を含まない**（= evidenceではない）。
+    C-07のrun候補列挙のように「どのrunのmarkerか」を知るためだけに使い、判断根拠には
+    検証済みrecord（`verify_record_chain`の結果）を使う。marker意味論の定義を本module
+    1箇所に保つため、consumerがparseを複製しない（ADR-0012）。
+    """
     if comment.marker is None:
         return "予約tokenが本文末尾の正規形式markerでない"
     if comment.body.upper().count(MARKER_TOKEN) != 1:
@@ -371,7 +377,7 @@ def verify_record_chain(
     for comment in pool.values():
         if MARKER_TOKEN not in comment.body.upper():
             continue  # markerなしの通常comment（chain対象外）
-        parsed = _parse_chain_payload(comment)
+        parsed = parse_record_marker(comment)
         if isinstance(parsed, str):
             violations.append(
                 _violation(

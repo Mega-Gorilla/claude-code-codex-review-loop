@@ -241,6 +241,13 @@ def main():
                 respond_json(200, "OK", found)
         respond_json(404, "Not Found", {"message": "missing"})
 
+    if method == "GET" and "/pulls/" in path and path.rsplit("/", 1)[1].isdigit():
+        number = int(path.rsplit("/", 1)[1])
+        for pull in state.get("pull_requests", []):
+            if pull["number"] == number:
+                respond_json(200, "OK", pull)
+        respond_json(404, "Not Found", {"message": "missing"})
+
     if method == "GET" and "/issues/" in path and "/comments" in path:
         issue_number = int(path.split("/issues/")[1].split("/")[0])
         query = path.split("?", 1)[1] if "?" in path else ""
@@ -278,6 +285,7 @@ def seed_state(
     comments: list[dict[str, object]] | None = None,
     pull_comments: list[dict[str, object]] | None = None,
     threads: list[dict[str, object]] | None = None,
+    pull_requests: list[dict[str, object]] | None = None,
 ) -> Path:
     """fake ghのstate fileを初期化する。"""
     state_path = directory / "fake-gh-state.json"
@@ -285,6 +293,7 @@ def seed_state(
         "comments": comments or [],
         "pull_comments": pull_comments or [],
         "threads": threads or [],
+        "pull_requests": pull_requests or [],
         "counter": 0,
         "calls": 0,
     }
