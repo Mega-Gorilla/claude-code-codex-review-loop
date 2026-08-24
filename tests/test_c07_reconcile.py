@@ -12,8 +12,10 @@ import pytest
 from c06_support.helpers import HEAD
 from c07_support.helpers import approved_review_payload, verified_chain
 
+from claude_code_codex_review_loop.domain import TransitionRejected, transition
+from claude_code_codex_review_loop.domain import events as ev
 from claude_code_codex_review_loop.domain.states import State
-from claude_code_codex_review_loop.domain.values import RecordKind
+from claude_code_codex_review_loop.domain.values import MachineState, RecordKind
 from claude_code_codex_review_loop.identity.record_chain import VerifiedRecord
 from claude_code_codex_review_loop.state import (
     ApprovalEvidence,
@@ -21,7 +23,10 @@ from claude_code_codex_review_loop.state import (
     CheckpointHeads,
     HeadChange,
     HeadObservation,
+    HeadReconciliation,
     HeadUnobservable,
+    ReconciliationStop,
+    ReconciliationStopped,
     ResumeVerdict,
     collect_approvals,
     observe_head,
@@ -118,6 +123,13 @@ class TestCollectApprovals:
         assert collect_approvals(records) == ()
 
 
+def _judged(**kwargs: object) -> HeadReconciliation:
+    """判定（停止でないこと）を取り出す。"""
+    result = reconcile_head(**kwargs)  # type: ignore[arg-type]
+    assert isinstance(result, HeadReconciliation)
+    return result
+
+
 class TestReconcileHead:
     """head変化 × 承認の真理表。"""
 
@@ -206,23 +218,30 @@ class TestReconcileHead:
         )
         assert result.verdict is ResumeVerdict.FALLBACK_REQUIRED
 
-    def test_merge_failed_without_canonical_approval_is_not_revalidated(self) -> None:
-        """**GitHub上の承認recordが無ければmerge gateへ復帰しない**（local cacheだけで戻らない）。"""
+    def test_merge_failed_without_canonical_approval_stops(self) -> None:
+        """**GitHub上の承認recordが無ければmerge gateへ復帰しない**（local cacheだけで戻らない）。
+
+        verdictでは表さない: bareな`MERGE_FAILED`に`ResumeValidated`を受理するruleがC-01に
+        無いため、判定として返すと消費側が合法な遷移へ写せない。
+        """
         result = reconcile_head(
             _observation(),
             records=(),
             heads=CheckpointHeads(observed_sha=HEAD, approved_sha=HEAD),
             checkpoint_state=State.MERGE_FAILED,
         )
-        assert result.verdict is ResumeVerdict.VALIDATED
-        assert "MERGE_APPROVAL" in result.detail and "REVIEW_RESULT" in result.detail
+        assert isinstance(result, ReconciliationStopped)
+        assert result.reason is ReconciliationStop.MERGE_APPROVAL_UNCONFIRMED
+        assert result.missing_approvals == (_K.MERGE_APPROVAL, _K.REVIEW_RESULT)
 
     @pytest.mark.parametrize(
         "kinds, missing",
-        [([_K.MERGE_APPROVAL], "REVIEW_RESULT"), ([_K.REVIEW_RESULT], "MERGE_APPROVAL")],
+        [([_K.MERGE_APPROVAL], _K.REVIEW_RESULT), ([_K.REVIEW_RESULT], _K.MERGE_APPROVAL)],
         ids=["review_missing", "merge_missing"],
     )
-    def test_merge_failed_requires_both_approvals(self, kinds: list[RecordKind], missing: str) -> None:
+    def test_merge_failed_requires_both_approvals(
+        self, kinds: list[RecordKind], missing: RecordKind
+    ) -> None:
         """merge gateへの復帰は merge承認 と review承認 の両方を現headで確認できる場合だけ。"""
         payloads = {1: approved_review_payload()} if kinds == [_K.REVIEW_RESULT] else None
         result = reconcile_head(
@@ -231,7 +250,9 @@ class TestReconcileHead:
             heads=CheckpointHeads(observed_sha=HEAD, approved_sha=HEAD),
             checkpoint_state=State.MERGE_FAILED,
         )
-        assert result.verdict is ResumeVerdict.VALIDATED and missing in result.detail
+        assert isinstance(result, ReconciliationStopped)
+        assert result.missing_approvals == (missing,)
+        assert missing.value in result.detail
 
     def test_merge_failed_accepts_external_merge_approval(self) -> None:
         """GitHub直接commentで受理した承認（D-021）もmerge gate復帰の根拠にできる。"""
@@ -303,3 +324,57 @@ class TestReadCheckpointHeads:
     )
     def test_absent_or_unusable_sections_become_none(self, payload: dict[str, object]) -> None:
         assert read_checkpoint_heads(payload) == CheckpointHeads()
+
+class TestMergeFailedOutcomesAreConsumable:
+    """`MERGE_FAILED`で返る結果が、C-01で受理される遷移か停止のどちらかへ到達すること。
+
+    verdictはeventそのものではないため、消費側（C-10）が合法な遷移へ写せることを
+    componentを跨いで固定する。
+    """
+
+    def _machine(self) -> MachineState:
+        """merge失敗直後のbareなMachineState（pending / awaitingなし）。"""
+        return MachineState(state=State.MERGE_FAILED)
+
+    def test_same_head_validated_returns_to_merge_gate(self) -> None:
+        result = _judged(
+            observation=_observation(),
+            records=_approved_chain(),
+            heads=CheckpointHeads(observed_sha=HEAD, approved_sha=HEAD),
+            checkpoint_state=State.MERGE_FAILED,
+        )
+        assert result.verdict is ResumeVerdict.SAME_HEAD_VALIDATED
+        after, commands = transition(self._machine(), ev.ResumeSameHeadValidated())
+        assert after.state is State.READY_FOR_HUMAN_MERGE and commands == ()
+
+    def test_head_change_maps_to_external_head_change(self) -> None:
+        result = _judged(
+            observation=_observation(_NEW_HEAD),
+            records=_approved_chain(),
+            heads=CheckpointHeads(observed_sha=HEAD, approved_sha=HEAD),
+            checkpoint_state=State.MERGE_FAILED,
+        )
+        assert result.verdict is ResumeVerdict.FALLBACK_REQUIRED
+        after, commands = transition(self._machine(), ev.HeadChangedExternally())
+        assert after.state is State.RUNNING_REVIEW
+        assert [type(command).__name__ for command in commands] == [
+            "InvalidateApprovals",
+            "RequestCodexReview",
+        ]
+
+    def test_stop_is_returned_because_no_resume_event_fits(self) -> None:
+        """承認不足はverdictにしない: C-01が受理するのはM-SHだけで、その根拠が無い。"""
+        result = reconcile_head(
+            _observation(),
+            records=(),
+            heads=CheckpointHeads(observed_sha=HEAD, approved_sha=HEAD),
+            checkpoint_state=State.MERGE_FAILED,
+        )
+        assert isinstance(result, ReconciliationStopped)
+        machine = self._machine()
+        for event in (ev.ResumeValidated(), ev.ResumeFallbackRequired()):
+            with pytest.raises(TransitionRejected):
+                transition(machine, event)
+        # M-SH自体は承認を検査しないため受理される。発行してよい根拠を持つのはC-07側
+        after, _ = transition(machine, ev.ResumeSameHeadValidated())
+        assert after.state is State.READY_FOR_HUMAN_MERGE

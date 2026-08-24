@@ -175,11 +175,17 @@ class ResumeVerdict(Enum):
     SAME_HEAD_VALIDATED = "SAME_HEAD_VALIDATED"
 
 
-@dataclass(frozen=True)
-class HeadReconciliation:
-    """照合結果。観測事実をそのまま同梱し、消費側が見落とせないようにする。"""
+@unique
+class ReconciliationStop(Enum):
+    """判定を返さず停止する理由（対応するC-01 eventが存在しない状況）。"""
 
-    verdict: ResumeVerdict
+    MERGE_APPROVAL_UNCONFIRMED = "MERGE_APPROVAL_UNCONFIRMED"
+
+
+@dataclass(frozen=True)
+class _Observed:
+    """判定・停止の双方が同梱する観測事実（消費側が見落とせないようにする）。"""
+
     change: HeadChange
     observation: HeadObservation
     approvals: tuple[ApprovalStatus, ...]
@@ -199,6 +205,29 @@ class HeadReconciliation:
     @property
     def superseded_approvals(self) -> tuple[ApprovalEvidence, ...]:
         return self._of(ApprovalState.SUPERSEDED)
+
+
+@dataclass(frozen=True)
+class HeadReconciliation(_Observed):
+    """C-01のresume eventへ写せる判定。"""
+
+    verdict: ResumeVerdict
+
+
+@dataclass(frozen=True)
+class ReconciliationStopped(_Observed):
+    """合法な遷移が無いため停止する（eventを発行せず、理由と不足を提示する）。
+
+    例: `MERGE_FAILED`でheadは動いていないが、現headの承認をGitHub上で確認できない。
+    C-01には「bareな`MERGE_FAILED` + `ResumeValidated`」を受理するruleが無く（M-SHは承認
+    確認済み、M-HCはhead変更時）、verdictで返すと消費側が合法な遷移へ写せない。
+    """
+
+    reason: ReconciliationStop
+    missing_approvals: tuple[RecordKind, ...]
+
+
+ReconciliationResult = HeadReconciliation | ReconciliationStopped
 
 
 def _classify(observation: HeadObservation, heads: CheckpointHeads) -> HeadChange:
@@ -251,7 +280,7 @@ def reconcile_head(
     heads: CheckpointHeads,
     checkpoint_state: State | None = None,
     external_approvals: Sequence[ApprovalEvidence] = (),
-) -> HeadReconciliation:
+) -> ReconciliationResult:
     """advertised headと承認recordを照合し、resume preflightの判定を返す。
 
     承認は「bind先headが現在のadvertised headと一致するか」だけで判定する。同種の
@@ -265,7 +294,9 @@ def reconcile_head(
 
     `MERGE_FAILED`からの再開が`SAME_HEAD_VALIDATED`になるのは、**現headへbindされた
     merge承認とreview承認がGitHub上で確認できる場合だけ**。local checkpointの
-    `approved_sha`だけでmerge gateへ復帰させない。
+    `approved_sha`だけでmerge gateへ復帰させない。確認できない場合はverdictを返さず
+    `ReconciliationStopped`で停止する（C-01に合法な遷移が無く、前進の判定として
+    表せない）。
     """
     change = _classify(observation, heads)
     statuses = _evaluate_approvals(
@@ -299,12 +330,18 @@ def reconcile_head(
                 approvals=statuses,
                 detail="merge失敗後の同一headで、必要な承認をGitHub上で確認できた",
             )
-        return HeadReconciliation(
-            verdict=ResumeVerdict.VALIDATED,
+        return ReconciliationStopped(
+            reason=ReconciliationStop.MERGE_APPROVAL_UNCONFIRMED,
+            missing_approvals=tuple(
+                sorted(_MERGE_GATE_APPROVALS - confirmed, key=lambda kind: kind.value)
+            ),
             change=change,
             observation=observation,
             approvals=statuses,
-            detail=f"現headの承認をGitHub上で確認できない（{','.join(missing)}）ため再確認しない",
+            detail=(
+                f"merge失敗後の同一headだが、現headの承認をGitHub上で確認できない"
+                f"（{','.join(missing)}）"
+            ),
         )
     return HeadReconciliation(
         verdict=ResumeVerdict.VALIDATED,
