@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from c07_support.helpers import ACQUIRED_AT, HEAD, NUMBER, REPOSITORY, RUN, lock_payload, state_paths
 
+from claude_code_codex_review_loop.identity import fs_permissions
 from claude_code_codex_review_loop.identity.fs_permissions import verify_private_file, write_private_text
 from claude_code_codex_review_loop.state import (
     LockAcquired,
@@ -136,39 +137,29 @@ class TestReclaim:
         assert isinstance(result, LockHeld) and "生存" in result.reason
 
 
+class TestAcquireIsSerialized:
+    """取得（新規・回収の別を問わず）は排他guardの下で直列化される。"""
 
-class TestReclaimIsMutuallyExclusive:
-    """同じstale lockを読んだ複数のcontenderのうち、取得できるのは1つだけ。"""
-
-    def _owner(self, at: str, *, run_id: str = RUN) -> LockOwner:
-        return LockOwner(
-            run_id=run_id, repository=REPOSITORY, number=NUMBER, pid=os.getpid(), host=HOST, acquired_at=at
-        )
-
-    def _reclaim(self, path: Path, at: str, *, stale: LockOwner) -> object:
-        owner = self._owner(at)
-        return lock_module._reclaim(path, owner, lock_module._validated_text(owner), stale=stale)
-
-    def test_interleaved_reclaim_has_a_single_winner(self, tmp_path: Path) -> None:
-        """両者が同じstale ownerを根拠に回収を試みても、成功は1件だけ。"""
+    def test_second_acquire_of_a_reclaimed_lock_is_held(self, tmp_path: Path) -> None:
+        """回収に成功した直後は自processが生存者になるため、次の取得は停止する。"""
         path = _path(tmp_path)
         _seed(path, pid=DEAD_PID, host=HOST, run_id=RUN)
-        stale = inspect_pr_lock(path)
-        assert isinstance(stale, LockOwner)
-        results = [self._reclaim(path, "t1", stale=stale), self._reclaim(path, "t2", stale=stale)]
-        assert [isinstance(result, LockAcquired) for result in results] == [True, False]
-        # 2人目はguardの下で読み直し、生きている保持者を見て停止する（lockを奪わない）
-        assert isinstance(results[1], LockHeld)
+        first = _acquire(path, acquired_at="t1")
+        second = _acquire(path, acquired_at="t2")
+        assert isinstance(first, LockAcquired)
+        assert isinstance(second, LockHeld) and "生存" in second.reason
         owner = inspect_pr_lock(path)
         assert isinstance(owner, LockOwner) and owner.acquired_at == "t1"
 
-    def test_concurrent_contenders_produce_one_acquisition(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("seeded", [False, True], ids=["absent", "stale"])
+    def test_concurrent_contenders_produce_one_acquisition(self, tmp_path: Path, seeded: bool) -> None:
         """barrierで同期した2 contenderを走らせ、LockAcquiredが1件だけであることを確認する。"""
         path = _path(tmp_path)
-        _seed(path, pid=DEAD_PID, host=HOST, run_id=RUN)
+        if seeded:
+            _seed(path, pid=DEAD_PID, host=HOST, run_id=RUN)
         barrier = threading.Barrier(2)
         results: list[object] = []
-        guard = threading.Lock()
+        collected = threading.Lock()
 
         def _contend(tag: str) -> None:
             barrier.wait(timeout=5)
@@ -176,7 +167,7 @@ class TestReclaimIsMutuallyExclusive:
                 result: object = _acquire(path, acquired_at=tag, pid=os.getpid())
             except BaseException as error:  # 例外も結果として集める（握り潰さない）
                 result = error
-            with guard:
+            with collected:
                 results.append(result)
 
         threads = [threading.Thread(target=_contend, args=(tag,)) for tag in ("t1", "t2")]
@@ -187,80 +178,62 @@ class TestReclaimIsMutuallyExclusive:
         assert [type(result).__name__ for result in results if isinstance(result, BaseException)] == []
         assert len(results) == 2
         assert sum(isinstance(result, LockAcquired) for result in results) == 1
+        # 一時fileもguardも残さない（次の取得を妨げない）
         assert [entry.name for entry in path.parent.iterdir()] == [path.name]
 
-    def test_guard_held_by_another_process_stops_reclaim(self, tmp_path: Path) -> None:
-        """回収guardを他processが保持していれば、推測せず停止する（fail closed）。"""
+    def test_guard_held_by_another_process_stops_acquisition(self, tmp_path: Path) -> None:
+        """guardを他processが保持していれば、推測せず停止する（fail closed）。"""
         path = _path(tmp_path)
-        _seed(path, pid=DEAD_PID, host=HOST, run_id=RUN)
-        (path.parent / f"{path.name}{lock_module.RECLAIM_GUARD_SUFFIX}").mkdir()
+        guard = path.parent / f"{path.name}{lock_module.ACQUIRE_GUARD_SUFFIX}"
+        guard.mkdir()
         result = _acquire(path)
-        assert isinstance(result, LockUnavailable) and "回収中" in result.detail
+        assert isinstance(result, LockUnavailable) and guard.name in result.detail
+        assert not path.exists()
+        # 復旧手順（guardの削除）はdetailが示すとおりで、実行すれば取得できる
+        guard.rmdir()
+        assert isinstance(_acquire(path), LockAcquired)
 
-    def test_stale_lock_replaced_by_a_live_one_is_not_stolen(self, tmp_path: Path) -> None:
-        """判断根拠にしたstale lockが別runの生きたlockへ入れ替わっていたら奪わない。"""
+    def test_guard_is_released_after_each_outcome(self, tmp_path: Path) -> None:
+        """取得できなかった場合もguardを残さない。"""
         path = _path(tmp_path)
-        _seed(path, pid=DEAD_PID, host=HOST, run_id=RUN)
-        stale = inspect_pr_lock(path)
-        assert isinstance(stale, LockOwner)
-        path.unlink()
         _seed(path, pid=os.getpid(), host=HOST, run_id="run-other")
-        result = self._reclaim(path, "t1", stale=stale)
-        assert isinstance(result, LockHeld)
-        current = inspect_pr_lock(path)
-        assert isinstance(current, LockOwner) and current.run_id == "run-other"
+        assert isinstance(_acquire(path), LockHeld)
+        assert [entry.name for entry in path.parent.iterdir()] == [path.name]
 
-    def test_same_run_content_change_is_not_reclaimed(self, tmp_path: Path) -> None:
-        """同一run・同一hostでも、内容が判断根拠と違えば奪わない。"""
-        path = _path(tmp_path)
-        _seed(path, pid=DEAD_PID, host=HOST, run_id=RUN)
-        stale = inspect_pr_lock(path)
-        assert isinstance(stale, LockOwner)
-        path.unlink()
-        _seed(path, pid=DEAD_PID, host=HOST, run_id=RUN, acquired_at="別の取得時刻")
-        result = self._reclaim(path, "t1", stale=stale)
-        assert isinstance(result, LockHeld) and "内容が異なる" in result.reason
 
-    def test_released_lock_during_reclaim_is_acquired(self, tmp_path: Path) -> None:
-        """回収を判断した後にlockが解放されていれば、新規取得として扱う。"""
-        path = _path(tmp_path)
-        _seed(path, pid=DEAD_PID, host=HOST, run_id=RUN)
-        stale = inspect_pr_lock(path)
-        assert isinstance(stale, LockOwner)
-        path.unlink()
-        assert isinstance(self._reclaim(path, "t1", stale=stale), LockAcquired)
+class TestInterruptedAcquire:
+    """中断しても「完全なlock」か「lockが無い」のどちらかへ収束する（回復不能にしない）。"""
 
-    def test_corrupt_lock_during_reclaim_is_reported(self, tmp_path: Path) -> None:
-        """回収を判断した後に内容が壊れていれば、上書きせず提示する。"""
-        path = _path(tmp_path)
-        _seed(path, pid=DEAD_PID, host=HOST, run_id=RUN)
-        stale = inspect_pr_lock(path)
-        assert isinstance(stale, LockOwner)
-        path.unlink()
-        write_private_text(path, "{ not json")
-        assert isinstance(self._reclaim(path, "t1", stale=stale), LockCorrupt)
-
-    def test_exclusive_create_loser_is_reported_as_held(
+    def test_interrupted_write_leaves_no_lock_and_stays_acquirable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """新規取得の競合に負けた場合、現在の保持者を読み直してHeldにする。"""
+        """確定（os.replace）の前に落ちても、pathには何も残らず次回取得できる。"""
         path = _path(tmp_path)
 
-        def _lose(target: Path, text: str) -> bool:
-            _seed(target, pid=os.getpid(), host=HOST, run_id="run-other")
-            return False
+        def _interrupt(source: object, destination: object) -> None:
+            raise OSError(5, "interrupted")
 
-        monkeypatch.setattr(lock_module, "publish_private_text", _lose)
-        result = _acquire(path)
-        assert isinstance(result, LockHeld) and "先にlockを取得" in result.reason
-
-    def test_exclusive_create_loser_without_readable_owner(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """競合相手のlockを読めない場合は、成功と推測せずUnavailableにする。"""
-        path = _path(tmp_path)
-        monkeypatch.setattr(lock_module, "publish_private_text", lambda target, text: False)
+        monkeypatch.setattr(fs_permissions.os, "replace", _interrupt)
         assert isinstance(_acquire(path), LockUnavailable)
+        assert not path.exists()
+        monkeypatch.undo()
+        assert isinstance(_acquire(path), LockAcquired)
+
+    def test_leftover_temporary_does_not_block_acquisition(self, tmp_path: Path) -> None:
+        """中断で残り得るのは一意名の一時fileだけで、取得も検証も妨げない。"""
+        path = _path(tmp_path)
+        write_private_text(path.parent / f".{path.name}.deadbeef.tmp", "中断した書き込み")
+        result = _acquire(path)
+        assert isinstance(result, LockAcquired)
+        assert isinstance(inspect_pr_lock(path), LockOwner)
+        verify_private_file(path)
+
+    def test_acquired_lock_is_not_shared_with_another_path(self, tmp_path: Path) -> None:
+        """確定したlockはlink数1（公開後に一時fileが残ってlink数2になる経路を持たない）。"""
+        path = _path(tmp_path)
+        assert isinstance(_acquire(path), LockAcquired)
+        assert path.stat().st_nlink == 1
+        assert [entry.name for entry in path.parent.iterdir()] == [path.name]
 
 
 class TestOwnerValidation:
@@ -282,6 +255,7 @@ class TestOwnerValidation:
         path = _path(tmp_path)
         assert isinstance(_acquire(path), LockAcquired)
         assert isinstance(inspect_pr_lock(path), LockOwner)
+
 
 class TestCorruptAndUnavailable:
     def test_corrupt_lock_is_not_overwritten(self, tmp_path: Path) -> None:
@@ -310,14 +284,14 @@ class TestCorruptAndUnavailable:
             pytest.skip("hard linkを作成できない環境")
         assert isinstance(_acquire(path), LockUnavailable)
 
-    def test_create_failure_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """排他作成の失敗（直前に別processが取得した等）を成功と推測しない。"""
+    def test_write_failure_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """lockを確定できなかった場合、取得できたと推測しない。"""
         path = _path(tmp_path)
 
-        def _fail(target: Path, text: str) -> bool:
+        def _fail(target: Path, text: str) -> None:
             raise lock_module.FsPermissionError("create_file", "作成できない", 17)
 
-        monkeypatch.setattr(lock_module, "publish_private_text", _fail)
+        monkeypatch.setattr(lock_module, "replace_private_text", _fail)
         assert isinstance(_acquire(path), LockUnavailable)
 
 

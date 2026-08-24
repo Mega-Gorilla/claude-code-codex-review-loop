@@ -5,17 +5,17 @@
 拒否そのもののworkflow動作（AC-C10-03）はC-10の責務で、本moduleは
 「取得できたか / 誰が持っているか / 回収してよいか」を構造化して返すまでを行う。
 
-- lock fileは一時fileへ書き切ってから`os.link`で公開する（存在すれば取得失敗）。
-  他processからは「無い」か「完全な内容」のどちらかしか見えない
 - 内容はC-02の`RUN_LOCK` schemaで検証する。壊れたlockは`LockCorrupt`として扱い、
   「無いもの」として黙って上書きしない（silent repair禁止）
 - **stale lockの回収は3条件がすべて揃った場合のみ**: 記録されたpidが生存していない、
   hostが一致する、再開しようとするrunのIDが一致する。pid生存の判定は曖昧な場合に
   「生存」へ倒れる（`process.is_process_alive`）ため、迷ったら回収しない
-- 回収は**排他guard（`os.mkdir`）の下で直列化**し、guardを取ってから読み直して3条件を
-  再判定する。単なる置換 + 読み戻しでは同じstale lockを読んだ2 processが順に置換して
-  **両方が成功**し得る（AC-C10-03を成立させられない）。lock fileを退避してから確認する
-  方式も、**生きているlockを一度動かす**ため差し戻しに失敗すると保持者のlockが消える
+- **取得は新規・回収を問わず排他guard（`os.mkdir`）の下で直列化**し、guardの下で
+  読んでから同じguardの下で確定する。読取と書込を別processが挟めないため、同じ状態を
+  見た2 processが両方成功することがない（AC-C10-03の前提）
+- lock fileの確定は一時fileへ書き切ってからの`os.replace`で行う。中断しても
+  「lockが無い」か「完全なlock」のどちらかしか見えず、残り得るのは一意名の一時fileだけ
+  である（読み手から見えず、次の取得を妨げない）
 - 書き込むowner payloadは保存前に`RUN_LOCK`で検証する。consumerが受理できないlockを
   producerが作れてしまうと、silent repair禁止の下でそのpathを回復できなくなる
 """
@@ -29,22 +29,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from ..identity.fs_permissions import (
-    FsPermissionError,
-    publish_private_text,
-    replace_private_text,
-    verify_private_file,
-)
+from ..identity.fs_permissions import FsPermissionError, replace_private_text, verify_private_file
 from ..process import is_process_alive
 from ..schema.lock import RUN_LOCK
 from ..schema.registry import validate, validate_object
 from ..schema.validate import PublicError
 
-RECLAIM_GUARD_SUFFIX: Final = ".reclaim"
+ACQUIRE_GUARD_SUFFIX: Final = ".guard"
 
 
 class LockGuardError(Exception):
-    """回収guardを解放できない（残ると以後の回収が止まるため、silentに続行しない）。"""
+    """取得guardを解放できない（残ると以後の取得が止まるため、silentに続行しない）。"""
 
 
 class LockInputError(Exception):
@@ -200,7 +195,8 @@ def acquire_pr_lock(
 ) -> LockResult:
     """PR lockを取得する。既存lockは検証し、回収3条件を満たす場合だけ引き継ぐ。
 
-    `acquired_at`は呼び出し側が渡す（時刻source を注入可能にし、testを決定論的にする）。
+    新規取得も回収も**排他guardの下で**行う（読取と書込の間に別processが入れない）。
+    `acquired_at`は呼び出し側が渡す（時刻sourceを注入可能にし、testを決定論的にする）。
     """
     owner = LockOwner(
         run_id=run_id,
@@ -212,94 +208,48 @@ def acquire_pr_lock(
         head_sha=head_sha,
     )
     text = _validated_text(owner)
-    existing = _read_owner(path)
-    if existing is None:
-        return _create_exclusively(path, owner, text)
-    if isinstance(existing, LockCorrupt | LockUnavailable):
-        return existing
-    reason = _reclaim_reason(existing, run_id=run_id, host=owner.host)
-    if reason is not None:
-        return LockHeld(path=path, owner=existing, reason=reason)
-    return _reclaim(path, owner, text, stale=existing)
-
-
-def _create_exclusively(path: Path, owner: LockOwner, text: str) -> LockResult:
-    """lockを原子的かつ排他的に作る（publishに成功したprocessだけが保持者になる）。
-
-    他processからは「lockが無い」か「完全なlock」のどちらかしか見えない
-    （作成途中の空fileを破損と誤認させない）。
-    """
-    try:
-        published = publish_private_text(path, text)
-    except FsPermissionError as error:
-        return LockUnavailable(path=path, detail=error.detail)
-    if not published:
-        # 直前に別processが取得した（推測せず、現在の保持者を読み直す）
-        current = _read_owner(path)
-        if isinstance(current, LockOwner):
-            return LockHeld(path=path, owner=current, reason="別processが先にlockを取得した")
-        return LockUnavailable(path=path, detail="別processの取得と競合した")
-    return LockAcquired(path=path, owner=owner)
-
-
-def _reclaim(path: Path, owner: LockOwner, text: str, *, stale: LockOwner) -> LockResult:
-    """stale lockを**排他guardの下で**引き継ぐ（同時回収で複数が成功しない）。
-
-    単なる置換 + 読み戻しでは、同じstale lockを読んだ2 processが順に置換して両方が
-    成功し得る（読み戻しは「自分の確認より前に奪われた」場合しか検出できない）。
-    一方、lock fileを一時退避してから確認する方式は、**生きているlockを一度動かして
-    しまう**ため、退避後の差し戻しに失敗すると真の保持者のlockが消える。
-
-    そこで回収操作自体をguard directory（`os.mkdir`は存在すれば失敗する原子的な排他）で
-    直列化し、guardの下で**読み直してから**3条件を再判定する。生きているlockには
-    一切触れず、回収できるのは常に1 processだけになる。
-
-    guardを保持したままprocessが落ちるとguardが残り、以後の回収は
-    `LockUnavailable`になる（fail closed。復旧はguard directoryの削除）。
-    """
-    guard = path.with_name(f"{path.name}{RECLAIM_GUARD_SUFFIX}")
+    guard = path.with_name(f"{path.name}{ACQUIRE_GUARD_SUFFIX}")
     try:
         os.mkdir(guard)
     except FileExistsError:
         return LockUnavailable(
             path=path,
-            detail=f"別processがstale lockを回収中（中断した場合は{guard.name}を削除する）",
+            detail=f"別processがlockを操作中（中断した場合は{guard.name}を削除する）",
         )
     except OSError as error:  # pragma: no cover - private dir配下のmkdir失敗は実質起きない
-        return LockUnavailable(path=path, detail=f"回収guardを作成できない（errno={error.errno}）")
+        return LockUnavailable(path=path, detail=f"取得guardを作成できない（errno={error.errno}）")
     try:
-        return _reclaim_under_guard(path, owner, text, stale=stale)
+        return _acquire_under_guard(path, owner, text)
     finally:
         _remove_guard(guard)
 
 
 def _remove_guard(guard: Path) -> None:
-    """回収guardを解放する（残ると以後の回収が止まるため、失敗も無視しない）。"""
+    """取得guardを解放する（残ると以後の取得が止まるため、失敗も無視しない）。"""
     try:
         guard.rmdir()
     except OSError as error:  # pragma: no cover - 直前に自分で作成したdirectoryの削除失敗は実質起きない
-        raise LockGuardError(f"回収guardを解放できない: {guard}（errno={error.errno}）") from error
+        raise LockGuardError(f"取得guardを解放できない: {guard}（errno={error.errno}）") from error
 
 
-def _reclaim_under_guard(path: Path, owner: LockOwner, text: str, *, stale: LockOwner) -> LockResult:
-    """guard保持中の回収本体。**読み直してから**3条件を再判定する。"""
+def _acquire_under_guard(path: Path, owner: LockOwner, text: str) -> LockResult:
+    """guard保持中の取得本体（読取から確定までを1 processに限定する）。
+
+    guardを取る前に読んだ状態を根拠にしない。guardの下で読み直してから判断し、同じ
+    guardの下で確定するため、同じstale lockを見た2 processが両方成功することがない。
+    生きているlockには触れず、確定は一時fileの`os.replace`で行う（作成途中の空fileも、
+    公開後に残る二重linkも作らない）。
+    """
     current = _read_owner(path)
-    if current is None:
-        # 回収を判断した後にlockが消えていた（正常に解放された）: 新規取得と同じ扱い
-        return _create_exclusively(path, owner, text)
     if isinstance(current, LockCorrupt | LockUnavailable):
         return current
-    reason = _reclaim_reason(current, run_id=owner.run_id, host=owner.host)
-    if reason is not None:
-        # guardを取る前に別runの正当なlockへ入れ替わっていた: 生きているlockを奪わない
-        return LockHeld(path=path, owner=current, reason=reason)
-    if current != stale:
-        return LockHeld(
-            path=path, owner=current, reason="回収の判断根拠にしたlockと内容が異なる"
-        )
+    if current is not None:
+        reason = _reclaim_reason(current, run_id=owner.run_id, host=owner.host)
+        if reason is not None:
+            return LockHeld(path=path, owner=current, reason=reason)
     try:
         replace_private_text(path, text)
-    except FsPermissionError as error:  # pragma: no cover - guard下の置換失敗は実質起きない
+    except FsPermissionError as error:
         return LockUnavailable(path=path, detail=error.detail)
     return LockAcquired(path=path, owner=owner)
 

@@ -39,13 +39,15 @@ resumeが成立するために足りていないものが3つある。
 12. **配置はper-user state root配下の`locks/<repository digest>/<number>.lock`**。run directory配下へ置くと、worktreeごと・run IDごとにlockが分裂して同一PRへの同時runを検出できず、AC-C10-03の前提が壊れる。repository slugは`/`を含みpath要素にできないためdigest化し、可読性はlock file本体の`repository` fieldで担保する
 13. **lock fileの内容はC-02の`RUN_LOCK` schemaで検証する**（独自parseを持たない）。解釈できないlockは`LockCorrupt`として提示し、「無いもの」として上書きしない
 14. **stale lockの回収は3条件がすべて揃った場合のみ**: 記録されたpidが生存していない、hostが一致する、再開しようとするrunのIDが一致する。1つでも欠ければ理由つきで停止する
-15. **pid生存の判定は曖昧さを「生存」へ倒す**（`process.is_process_alive`）。権限不足（POSIXの`PermissionError` / Windowsの`ERROR_ACCESS_DENIED`）は「存在するが触れない」として生存扱いにし、pid再利用も生存と誤判定し得る。いずれも**回収しない**側へ働くため安全側である。Windowsはexit code 259の曖昧さを避けるため`WaitForSingleObject`で判定し、**明確にsignal済み（`WAIT_OBJECT_0`）の場合だけ**「不在」とする（`WAIT_FAILED`や未知の戻り値は生存扱い。handleには`SYNCHRONIZE`が要る）
-16. **回収は排他guardの下で直列化する**。単なる置換 + 読み戻しでは、同じstale lockを読んだ2 processが順に置換して**両方が成功**し得る（読み戻しは「自分の確認より前に奪われた」場合しか検出できない）。一方、lock fileを一時退避してから確認する方式は**生きているlockを一度動かす**ため、差し戻しに失敗すると真の保持者のlockが消える。したがって:
-    1. `os.mkdir`（存在すれば失敗する原子的な排他）で回収guardを取る。取れなければ`LockUnavailable`（推測して進まない）
-    2. **guardの下で読み直し**、3条件と「判断根拠にしたlockと同一内容であること」を再判定する。生きているlockには一切触れない
-    3. 条件を満たす場合だけ`replace_private_text`で置き換える
-    guardを保持したままprocessが落ちるとguardが残り、以後の回収は`LockUnavailable`になる（fail closed。復旧はguard directoryの削除で、これは提示するdetailに含める）。guardの解放失敗は`LockGuardError`として表面化させる（残ると以後の回収が止まるため、silentに続行しない）
-17. **lockの作成は原子的かつ排他的に行う**（`publish_private_text`）。`O_CREAT | O_EXCL`での直接作成は「作成」と「書込」の間に空のfileが見え、別processがそれを読むと破損と区別できない。一時fileへ全内容を書いてから`os.link`で公開すれば、他processからは「存在しない」か「完全な内容」のどちらかしか見えず、既存pathがあればlinkが失敗するので排他性も保てる
+15. **pid生存の判定は「不在を確定できた場合だけ」不在とする**（`process.is_process_alive`）。判定は非対称で、曖昧さはすべて「生存」へ倒す。pid再利用も生存と誤判定し得るが、いずれも**回収しない**側へ働くため安全側である。
+    - POSIX: `os.kill(pid, 0)`の`ProcessLookupError`（ESRCH）だけを不在とし、権限不足（`PermissionError`）を含むその他のOSErrorは生存扱いにする
+    - Windows: exit code 259の曖昧さを避けるため`WaitForSingleObject`で判定し、**明確にsignal済み（`WAIT_OBJECT_0`）の場合だけ**不在とする（`WAIT_FAILED`や未知の戻り値は生存扱い。handleには`SYNCHRONIZE`が要る）。handleを開けなかった場合も同様に、**不在を確定できるerrorの集合**（存在しないpidに対する`ERROR_INVALID_PARAMETER`）だけを不在とする。権限不足（5）・資源不足（8）・未知errorはprocessが在るまま起き得るため生存扱いにする
+16. **lockの取得（新規・回収の別を問わず）は排他guardの下で直列化する**。単なる置換 + 読み戻しでは、同じstale lockを読んだ2 processが順に置換して**両方が成功**し得る（読み戻しは「自分の確認より前に奪われた」場合しか検出できない）。一方、lock fileを一時退避してから確認する方式は**生きているlockを一度動かす**ため、差し戻しに失敗すると真の保持者のlockが消える。したがって:
+    1. `os.mkdir`（存在すれば失敗する原子的な排他）で取得guardを取る。取れなければ`LockUnavailable`（推測して進まない）
+    2. **guardの下で読み**、3条件を判定する。生きているlockには一切触れない
+    3. 条件を満たす場合だけ、同じguardの下で確定する
+    guardは新規取得にも掛ける。読取と書込の間に別processが入れないことが直列化の根拠であり、経路によって根拠が変わらないようにする。guardを保持したままprocessが落ちるとguardが残り、以後の取得は`LockUnavailable`になる（fail closed。復旧はguard directoryの削除で、これは提示するdetailに含める）。guardの解放失敗は`LockGuardError`として表面化させる（残ると以後の取得が止まるため、silentに続行しない）
+17. **lockの確定は一時fileへ書き切ってからの`os.replace`で行う**（`replace_private_text`）。`O_CREAT | O_EXCL`での直接作成は「作成」と「書込」の間に空のfileが見え、別processがそれを読むと破損と区別できない。かといって`os.link`でpathへ公開する方式は、**link成功から一時fileの削除までの間に落ちるとlink数2のfileが残り**、以後`verify_private_file`の「link数1」契約に永久に掛かる（内容が完全でも`LockUnavailable`から自動復旧できない）。`os.replace`なら、中断時に残るのは**読み手から見えない一意名の一時file**だけで、pathには「lockが無い」か「完全なlock」しか現れず、次の取得も妨げない。排他性はguard（決定16）が担い、原子性はここが担う
 18. **保存前にowner payloadを検証する**。`RUN_LOCK` schemaに加え、回収判定に使う`pid` / `number`の下限（1以上）を入力検証で保証する。consumerが受理できないlockをproducerが作れると、silent repair禁止の下でそのpathを回復できなくなるため、不正入力は`LockInputError`で**書き込む前に**止める
 19. **解放は自runのlockに限る**（run IDとpidの一致）。他runのlockは削除しない
 

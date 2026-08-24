@@ -33,33 +33,52 @@ def test_unlikely_pid_is_not_alive() -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX backendの分岐")
-def test_permission_error_is_treated_as_alive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """存在するが触れないprocessは生存扱い（迷ったら回収しない）。"""
+@pytest.mark.parametrize(
+    "error",
+    [PermissionError(1, "operation not permitted"), OSError(12, "cannot allocate memory")],
+    ids=["access_denied", "resource_shortage"],
+)
+def test_ambiguous_kill_failure_is_treated_as_alive(
+    monkeypatch: pytest.MonkeyPatch, error: OSError
+) -> None:
+    """不在を確定できないerrorはすべて生存扱い（迷ったら回収しない）。"""
     from claude_code_codex_review_loop.process import process_group
 
     def _deny(pid: int, signum: int) -> None:
-        raise PermissionError(1, "operation not permitted")
+        raise error
 
     monkeypatch.setattr(process_group.os, "kill", _deny)
     assert is_process_alive(os.getpid()) is True
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows backendの分岐")
-def test_access_denied_is_treated_as_alive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OpenProcessが権限不足で失敗した場合は生存扱い（迷ったら回収しない）。"""
+@pytest.mark.parametrize(
+    "error_name",
+    ["_ERROR_ACCESS_DENIED", "_ERROR_NOT_ENOUGH_MEMORY"],
+    ids=["access_denied", "resource_shortage"],
+)
+def test_ambiguous_open_failure_is_treated_as_alive(
+    monkeypatch: pytest.MonkeyPatch, error_name: str
+) -> None:
+    """OpenProcessの失敗がprocessの不在を意味しない場合は生存扱いにする。
+
+    権限不足（5）も資源不足（8）もprocessが在るまま起き得るため、これらで回収へ進むと
+    生きているrunのlockを奪ってしまう。
+    """
     from claude_code_codex_review_loop.process import job_object
 
     monkeypatch.setattr(job_object._kernel32, "OpenProcess", lambda access, inherit, pid: 0)
-    monkeypatch.setattr(job_object, "_last_error", lambda: job_object._ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(job_object, "_last_error", lambda: getattr(job_object, error_name))
     assert is_process_alive(os.getpid()) is True
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows backendの分岐")
-def test_other_open_failure_is_not_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invalid_parameter_confirms_absence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """存在しないpidに対するOpenProcessの`ERROR_INVALID_PARAMETER`だけを不在と解釈する。"""
     from claude_code_codex_review_loop.process import job_object
 
     monkeypatch.setattr(job_object._kernel32, "OpenProcess", lambda access, inherit, pid: 0)
-    monkeypatch.setattr(job_object, "_last_error", lambda: 87)
+    monkeypatch.setattr(job_object, "_last_error", lambda: job_object._ERROR_INVALID_PARAMETER)
     assert is_process_alive(os.getpid()) is False
 
 

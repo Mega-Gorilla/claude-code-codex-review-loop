@@ -93,38 +93,18 @@ def write_private_text(path: Path, text: str) -> None:
     _reject_shared_file_entity(path)
 
 
-def publish_private_text(path: Path, text: str) -> bool:
-    """内容を書き切ってから**原子的かつ排他的に**publishする（lockの取得経路）。
-
-    `O_CREAT | O_EXCL`での直接作成は「作成」と「書込」の間に空のfileが見えるため、
-    別processが読むと内容の無いfileを観測してしまう（lockでは破損と区別できない）。
-    一時fileへ全内容を書いてから`os.link`で公開すると、他processからは
-    「存在しない」か「完全な内容」のどちらかしか見えず、既存pathがあればlinkが
-    失敗するので排他性も保てる（ADR-0011）。
-
-    publishできた場合はTrue、既にpathが存在する場合はFalseを返す。
-    """
-    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.new"
-    write_private_text(temporary, text)
-    try:
-        os.link(temporary, path)
-    except FileExistsError:
-        return False
-    except OSError as error:
-        raise FsPermissionError("publish", f"fileを公開できない: {path}", error.errno) from error
-    finally:
-        temporary.unlink(missing_ok=True)
-    verify_private_file(path)
-    return True
-
-
 def replace_private_text(path: Path, text: str) -> None:
-    """既存fileを作成者限定のまま**原子的に**置き換える（checkpointの更新経路）。
+    """作成者限定のfileを**原子的に**確定する（checkpointの更新とlockの設置）。
 
     同一private directory内へ一時fileを排他作成して書き、`os.replace`で差し替える。
-    どの時点で中断しても、pathには「置換前の内容」か「置換後の内容」のどちらかだけが
-    見える（truncateされた中間状態を作らない）。世代は残さない（GitHubがcanonicalで、
-    local checkpointはcacheであるため。ADR-0011）。
+    pathが未作成でも同じ手順で確定できる。どの時点で中断しても、pathには
+    「置換前の内容（未作成なら不在）」か「置換後の内容」のどちらかだけが見える
+    （truncateされた中間状態も、内容の無いfileも作らない）。世代は残さない
+    （GitHubがcanonicalで、local checkpointはcacheであるため。ADR-0011）。
+
+    中断で残り得るのは一意名の一時fileだけで、これはpathの読み手からは見えず、
+    次の確定を妨げない（`os.link`でpathへ公開する方式と違い、公開直後の中断で
+    link数2のfileが残って以後の検証を恒久的に失敗させることがない）。
 
     置換後は権限とlink数を読み戻して検証する（backendのwrite / verifyと同じ契約）。
     """

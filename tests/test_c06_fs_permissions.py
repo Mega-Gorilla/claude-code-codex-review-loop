@@ -16,7 +16,7 @@ from claude_code_codex_review_loop.identity import (
     verify_private_file,
     write_private_text,
 )
-from claude_code_codex_review_loop.identity.fs_permissions import publish_private_text, replace_private_text
+from claude_code_codex_review_loop.identity.fs_permissions import replace_private_text
 
 
 class TestExclusiveCreation:
@@ -157,6 +157,17 @@ class TestReplacePrivateText:
         assert target.read_text(encoding="utf-8") == "new"
         verify_private_file(target)
 
+    def test_confirmed_file_is_not_shared_with_a_temporary(self, tmp_path: Path) -> None:
+        """確定後のfileはlink数1（公開後に一時fileが残ってlink数2になる経路を持たない）。"""
+        directory = tmp_path / "private"
+        create_private_dir(directory)
+        target = directory / "checkpoint.json"
+        replace_private_text(target, "first")
+        replace_private_text(target, "second")
+        assert os.stat(target).st_nlink == 1
+        assert [entry.name for entry in directory.iterdir()] == [target.name]
+
+
 class TestPartialWrite:
     """`os.write`のpartial writeを成功扱いにしない（ADR-0011 決定1）。"""
 
@@ -201,40 +212,3 @@ class TestPartialWrite:
         with pytest.raises(FsPermissionError, match="書き込めない"):
             write_private_text(target, "x")
         assert not target.exists()
-
-class TestPublishPrivateText:
-    """原子的かつ排他的なpublish（lockの取得経路。ADR-0011 決定17）。"""
-
-    def test_publishes_complete_content(self, tmp_path: Path) -> None:
-        directory = tmp_path / "private"
-        create_private_dir(directory)
-        target = directory / "run.lock"
-        assert publish_private_text(target, "content") is True
-        assert target.read_text(encoding="utf-8") == "content"
-        verify_private_file(target)
-        assert [entry.name for entry in directory.iterdir()] == [target.name]
-
-    def test_existing_path_is_not_overwritten(self, tmp_path: Path) -> None:
-        """既存pathがあればlinkが失敗し、内容を保ったままFalseを返す（排他性）。"""
-        directory = tmp_path / "private"
-        create_private_dir(directory)
-        target = directory / "run.lock"
-        write_private_text(target, "first")
-        assert publish_private_text(target, "second") is False
-        assert target.read_text(encoding="utf-8") == "first"
-        assert [entry.name for entry in directory.iterdir()] == [target.name]
-
-    def test_link_failure_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """link自体の失敗（EEXIST以外）は成功と推測せずerrorにする。"""
-        directory = tmp_path / "private"
-        create_private_dir(directory)
-        target = directory / "run.lock"
-
-        def _fail(source: object, destination: object) -> None:
-            raise OSError(1, "operation not permitted")
-
-        monkeypatch.setattr(fs_permissions.os, "link", _fail)
-        with pytest.raises(FsPermissionError, match="公開できない"):
-            publish_private_text(target, "content")
-        assert not target.exists()
-        assert list(directory.iterdir()) == []
