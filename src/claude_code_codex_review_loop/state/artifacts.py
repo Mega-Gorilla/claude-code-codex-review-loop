@@ -3,7 +3,9 @@
 
 PR-2で追加した`artifact_records`（path / kind / content hash / approved head SHA /
 record binding / comment ID）の読み手。resumeは「GitHub recordとlocal artifactが
-**いずれもapproved head SHAへbindされている**」ことを確認し、確認できないartifactは
+**いずれもapproved head SHAへbindされている**」ことを確認する。artifact側の主張だけでなく
+**参照先の検証済みrecord自身のhead**も突き合わせる（artifactが現headを名乗りつつ旧headの
+recordを指す取り違えを、fail closedで落とす）。確認できないartifactは
 **cacheとして破棄**する（GitHub側が常に上位。ADR-0011 決定4のsilent repair禁止と同じ
 方針で、破棄した事実は結果として返す）。
 
@@ -15,12 +17,13 @@ record binding / comment ID）の読み手。resumeは「GitHub recordとlocal a
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, unique
 from pathlib import Path
 
 from ..identity.fs_permissions import FsPermissionError, verify_private_file
+from ..identity.record_chain import VerifiedRecord
 
 _READ_CHUNK = 1 << 20
 
@@ -79,8 +82,9 @@ class ArtifactStatus(Enum):
     """bind照合の結果。BOUND以外はcacheとして使わない。"""
 
     BOUND = "BOUND"
-    STALE_HEAD = "STALE_HEAD"
-    UNBOUND_RECORD = "UNBOUND_RECORD"
+    STALE_HEAD = "STALE_HEAD"  # artifactが別headへbindされている
+    UNBOUND_RECORD = "UNBOUND_RECORD"  # 参照先の検証済みrecordが無い
+    RECORD_MISMATCH = "RECORD_MISMATCH"  # 参照先recordのhead / comment IDが記録と食い違う
     MISSING = "MISSING"
     CONTENT_MISMATCH = "CONTENT_MISMATCH"
 
@@ -99,19 +103,36 @@ class ArtifactCheck:
         return self.status is ArtifactStatus.BOUND
 
 
+def _record_mismatch(binding: ArtifactBinding, record: VerifiedRecord, approved_head_sha: str) -> str | None:
+    """参照先recordとartifactの記録が食い違う理由（一致していればNone）。
+
+    recordの`head_sha`はmarkerの`head`（GitHub由来）で、artifact側の主張とは独立の値。
+    ここを照合しないと、旧headのrecordを指すcacheを現headのartifactとして受理してしまう。
+    `kind`はartifactの種別（record種別に限定されないfree-form）なので照合しない。
+    record同一性はbinding・comment ID・headで一意に定まる。
+    """
+    if record.head_sha != approved_head_sha:
+        return f"参照recordは{record.head_sha}へbindされている"
+    if binding.comment_id is not None and binding.comment_id != record.comment_id:
+        return f"参照recordのcomment ID（{record.comment_id}）が記録と一致しない"
+    return None
+
+
 def verify_artifact_bindings(
     bindings: tuple[ArtifactBinding, ...],
     *,
     approved_head_sha: str,
-    record_bindings: Collection[str],
+    records: Sequence[VerifiedRecord],
     digest: Callable[[str], str | None],
 ) -> tuple[ArtifactCheck, ...]:
     """各artifactがapproved headと検証済みrecordの両方へbindされているか照合する。
 
     head不一致はfileを読む前に落とす（古いheadのartifactを読み出す理由が無い）。
-    `record_bindings`は検証済みrecordのbinding集合で、そこに無いartifactは
-    「GitHub側の記録に対応しないcache」として破棄する。
+    `records`は**検証済み**record列で、対応するbindingが無いartifactは「GitHub側の記録に
+    対応しないcache」として破棄する。対応があっても、record自身のheadがapproved headと
+    一致しない場合は`RECORD_MISMATCH`として破棄する（AC-C07-05）。
     """
+    index = {record.key: record for record in records}
     checks: list[ArtifactCheck] = []
     for binding in bindings:
         if binding.approved_head_sha != approved_head_sha:
@@ -123,13 +144,20 @@ def verify_artifact_bindings(
                 )
             )
             continue
-        if binding.record_binding is None or binding.record_binding not in record_bindings:
+        record = None if binding.record_binding is None else index.get(binding.record_binding)
+        if record is None:
             checks.append(
                 ArtifactCheck(
                     binding=binding,
                     status=ArtifactStatus.UNBOUND_RECORD,
                     detail="検証済みrecordに対応するbindingが無い",
                 )
+            )
+            continue
+        mismatch = _record_mismatch(binding, record, approved_head_sha)
+        if mismatch is not None:
+            checks.append(
+                ArtifactCheck(binding=binding, status=ArtifactStatus.RECORD_MISMATCH, detail=mismatch)
             )
             continue
         observed = digest(binding.path)

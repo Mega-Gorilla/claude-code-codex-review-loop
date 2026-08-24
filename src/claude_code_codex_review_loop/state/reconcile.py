@@ -7,11 +7,19 @@ resume時に成立させる。判定は**純粋**で、入力はGitHub由来の�
 - 承認の有効性は「承認recordのmarkerが持つhead」と「PRが現在advertiseしているhead」の
   一致だけで決める。checkpointは**変化の分類**（coder pushか外部更新か）にしか使わない。
   分類を誤っても、失効した承認が甦らない構造にする
+- canonical recordはappend-onlyなので、旧headの承認は履歴に残り続ける。同種の承認が
+  現headにも存在する場合、旧世代は**superseded**（診断用に保持するが判定へ影響しない）と
+  し、現headの承認が無い場合だけ**voided**として失効させる。そうしないと、再承認済みの
+  runが以後永久にfallbackし続ける
+- merge gateへの復帰（`SAME_HEAD_VALIDATED`）は、**GitHub上で確認できた現headの承認**を
+  必須にする。local checkpointの`approved_sha`だけで復帰させない（GitHub canonical）
 - coder更新と外部更新の最終的な区別はAC-C10-06（Phase 10）の責務で、ここは観測された
   事実（分類と根拠）を返すに留める
-- `ResumeVerdict`の3値はC-01のresume event（`ResumeValidated` / `ResumeFallbackRequired` /
-  `ResumeSameHeadValidated`）へ1対1で対応するが、**eventの構築はC-10**が行う。
-  record -> eventの対応表を持ち込まない（Issue #12の実装契約）
+- `ResumeVerdict`はresume preflightの**判定**であり、event名ではない。C-01のどのevent
+  （`ResumeValidated` / `ResumeFallbackRequired` / `ResumeSameHeadValidated` /
+  `HeadChangedExternally`）へ写すかは現在のstateにも依存するため、**構築はC-10**が行う
+  （例: `FALLBACK_REQUIRED`はFAILED / BLOCKEDでは`ResumeFallbackRequired`、MERGE_FAILEDでは
+  M-HCの`HeadChangedExternally`）。record -> eventの対応表を持ち込まない
 - 観測が成立しない場合（head SHAの形式不正等）は判定せず`HeadUnobservable`で停止する
 """
 
@@ -30,6 +38,8 @@ from ..transport.pull_request import UnverifiedPullRequest
 
 _SHA_PATTERN: Final = re.compile(r"[0-9a-f]{40}\Z")
 _APPROVED_VERDICT: Final = "APPROVED"
+# merge gateへ復帰する（`SAME_HEAD_VALIDATED`）ために現headでの確認が要る承認種別
+_MERGE_GATE_APPROVALS: Final = frozenset({RecordKind.MERGE_APPROVAL, RecordKind.REVIEW_RESULT})
 
 
 @dataclass(frozen=True)
@@ -99,13 +109,26 @@ class ApprovalEvidence:
     detail: str | None
 
 
+@unique
+class ApprovalState(Enum):
+    """承認1件の現在の扱い。"""
+
+    VALID = "VALID"  # 現在のadvertised headへbindされている
+    SUPERSEDED = "SUPERSEDED"  # 同種の承認が現headにもある（過去世代。判定へ影響しない）
+    VOIDED = "VOIDED"  # 現headに同種の承認が無く、失効している
+
+
 @dataclass(frozen=True)
 class ApprovalStatus:
-    """承認の現在の有効性。失効理由は診断のために保持する。"""
+    """承認の現在の扱い。失効・置換の理由は診断のために保持する。"""
 
     evidence: ApprovalEvidence
-    valid: bool
-    reason: str | None
+    state: ApprovalState
+    reason: str | None = None
+
+    @property
+    def valid(self) -> bool:
+        return self.state is ApprovalState.VALID
 
 
 def collect_approvals(records: Sequence[VerifiedRecord]) -> tuple[ApprovalEvidence, ...]:
@@ -145,7 +168,7 @@ class HeadChange(Enum):
 
 @unique
 class ResumeVerdict(Enum):
-    """resume preflightの判定（C-01のresume eventへ1対1で対応する）。"""
+    """resume preflightの判定（C-01 eventへの写像はstateにも依存する。構築はC-10）。"""
 
     VALIDATED = "VALIDATED"
     FALLBACK_REQUIRED = "FALLBACK_REQUIRED"
@@ -162,13 +185,20 @@ class HeadReconciliation:
     approvals: tuple[ApprovalStatus, ...]
     detail: str
 
+    def _of(self, state: ApprovalState) -> tuple[ApprovalEvidence, ...]:
+        return tuple(status.evidence for status in self.approvals if status.state is state)
+
     @property
     def valid_approvals(self) -> tuple[ApprovalEvidence, ...]:
-        return tuple(status.evidence for status in self.approvals if status.valid)
+        return self._of(ApprovalState.VALID)
 
     @property
     def voided_approvals(self) -> tuple[ApprovalEvidence, ...]:
-        return tuple(status.evidence for status in self.approvals if not status.valid)
+        return self._of(ApprovalState.VOIDED)
+
+    @property
+    def superseded_approvals(self) -> tuple[ApprovalEvidence, ...]:
+        return self._of(ApprovalState.SUPERSEDED)
 
 
 def _classify(observation: HeadObservation, heads: CheckpointHeads) -> HeadChange:
@@ -181,32 +211,67 @@ def _classify(observation: HeadObservation, heads: CheckpointHeads) -> HeadChang
     return HeadChange.EXTERNAL_UPDATE
 
 
+def _evaluate_approvals(
+    approvals: Sequence[ApprovalEvidence], head_sha: str
+) -> tuple[ApprovalStatus, ...]:
+    """承認ごとの扱いを決める（現head / superseded / 失効）。
+
+    canonical recordはappend-onlyなので、旧headの承認は履歴に残り続ける。同種の承認が
+    現headにも存在するなら、旧世代は置き換え済み（`SUPERSEDED`）として判定から外す。
+    現headに同種の承認が無い場合だけ失効（`VOIDED`）として扱う。
+    """
+    current_kinds = {evidence.kind for evidence in approvals if evidence.head_sha == head_sha}
+    statuses: list[ApprovalStatus] = []
+    for evidence in approvals:
+        if evidence.head_sha == head_sha:
+            statuses.append(ApprovalStatus(evidence=evidence, state=ApprovalState.VALID))
+        elif evidence.kind in current_kinds:
+            statuses.append(
+                ApprovalStatus(
+                    evidence=evidence,
+                    state=ApprovalState.SUPERSEDED,
+                    reason=f"同種の承認が現在のheadにも存在する（旧head {evidence.head_sha}）",
+                )
+            )
+        else:
+            statuses.append(
+                ApprovalStatus(
+                    evidence=evidence,
+                    state=ApprovalState.VOIDED,
+                    reason=f"承認は{evidence.head_sha}へbindされており、現在のheadと一致しない",
+                )
+            )
+    return tuple(statuses)
+
+
 def reconcile_head(
     observation: HeadObservation,
     *,
     records: Sequence[VerifiedRecord],
     heads: CheckpointHeads,
     checkpoint_state: State | None = None,
+    external_approvals: Sequence[ApprovalEvidence] = (),
 ) -> HeadReconciliation:
     """advertised headと承認recordを照合し、resume preflightの判定を返す。
 
-    承認は「bind先headが現在のadvertised headと一致するか」だけで判定する。
-    1件でも失効していれば、変化の分類にかかわらず`FALLBACK_REQUIRED`（継続破棄・
-    承認失効 + fresh review）とする。`MERGE_FAILED`からの再開は、承認が全て有効で
-    headが動いていない場合に限り`SAME_HEAD_VALIDATED`になる。
+    承認は「bind先headが現在のadvertised headと一致するか」だけで判定する。同種の
+    現head承認で置き換えられた旧世代は判定へ影響させず（`SUPERSEDED`）、置き換えの
+    無い旧承認が1件でもあれば`FALLBACK_REQUIRED`（継続破棄・承認失効 + fresh review）
+    とする。
+
+    `external_approvals`はGitHub直接commentとして受理された承認（C-06の
+    `accept_user_decision`の結果からPR-4が組み立てる）。chain recordを伴わない承認経路
+    （D-021）でも同じ判定を通すために受け取る。
+
+    `MERGE_FAILED`からの再開が`SAME_HEAD_VALIDATED`になるのは、**現headへbindされた
+    merge承認とreview承認がGitHub上で確認できる場合だけ**。local checkpointの
+    `approved_sha`だけでmerge gateへ復帰させない。
     """
     change = _classify(observation, heads)
-    statuses = tuple(
-        ApprovalStatus(
-            evidence=evidence,
-            valid=evidence.head_sha == observation.head_sha,
-            reason=None
-            if evidence.head_sha == observation.head_sha
-            else f"承認は{evidence.head_sha}へbindされており、現在のheadと一致しない",
-        )
-        for evidence in collect_approvals(records)
+    statuses = _evaluate_approvals(
+        (*collect_approvals(records), *external_approvals), observation.head_sha
     )
-    voided = [status for status in statuses if not status.valid]
+    voided = [status for status in statuses if status.state is ApprovalState.VOIDED]
     if voided:
         return HeadReconciliation(
             verdict=ResumeVerdict.FALLBACK_REQUIRED,
@@ -223,13 +288,23 @@ def reconcile_head(
             approvals=statuses,
             detail=f"最後に観測したheadから変化している（{change.value}）",
         )
-    if checkpoint_state is State.MERGE_FAILED and heads.approved_sha == observation.head_sha:
+    if checkpoint_state is State.MERGE_FAILED:
+        confirmed = {status.evidence.kind for status in statuses if status.valid}
+        missing = sorted(kind.value for kind in _MERGE_GATE_APPROVALS - confirmed)
+        if not missing:
+            return HeadReconciliation(
+                verdict=ResumeVerdict.SAME_HEAD_VALIDATED,
+                change=change,
+                observation=observation,
+                approvals=statuses,
+                detail="merge失敗後の同一headで、必要な承認をGitHub上で確認できた",
+            )
         return HeadReconciliation(
-            verdict=ResumeVerdict.SAME_HEAD_VALIDATED,
+            verdict=ResumeVerdict.VALIDATED,
             change=change,
             observation=observation,
             approvals=statuses,
-            detail="merge失敗後の同一headでの再確認",
+            detail=f"現headの承認をGitHub上で確認できない（{','.join(missing)}）ため再確認しない",
         )
     return HeadReconciliation(
         verdict=ResumeVerdict.VALIDATED,

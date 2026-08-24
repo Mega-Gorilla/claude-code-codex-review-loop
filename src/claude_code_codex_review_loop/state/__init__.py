@@ -62,6 +62,7 @@ from .paths import (
 )
 from .reconcile import (
     ApprovalEvidence,
+    ApprovalState,
     ApprovalStatus,
     CheckpointHeads,
     HeadChange,
@@ -89,6 +90,7 @@ from .store import (
 
 __all__ = [
     "ApprovalEvidence",
+    "ApprovalState",
     "ApprovalStatus",
     "ArtifactBinding",
     "ArtifactCheck",

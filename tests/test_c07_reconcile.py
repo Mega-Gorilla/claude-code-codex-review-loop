@@ -14,7 +14,10 @@ from c07_support.helpers import approved_review_payload, verified_chain
 
 from claude_code_codex_review_loop.domain.states import State
 from claude_code_codex_review_loop.domain.values import RecordKind
+from claude_code_codex_review_loop.identity.record_chain import VerifiedRecord
 from claude_code_codex_review_loop.state import (
+    ApprovalEvidence,
+    ApprovalState,
     CheckpointHeads,
     HeadChange,
     HeadObservation,
@@ -56,7 +59,7 @@ def _observation(head: str = HEAD, **overrides: object) -> HeadObservation:
     return result
 
 
-def _approved_chain(head: str = HEAD) -> tuple[object, ...]:
+def _approved_chain(head: str = HEAD) -> tuple[VerifiedRecord, ...]:
     """APPROVEDのreview承認とmerge承認を含む検証済みchainのrecord列。"""
     verification = verified_chain(
         [_K.REVIEW_RESULT, _K.MERGE_APPROVAL],
@@ -65,6 +68,21 @@ def _approved_chain(head: str = HEAD) -> tuple[object, ...]:
     )
     assert verification.is_intact
     return verification.records
+
+
+def _reapproved_chain(old_head: str, new_head: str) -> tuple[VerifiedRecord, ...]:
+    """旧headの承認の後、現headで再承認したintact chain（append-onlyの履歴）。"""
+    verification = verified_chain(
+        [_K.REVIEW_RESULT, _K.REVIEW_RESULT],
+        head=old_head,
+        payloads={1: approved_review_payload(old_head), 2: approved_review_payload(old_head)},
+    )
+    assert verification.is_intact
+    older = verification.records[0]
+    newer = verified_chain(
+        [_K.REVIEW_RESULT], head=new_head, payloads={1: approved_review_payload(new_head)}
+    ).records[0]
+    return (older, newer)
 
 
 class TestObserveHead:
@@ -188,15 +206,73 @@ class TestReconcileHead:
         )
         assert result.verdict is ResumeVerdict.FALLBACK_REQUIRED
 
-    def test_merge_failed_without_approved_head_is_validated(self) -> None:
-        """approved headを記録していなければ『同一head再確認』とは言えない。"""
+    def test_merge_failed_without_canonical_approval_is_not_revalidated(self) -> None:
+        """**GitHub上の承認recordが無ければmerge gateへ復帰しない**（local cacheだけで戻らない）。"""
         result = reconcile_head(
             _observation(),
             records=(),
-            heads=CheckpointHeads(observed_sha=HEAD),
+            heads=CheckpointHeads(observed_sha=HEAD, approved_sha=HEAD),
             checkpoint_state=State.MERGE_FAILED,
         )
         assert result.verdict is ResumeVerdict.VALIDATED
+        assert "MERGE_APPROVAL" in result.detail and "REVIEW_RESULT" in result.detail
+
+    @pytest.mark.parametrize(
+        "kinds, missing",
+        [([_K.MERGE_APPROVAL], "REVIEW_RESULT"), ([_K.REVIEW_RESULT], "MERGE_APPROVAL")],
+        ids=["review_missing", "merge_missing"],
+    )
+    def test_merge_failed_requires_both_approvals(self, kinds: list[RecordKind], missing: str) -> None:
+        """merge gateへの復帰は merge承認 と review承認 の両方を現headで確認できる場合だけ。"""
+        payloads = {1: approved_review_payload()} if kinds == [_K.REVIEW_RESULT] else None
+        result = reconcile_head(
+            _observation(),
+            records=verified_chain(kinds, payloads=payloads).records,
+            heads=CheckpointHeads(observed_sha=HEAD, approved_sha=HEAD),
+            checkpoint_state=State.MERGE_FAILED,
+        )
+        assert result.verdict is ResumeVerdict.VALIDATED and missing in result.detail
+
+    def test_merge_failed_accepts_external_merge_approval(self) -> None:
+        """GitHub直接commentで受理した承認（D-021）もmerge gate復帰の根拠にできる。"""
+        external = ApprovalEvidence(
+            kind=_K.MERGE_APPROVAL,
+            binding="ud:merge:1234",
+            head_sha=HEAD,
+            comment_id="1234",
+            detail="merge",
+        )
+        result = reconcile_head(
+            _observation(),
+            records=verified_chain([_K.REVIEW_RESULT], payloads={1: approved_review_payload()}).records,
+            heads=CheckpointHeads(observed_sha=HEAD, approved_sha=HEAD),
+            checkpoint_state=State.MERGE_FAILED,
+            external_approvals=(external,),
+        )
+        assert result.verdict is ResumeVerdict.SAME_HEAD_VALIDATED
+
+    def test_reapproved_head_does_not_fall_back_forever(self) -> None:
+        """旧headの承認は履歴に残るが、現headで再承認済みなら判定へ影響させない。"""
+        result = reconcile_head(
+            _observation(_NEW_HEAD),
+            records=_reapproved_chain(HEAD, _NEW_HEAD),
+            heads=CheckpointHeads(observed_sha=_NEW_HEAD, approved_sha=_NEW_HEAD),
+        )
+        assert result.verdict is ResumeVerdict.VALIDATED
+        assert len(result.valid_approvals) == 1 and len(result.superseded_approvals) == 1
+        assert result.voided_approvals == ()
+        superseded = [s for s in result.approvals if s.state is ApprovalState.SUPERSEDED]
+        assert superseded[0].reason is not None
+
+    def test_old_approval_without_reapproval_is_voided(self) -> None:
+        """同種の現head承認が無ければ、旧承認は失効のまま（再承認を偽装できない）。"""
+        result = reconcile_head(
+            _observation(_NEW_HEAD),
+            records=_approved_chain(),
+            heads=CheckpointHeads(observed_sha=_NEW_HEAD),
+        )
+        assert result.verdict is ResumeVerdict.FALLBACK_REQUIRED
+        assert len(result.voided_approvals) == 2 and result.superseded_approvals == ()
 
     def test_observation_facts_travel_with_the_verdict(self) -> None:
         """closed / mergedの事実は判定へ同梱し、消費側（C-10）が見落とせないようにする。"""

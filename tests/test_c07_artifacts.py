@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from c07_support.helpers import RUN, state_paths, verified_chain
 
 from claude_code_codex_review_loop.domain.values import RecordKind
 from claude_code_codex_review_loop.identity.fs_permissions import create_private_dir, write_private_text
+from claude_code_codex_review_loop.identity.record_chain import VerifiedRecord
 from claude_code_codex_review_loop.state import (
     ArtifactBinding,
     ArtifactCheck,
@@ -45,11 +47,24 @@ def _binding(**overrides: object) -> ArtifactBinding:
     return ArtifactBinding(**fields)  # type: ignore[arg-type]
 
 
+def _record(*, head: str = HEAD, binding: str = _BINDING, comment_id: str = "1001") -> VerifiedRecord:
+    """検証済みrecordを1件作り、bindingとcomment IDを差し替える（照合対象の素材）。"""
+    source = verified_chain([RecordKind.REVIEW_RESULT], head=head).records[0]
+    return replace(source, key=binding, comment_id=comment_id, head_sha=head)
+
+
 def _verify(
-    binding: ArtifactBinding, *, digest: str | None = _CONTENT_HASH, head: str = HEAD
+    binding: ArtifactBinding,
+    *,
+    digest: str | None = _CONTENT_HASH,
+    head: str = HEAD,
+    records: tuple[VerifiedRecord, ...] | None = None,
 ) -> ArtifactCheck:
     checks = verify_artifact_bindings(
-        (binding,), approved_head_sha=head, record_bindings={_BINDING}, digest=lambda path: digest
+        (binding,),
+        approved_head_sha=head,
+        records=(_record(),) if records is None else records,
+        digest=lambda path: digest,
     )
     assert len(checks) == 1
     return checks[0]
@@ -101,7 +116,7 @@ class TestVerifyArtifactBindings:
         checks = verify_artifact_bindings(
             (_binding(approved_head_sha=_NEW_HEAD),),
             approved_head_sha=HEAD,
-            record_bindings={_BINDING},
+            records=(_record(),),
             digest=_explode,
         )
         assert checks[0].status is ArtifactStatus.STALE_HEAD and checks[0].usable is False
@@ -125,15 +140,30 @@ class TestVerifyArtifactBindings:
         assert check.detail is not None
 
     def test_record_bindings_come_from_the_verified_chain(self) -> None:
-        """binding集合は検証済みrecordから作る（未検証markerを根拠にしない）。"""
+        """照合対象は検証済みrecordそのもの（未検証markerを根拠にしない）。"""
         records = verified_chain([RecordKind.REVIEW_RESULT]).records
         checks = verify_artifact_bindings(
-            (_binding(record_binding=records[0].key),),
+            (_binding(record_binding=records[0].key, comment_id=records[0].comment_id),),
             approved_head_sha=HEAD,
-            record_bindings={record.key for record in records},
+            records=records,
             digest=lambda path: _CONTENT_HASH,
         )
         assert checks[0].status is ArtifactStatus.BOUND
+
+    def test_record_bound_to_another_head_is_discarded(self) -> None:
+        """artifactが現headを名乗っても、参照recordが旧headなら受理しない（AC-C07-05）。"""
+        check = _verify(_binding(), records=(_record(head=_NEW_HEAD),))
+        assert check.status is ArtifactStatus.RECORD_MISMATCH
+        assert check.detail is not None and _NEW_HEAD in check.detail
+
+    def test_comment_id_mismatch_is_discarded(self) -> None:
+        """checkpoint側の取り違え（別commentへのbind）もfail closedにする。"""
+        check = _verify(_binding(comment_id="9999"))
+        assert check.status is ArtifactStatus.RECORD_MISMATCH
+
+    def test_absent_comment_id_is_not_required(self) -> None:
+        """comment IDはoptional field。未記録なら照合対象にしない。"""
+        assert _verify(_binding(comment_id=None)).status is ArtifactStatus.BOUND
 
 
 class TestArtifactContentHash:
