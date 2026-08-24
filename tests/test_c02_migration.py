@@ -131,6 +131,13 @@ class TestMigrationChain:
         assert (result.ok, result.stage) == (False, "migration")
 
 
+# migration chainを意図的に持たない定義（理由つきで登録する。ADR-0004 rule 6 / 8）
+INCOMPLETE_MIGRATION_CHAINS: dict[SchemaKind, str] = {
+    SchemaKind.HOST_ACTION: "v1 -> v2はresult_pathを捏造せずに変換できない（ADR-0014）",
+    SchemaKind.SUBMIT: "HOST_ACTIONとaction kindのenumを共有するため同時にbumpした（ADR-0014）",
+}
+
+
 class TestProductionDefinitions:
     def test_checkpoint_v1_loads_without_migration(self) -> None:
         payload = {
@@ -152,11 +159,27 @@ class TestProductionDefinitions:
         result = load_with_migration(REGISTRY[SchemaKind.CHECKPOINT], _raw(payload))
         assert (result.ok, result.stage) == (False, "version")
 
-    def test_all_production_definitions_start_at_version_one(self) -> None:
-        """現行の全定義はv1のみを持ち、migrationは未登録（最初のbumpでchainを登録する）。"""
+    def test_production_versions_are_contiguous_from_one(self) -> None:
+        """versionは1始まり・欠番なし（ADR-0004 rule 1）。"""
         for kind, definition in REGISTRY.items():
-            assert set(definition.versions) == {1}, kind
-            assert not definition.migrations, kind
+            versions = sorted(definition.versions)
+            assert versions == list(range(1, versions[-1] + 1)), kind
+
+    def test_migration_chains_are_complete_or_declared(self) -> None:
+        """chainが現行versionへ到達しない定義は、理由つきで明示登録する（silentな穴を作らない）。
+
+        migrationは**損失のない**変換に限る（ADR-0004 rule 6）ため、情報が増える方向の
+        bumpではchainを張れない。その場合は`migration_unavailable`の構造化errorになる
+        （rule 8）ので、意図した穴だけを許す。
+        """
+        for kind, definition in REGISTRY.items():
+            migrations = definition.migrations or {}
+            missing = [
+                version
+                for version in range(1, definition.current_version)
+                if version not in migrations
+            ]
+            assert bool(missing) == (kind in INCOMPLETE_MIGRATION_CHAINS), kind
 
     def test_integer_versions_start_at_one_and_are_contiguous(self) -> None:
         for definition in (_CHAINED,):

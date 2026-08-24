@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from ..domain.states import State
 from ..domain.values import Awaiting, RecordKind
+from .action import HOST_ACTION_KINDS, SUBMIT_OUTCOMES
 from .projection import (
     COUNT_KEY,
     DIGEST_KEY,
@@ -228,6 +229,29 @@ _SECTIONS: dict[str, Field] = {
                     TARGET_KEY: _optional_opaque(),
                     DIGEST_KEY: _optional_opaque(),
                     COUNT_KEY: integer(required=False),
+                },
+                required=False,
+            ),
+        },
+        required=False,
+    ),
+    # host_actionはPhase 8（C-08）のadditive追加: 未完了の`HOST_ACTION`と、受理済みsubmitの
+    # fingerprint。別processからのresume（AC-C08-06）が**同じaction ID / nonce / result path**を
+    # 再提示し、新しいactionを生成しないために要る（ADR-0014）
+    "host_action": obj(
+        {
+            "action_id": opaque(),
+            "action_kind": enum_field(HOST_ACTION_KINDS),
+            "nonce": opaque(),
+            "expected_head_sha": sha(),
+            "result_path": text(),
+            "issued_at": _optional_text(),
+            # 受理済みsubmitの記録。同一内容の再送を冪等に扱い、内容の異なる再送を止める
+            "submit": obj(
+                {
+                    "outcome": enum_field(SUBMIT_OUTCOMES),
+                    "result_hash": opaque(),
+                    "accepted_at": _optional_text(),
                 },
                 required=False,
             ),

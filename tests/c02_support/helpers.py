@@ -232,7 +232,7 @@ REPRESENTATIVE: dict[SchemaKind, dict[str, object]] = {
         "input_route": "github_comment",
     },
     SchemaKind.HOST_ACTION: {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": "run-1",
         "action_id": "act-1",
         "action_kind": "APPLY_FINDINGS",
@@ -241,11 +241,12 @@ REPRESENTATIVE: dict[SchemaKind, dict[str, object]] = {
         "expected_head_sha": SHA,
         "payload_hash": "ph-1",
         "nonce": "nonce-1",
+        "result_path": "actions/act-1.result.json",
         "verified_records": [{"comment_id": "c-1", "head_sha": SHA}],
-        "payload": {"findings": ["F-1"]},
+        "payload": {"round": 1, "finding_ids": ["F-1"]},
     },
     SchemaKind.SUBMIT: {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": "run-1",
         "action_id": "act-1",
         "action_kind": "APPLY_FINDINGS",
