@@ -76,18 +76,20 @@ def _approved_chain(head: str = HEAD) -> tuple[VerifiedRecord, ...]:
 
 
 def _reapproved_chain(old_head: str, new_head: str) -> tuple[VerifiedRecord, ...]:
-    """旧headの承認の後、現headで再承認したintact chain（append-onlyの履歴）。"""
+    """旧headでreview承認 -> merge承認 -> 現headでreview再承認、の実連結intact chain。
+
+    head跨ぎの履歴を1本のhash chainとして再現する（別々に生成したseq=1 recordを
+    並べるのではなく、`prev`で連結された実際のcanonical履歴）。
+    """
     verification = verified_chain(
-        [_K.REVIEW_RESULT, _K.REVIEW_RESULT],
+        [_K.REVIEW_RESULT, _K.MERGE_APPROVAL, _K.REVIEW_RESULT],
         head=old_head,
-        payloads={1: approved_review_payload(old_head), 2: approved_review_payload(old_head)},
+        heads={3: new_head},
+        payloads={1: approved_review_payload(old_head), 3: approved_review_payload(new_head)},
     )
     assert verification.is_intact
-    older = verification.records[0]
-    newer = verified_chain(
-        [_K.REVIEW_RESULT], head=new_head, payloads={1: approved_review_payload(new_head)}
-    ).records[0]
-    return (older, newer)
+    assert [record.head_sha for record in verification.records] == [old_head, old_head, new_head]
+    return verification.records
 
 
 class TestObserveHead:
@@ -273,17 +275,55 @@ class TestReconcileHead:
         assert result.verdict is ResumeVerdict.SAME_HEAD_VALIDATED
 
     def test_reapproved_head_does_not_fall_back_forever(self) -> None:
-        """旧headの承認は履歴に残るが、現headで再承認済みなら判定へ影響させない。"""
-        result = reconcile_head(
-            _observation(_NEW_HEAD),
+        """現headのreview再承認で、旧headの承認は**種別を問わず**退役する（承認epoch）。
+
+        種別ごとに退役させると旧merge承認だけが失効として残り、
+        `READY_FOR_HUMAN_MERGE`（= 現headのmerge承認を待つ段階）から毎回fresh reviewへ
+        戻ってユーザーのmerge承認へ到達できない。
+        """
+        result = _judged(
+            observation=_observation(_NEW_HEAD),
             records=_reapproved_chain(HEAD, _NEW_HEAD),
             heads=CheckpointHeads(observed_sha=_NEW_HEAD, approved_sha=_NEW_HEAD),
         )
         assert result.verdict is ResumeVerdict.VALIDATED
-        assert len(result.valid_approvals) == 1 and len(result.superseded_approvals) == 1
+        assert [evidence.kind for evidence in result.valid_approvals] == [_K.REVIEW_RESULT]
+        assert [evidence.kind for evidence in result.superseded_approvals] == [
+            _K.REVIEW_RESULT,
+            _K.MERGE_APPROVAL,
+        ]
         assert result.voided_approvals == ()
-        superseded = [s for s in result.approvals if s.state is ApprovalState.SUPERSEDED]
-        assert superseded[0].reason is not None
+        superseded = [status for status in result.approvals if status.state is ApprovalState.SUPERSEDED]
+        assert all(status.reason is not None for status in superseded)
+
+    def test_reapproved_head_reaches_the_merge_gate_requirement(self) -> None:
+        """再承認済みchainで`MERGE_FAILED`なら、fallbackではなく『merge承認が無い』で停止する。"""
+        result = reconcile_head(
+            _observation(_NEW_HEAD),
+            records=_reapproved_chain(HEAD, _NEW_HEAD),
+            heads=CheckpointHeads(observed_sha=_NEW_HEAD, approved_sha=_NEW_HEAD),
+            checkpoint_state=State.MERGE_FAILED,
+        )
+        assert isinstance(result, ReconciliationStopped)
+        assert result.reason is ReconciliationStop.MERGE_APPROVAL_UNCONFIRMED
+        assert result.missing_approvals == (_K.MERGE_APPROVAL,)
+
+    def test_merge_approval_alone_does_not_open_a_new_epoch(self) -> None:
+        """reviewを経ていない現headのmerge承認では、旧承認を退役させない（fresh reviewへ戻す）。"""
+        records = verified_chain(
+            [_K.REVIEW_RESULT, _K.MERGE_APPROVAL],
+            head=HEAD,
+            heads={2: _NEW_HEAD},
+            payloads={1: approved_review_payload(HEAD)},
+        ).records
+        result = _judged(
+            observation=_observation(_NEW_HEAD),
+            records=records,
+            heads=CheckpointHeads(observed_sha=_NEW_HEAD),
+        )
+        assert result.verdict is ResumeVerdict.FALLBACK_REQUIRED
+        assert [evidence.kind for evidence in result.voided_approvals] == [_K.REVIEW_RESULT]
+        assert [evidence.kind for evidence in result.valid_approvals] == [_K.MERGE_APPROVAL]
 
     def test_old_approval_without_reapproval_is_voided(self) -> None:
         """同種の現head承認が無ければ、旧承認は失効のまま（再承認を偽装できない）。"""

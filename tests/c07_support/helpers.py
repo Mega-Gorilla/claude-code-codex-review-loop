@@ -79,20 +79,23 @@ def chain_comments_of(
     author: str | None = PRODUCER,
     start_id: int = 2001,
     payloads: Mapping[int, dict[str, object]] | None = None,
+    heads: Mapping[int, str] | None = None,
 ) -> tuple[UnverifiedComment, ...]:
     """指定kind列（seq=1..n）の正規chainをUnverifiedCommentとして組み立てる。
 
-    kindを混在させられる点だけがc06_supportの`chain_comments`と違う（終端signalの
-    testに要る）。marker payloadとbindingは製品側の導出関数で作る。
+    kindとhead（seq単位）を混在させられる点がc06_supportの`chain_comments`と違う。
+    実際のrunではFIX_RESULTでheadが変わるため、head跨ぎの履歴を1本のhash chainとして
+    再現できる必要がある。marker payloadとbindingは製品側の導出関数で作る。
     """
     comments: list[UnverifiedComment] = []
     prev: str | None = None
     for index, kind in enumerate(kinds):
         text = f"record {index + 1}"
+        record_head = head if heads is None else heads.get(index + 1, head)
         payload = marker_payload(
             kind=kind,
             run_id=run_id,
-            head=head,
+            head=record_head,
             seq=index + 1,
             prev=prev,
             body=text,
@@ -116,10 +119,17 @@ def verified_chain(
     author: str | None = PRODUCER,
     start_id: int = 2001,
     payloads: Mapping[int, dict[str, object]] | None = None,
+    heads: Mapping[int, str] | None = None,
 ) -> ChainVerification:
     """検証済みchain（C-06の製品関数を通す。fixtureへ検証結果を直書きしない）。"""
     comments = chain_comments_of(
-        kinds, run_id=run_id, head=head, author=author, start_id=start_id, payloads=payloads
+        kinds,
+        run_id=run_id,
+        head=head,
+        author=author,
+        start_id=start_id,
+        payloads=payloads,
+        heads=heads,
     )
     return verify_record_chain(
         comments,

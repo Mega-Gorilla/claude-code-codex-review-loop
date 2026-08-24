@@ -7,10 +7,13 @@ resume時に成立させる。判定は**純粋**で、入力はGitHub由来の�
 - 承認の有効性は「承認recordのmarkerが持つhead」と「PRが現在advertiseしているhead」の
   一致だけで決める。checkpointは**変化の分類**（coder pushか外部更新か）にしか使わない。
   分類を誤っても、失効した承認が甦らない構造にする
-- canonical recordはappend-onlyなので、旧headの承認は履歴に残り続ける。同種の承認が
-  現headにも存在する場合、旧世代は**superseded**（診断用に保持するが判定へ影響しない）と
-  し、現headの承認が無い場合だけ**voided**として失効させる。そうしないと、再承認済みの
-  runが以後永久にfallbackし続ける
+- canonical recordはappend-onlyなので、旧headの承認は履歴に残り続ける。**現headの
+  review承認が新しい承認epochを開き**、それ以前のheadに属する承認は種別を問わず
+  **superseded**（診断用に保持するが判定へ影響しない）になる。現headのreview承認が
+  無い場合だけ、旧headの承認を**voided**として失効させる。種別ごとに退役させると、
+  head変更 -> fresh review承認の後もmerge承認だけが失効として残り、
+  `READY_FOR_HUMAN_MERGE`（= 現headのmerge承認を待つ段階）から毎回fresh reviewへ
+  戻ってユーザーのmerge承認へ到達できない
 - merge gateへの復帰（`SAME_HEAD_VALIDATED`）は、**GitHub上で確認できた現headの承認**を
   必須にする。local checkpointの`approved_sha`だけで復帰させない（GitHub canonical）
 - coder更新と外部更新の最終的な区別はAC-C10-06（Phase 10）の責務で、ここは観測された
@@ -240,26 +243,42 @@ def _classify(observation: HeadObservation, heads: CheckpointHeads) -> HeadChang
     return HeadChange.EXTERNAL_UPDATE
 
 
+def _epoch_established(approvals: Sequence[ApprovalEvidence], head_sha: str) -> bool:
+    """現headで新しい承認epochが成立しているか（= 現headのreview承認がある）。
+
+    head変更後のfresh reviewが承認された時点で、それ以前のheadに属する承認は
+    「置き換えられた過去世代」になる。epochの起点をreview承認に限るのは、reviewを
+    経ていないheadのmerge承認だけでは、そのheadがreview済みだと言えないため
+    （その場合は旧承認が失効として残り、fresh reviewへ戻る）。
+    """
+    return any(
+        evidence.kind is RecordKind.REVIEW_RESULT and evidence.head_sha == head_sha
+        for evidence in approvals
+    )
+
+
 def _evaluate_approvals(
     approvals: Sequence[ApprovalEvidence], head_sha: str
 ) -> tuple[ApprovalStatus, ...]:
     """承認ごとの扱いを決める（現head / superseded / 失効）。
 
-    canonical recordはappend-onlyなので、旧headの承認は履歴に残り続ける。同種の承認が
-    現headにも存在するなら、旧世代は置き換え済み（`SUPERSEDED`）として判定から外す。
-    現headに同種の承認が無い場合だけ失効（`VOIDED`）として扱う。
+    canonical recordはappend-onlyなので、旧headの承認は履歴に残り続ける。現headで承認
+    epochが成立していれば、それ以前のheadの承認は**種別を問わず**置き換え済み
+    （`SUPERSEDED`）として判定から外す。成立していない場合だけ失効（`VOIDED`）として
+    扱う。種別ごとに退役させると、fresh review承認後もmerge承認だけが失効として残り、
+    merge gateへ到達できなくなる。
     """
-    current_kinds = {evidence.kind for evidence in approvals if evidence.head_sha == head_sha}
+    superseded = _epoch_established(approvals, head_sha)
     statuses: list[ApprovalStatus] = []
     for evidence in approvals:
         if evidence.head_sha == head_sha:
             statuses.append(ApprovalStatus(evidence=evidence, state=ApprovalState.VALID))
-        elif evidence.kind in current_kinds:
+        elif superseded:
             statuses.append(
                 ApprovalStatus(
                     evidence=evidence,
                     state=ApprovalState.SUPERSEDED,
-                    reason=f"同種の承認が現在のheadにも存在する（旧head {evidence.head_sha}）",
+                    reason=f"現headのreview承認で置き換えられた過去世代（旧head {evidence.head_sha}）",
                 )
             )
         else:

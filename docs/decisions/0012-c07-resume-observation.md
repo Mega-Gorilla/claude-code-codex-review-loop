@@ -37,7 +37,11 @@ Issue #12の実装契約（着手前レビューで確定）が前提: **Phase 7
 8. **承認の失効はGitHub由来の値だけで決める**: 承認recordのmarkerが持つ`head`（`MERGE_APPROVAL`は`approved_head_sha`、`REVIEW_RESULT`は`target_head_sha`が射影元。ADR-0010の`PROJECTION_SPECS`）と、PRが現在advertiseしているheadの一致を見る。checkpointは**変化の分類にしか使わない**。分類を誤っても失効した承認が甦らない構造にする
 9. **承認とみなすrecordは2種のみ**: `MERGE_APPROVAL`と、結果が`APPROVED`の`REVIEW_RESULT`。不変条件「review承認とmerge承認は特定のhead SHAへ結び付き、headが変われば失効する」に対応する2種で、それ以外のrecordを承認として扱わない
 10. **coder pushでも承認は失効する**。head bindingはpushの主体に依存しない。`HeadChange`（`UNCHANGED` / `CODER_PUSH` / `EXTERNAL_UPDATE` / `UNKNOWN`）は観測事実として返すが、失効判定には使わない。coder更新と外部更新の最終的な区別はAC-C10-06（Phase 10）
-11. **旧世代の承認はsupersessionで扱う**。canonical recordはappend-onlyなので、旧headの承認は履歴に残り続ける。同種の承認が現headにも存在する場合、旧世代は`SUPERSEDED`（診断用に保持し判定へ影響させない）とし、現headに同種の承認が無い場合だけ`VOIDED`として失効させる。単純に「1件でも旧headの承認があればfallback」とすると、fresh reviewで再承認しても旧recordは履歴から消えないため、そのrunは**以後永久にfallbackし続ける**
+11. **旧世代の承認は承認epochで退役させる**。canonical recordはappend-onlyなので、旧headの承認は履歴に残り続ける。**現headのreview承認が新しいepochを開き**、それ以前のheadに属する承認は種別を問わず`SUPERSEDED`（診断用に保持し判定へ影響させない）になる。現headのreview承認が無い場合だけ`VOIDED`として失効させる。
+    - 単純に「1件でも旧headの承認があればfallback」とすると、fresh reviewで再承認しても旧recordは履歴から消えないため、そのrunは**以後永久にfallbackし続ける**
+    - 種別ごとに退役させても足りない。head変更 -> fresh review承認の後、旧headのmerge承認だけが失効として残り、`READY_FOR_HUMAN_MERGE`（= 現headのmerge承認を待つ段階）から毎回fresh reviewへ戻って**ユーザーのmerge承認へ到達できない**
+    - epochの起点をreview承認に限るのは、reviewを経ていないheadのmerge承認だけでは「そのheadがreview済み」と言えないため。この場合は旧承認が失効として残り、fresh reviewへ戻る（安全側）
+    - 退役は判定から外すだけで、**承認を与えない**（`VALID`は現headへbindされた承認のみ）
 12. **merge gateへの復帰はGitHub上の承認を必須にする**。`SAME_HEAD_VALIDATED`（C-01のM-SH「同一head・全条件再確認」）は、現headへbindされた**merge承認とreview承認の両方**が確認できる場合だけ返す。local checkpointの`approved_sha`だけでmerge gateへ復帰させない（GitHub canonical）。M-SH自体は承認を検査しないため、**発行してよいかの判断はC-07側にある**
 13. **判定を返せない場合は`ReconciliationStopped`で停止する**（verdictにしない）。承認を確認できない`MERGE_FAILED`は、C-01に受理される遷移が無い（bareな`MERGE_FAILED` + `ResumeValidated`は`TransitionRejected`、M-HCはhead変更時）。合法な遷移が無い状況をverdictで表すと、消費側が「前進してよい」と誤読するか実行時に拒否される。停止結果は理由（`ReconciliationStop`）と不足している承認種別を持つ
 14. **`VALIDATED`は「head照合が前進を妨げない」ことだけを意味する**。どのresume eventで再開するかはstateに応じてC-10が選ぶ（`R-P` / `R-A1` / `R-A2` / `R-D` / `R-B` / `R-CI` / `R-RT`）。head照合が下せる判断の範囲を超えてstateごとの再開手段を決めない
