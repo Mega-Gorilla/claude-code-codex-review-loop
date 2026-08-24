@@ -14,6 +14,17 @@ from __future__ import annotations
 
 from ..domain.states import State
 from ..domain.values import Awaiting, RecordKind
+from .projection import (
+    COUNT_KEY,
+    DIGEST_KEY,
+    FINGERPRINT_KEY,
+    PAYLOAD_HASH_KEY,
+    RESULT_KEY,
+    ROUND_KEY,
+    SUBJECT_KEY,
+    TARGET_KEY,
+    TURN_KEY,
+)
 from .registry import (
     SchemaDefinition,
     SchemaKind,
@@ -202,6 +213,24 @@ _SECTIONS: dict[str, Field] = {
             "payload_hash": opaque(),
             "body": text(max_len=MAX_PENDING_BODY_CHARS),
             "body_hash": _optional_opaque(),
+            # projectionはPhase 7 PR-4のadditive追加: 中断したrecordをmarkerごと
+            # 再composeするために要る（同一seqで本文がbyte一致しないとC-06のseq conflictに
+            # なる。ADR-0010 決定13）。keyの定義はC-02の`projection`が正本で、ここは
+            # 同じ集合を宣言するだけ（objは未知keyを拒否するため列挙が要る）
+            "projection": obj(
+                {
+                    PAYLOAD_HASH_KEY: opaque(),
+                    RESULT_KEY: _optional_text(),
+                    ROUND_KEY: integer(required=False),
+                    TURN_KEY: integer(required=False),
+                    FINGERPRINT_KEY: _optional_opaque(),
+                    SUBJECT_KEY: _optional_opaque(),
+                    TARGET_KEY: _optional_opaque(),
+                    DIGEST_KEY: _optional_opaque(),
+                    COUNT_KEY: integer(required=False),
+                },
+                required=False,
+            ),
         },
         required=False,
     ),
