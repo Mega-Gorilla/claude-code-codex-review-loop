@@ -8,6 +8,7 @@ state rootの用意と、最小のcheckpoint / lock payloadを組み立てる。
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from c06_support.helpers import HEAD as C06_HEAD
@@ -16,6 +17,7 @@ from c06_support.helpers import PRODUCER, make_comment, marker_payload
 from claude_code_codex_review_loop.domain.values import RecordKind
 from claude_code_codex_review_loop.identity import ProducerAllowlist, verify_record_chain
 from claude_code_codex_review_loop.identity.record_chain import ChainVerification
+from claude_code_codex_review_loop.schema.projection import PROJECTION_KEYS
 from claude_code_codex_review_loop.state import StatePaths, prepare_state_root
 from claude_code_codex_review_loop.transport.conversation import UnverifiedComment, body_hash_of
 from claude_code_codex_review_loop.transport.marker import attach_marker
@@ -139,3 +141,63 @@ def verified_chain(
         checkpoint=None,
         probes={},
     )
+
+
+@dataclass(frozen=True)
+class PendingFixture:
+    """中断中recordの素材（checkpointのtransactionと、投稿されるはずの完成形本文）。"""
+
+    transaction: dict[str, object]
+    body: str
+    binding: str
+    comment: UnverifiedComment
+
+
+def pending_fixture(
+    *,
+    seq: int,
+    prev: str | None = None,
+    kind: RecordKind = RecordKind.CLARIFICATION_QUESTION,
+    run_id: str = RUN,
+    head: str = C06_HEAD,
+    text: str | None = None,
+    payload: dict[str, object] | None = None,
+    include_body_hash: bool = True,
+) -> PendingFixture:
+    """製品側の導出関数だけでtransactionと完成形本文を作る（期待値を直書きしない）。"""
+    body_text = text if text is not None else f"record {seq}"
+    marker = marker_payload(
+        kind=kind, run_id=run_id, head=head, seq=seq, prev=prev, body=body_text, payload=payload
+    )
+    body = attach_marker(body_text, marker)
+    projection = {key: value for key, value in marker.items() if key in PROJECTION_KEYS}
+    transaction: dict[str, object] = {
+        "binding": str(marker["key"]),
+        "kind": kind.value,
+        "seq": seq,
+        "head_sha": head,
+        "payload_hash": str(projection["pay"]),
+        "body": body_text,
+        "projection": projection,
+    }
+    if include_body_hash:
+        transaction["body_hash"] = body_hash_of(body)
+    return PendingFixture(
+        transaction=transaction,
+        body=body,
+        binding=str(marker["key"]),
+        comment=make_comment(
+            2000 + seq, body, created_at=f"2026-08-24T10:00:{seq - 1:02d}Z"
+        ),
+    )
+
+
+def conversation_section(comments: Sequence[UnverifiedComment]) -> dict[str, object]:
+    """checkpointの`conversation`（high-water markと既知record）を組み立てる。"""
+    return {
+        "high_water_mark": len(comments),
+        "records": [
+            {"comment_id": comment.comment_id, "seq": index + 1, "body_hash": comment.body_hash}
+            for index, comment in enumerate(comments)
+        ],
+    }

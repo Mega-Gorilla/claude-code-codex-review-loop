@@ -45,7 +45,7 @@ Issue #12の実装契約（着手前レビューで確定）が前提: **Phase 7
 12. **merge gateへの復帰はGitHub上の承認を必須にする**。`SAME_HEAD_VALIDATED`（C-01のM-SH「同一head・全条件再確認」）は、現headへbindされた**merge承認とreview承認の両方**が確認できる場合だけ返す。local checkpointの`approved_sha`だけでmerge gateへ復帰させない（GitHub canonical）。M-SH自体は承認を検査しないため、**発行してよいかの判断はC-07側にある**
 13. **判定を返せない場合は`ReconciliationStopped`で停止する**（verdictにしない）。承認を確認できない`MERGE_FAILED`は、C-01に受理される遷移が無い（bareな`MERGE_FAILED` + `ResumeValidated`は`TransitionRejected`、M-HCはhead変更時）。合法な遷移が無い状況をverdictで表すと、消費側が「前進してよい」と誤読するか実行時に拒否される。停止結果は理由（`ReconciliationStop`）と不足している承認種別を持つ
 14. **`VALIDATED`は「head照合が前進を妨げない」ことだけを意味する**。どのresume eventで再開するかはstateに応じてC-10が選ぶ（`R-P` / `R-A1` / `R-A2` / `R-D` / `R-B` / `R-CI` / `R-RT`）。head照合が下せる判断の範囲を超えてstateごとの再開手段を決めない
-15. **chain recordを伴わない承認経路（D-021）は注入で受ける**。GitHub直接commentの承認はC-06が`AcceptedUserDecision`として受理し`PersistRecord`を発行しない = chainに現れない。`reconcile_head`は`external_approvals`として同じ`ApprovalEvidence`の形で受け取り、判定を一本化する（組み立てはPR-4）
+15. **chain recordを伴わない承認経路（D-021）は注入で受ける**。GitHub直接commentの承認はC-06が`AcceptedUserDecision`として受理し`PersistRecord`を発行しない = chainに現れない。`reconcile_head`は`external_approvals`として同じ`ApprovalEvidence`の形で受け取り、判定を一本化する。**本文の意味解釈と承認への組み立てはC-11**で、C-07（PR-4）が用意するのは注入口と、注入値を現在のcommentへ再検証する経路だけである（ADR-0013 決定15〜17）
 16. **`ResumeVerdict`は判定であってevent名ではない**。C-01のどのeventへ写すかは現在のstateにも依存する（例: `FALLBACK_REQUIRED`はFAILED / BLOCKEDでは`ResumeFallbackRequired`、MERGE_FAILEDではM-HCの`HeadChangedExternally`）。**eventの構築はC-10**が行い、C-07はenumを返すに留める（Phase 7がevent対応表を持ち込まない）
 17. **観測が成立しない場合は判定しない**（`HeadUnobservable`）。head / base SHAが40桁小文字hexでない応答は、推測して判定へ進めずに停止する
 18. **PRのclosed / mergedは判定へ同梱して返す**（`HeadReconciliation.observation`）。stateの決定はC-10の責務だが、消費側が観測事実を見落とさないよう結果に含める

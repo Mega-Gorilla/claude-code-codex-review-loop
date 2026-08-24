@@ -14,6 +14,7 @@ from test_c01_registry import enumerate_machine_states
 
 from claude_code_codex_review_loop.domain.states import State
 from claude_code_codex_review_loop.schema import REGISTRY, SchemaKind, validate
+from claude_code_codex_review_loop.schema.projection import PROJECTION_KEYS
 
 CHECKPOINT = REGISTRY[SchemaKind.CHECKPOINT]
 
@@ -256,4 +257,55 @@ def test_artifacts_item_type_is_unchanged() -> None:
 def test_unknown_state_field_is_still_rejected() -> None:
     payload = dict(_BASE)
     payload["state"] = {"state": "MERGED", "unknown_field": "x"}
+    assert not validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_phase7_transaction_carries_the_projection() -> None:
+    """再composeにprojectionが要る（ADR-0010 決定13）。keyはC-02のprojectionと同じ集合。"""
+    payload = dict(_BASE)
+    payload["transaction"] = {
+        "binding": "cr:run-1:00000004:" + "a" * 64,
+        "kind": "CLARIFICATION_QUESTION",
+        "seq": 4,
+        "head_sha": "b" * 40,
+        "payload_hash": "c" * 64,
+        "body": "公開本文",
+        "body_hash": "d" * 64,
+        "projection": {"pay": "c" * 64, "turn": 2, "fp": "fp-1", "tgt": "f-1"},
+    }
+    assert validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_transaction_projection_declares_every_projection_key() -> None:
+    """宣言したfield集合がC-02のPROJECTION_KEYSと一致する（drift防止）。"""
+    fields = CHECKPOINT.versions[1].fields["transaction"].fields
+    assert fields is not None
+    assert set(fields["projection"].fields or {}) == set(PROJECTION_KEYS)
+
+
+def test_transaction_projection_rejects_unknown_keys() -> None:
+    payload = dict(_BASE)
+    payload["transaction"] = {
+        "binding": "cr:run-1:00000004:" + "a" * 64,
+        "kind": "CLARIFICATION_QUESTION",
+        "seq": 4,
+        "head_sha": "b" * 40,
+        "payload_hash": "c" * 64,
+        "body": "公開本文",
+        "projection": {"pay": "c" * 64, "unknown": "x"},
+    }
+    assert not validate(CHECKPOINT, _raw(payload)).ok
+
+
+def test_transaction_projection_requires_the_payload_hash() -> None:
+    payload = dict(_BASE)
+    payload["transaction"] = {
+        "binding": "cr:run-1:00000004:" + "a" * 64,
+        "kind": "CLARIFICATION_QUESTION",
+        "seq": 4,
+        "head_sha": "b" * 40,
+        "payload_hash": "c" * 64,
+        "body": "公開本文",
+        "projection": {"turn": 2},
+    }
     assert not validate(CHECKPOINT, _raw(payload)).ok
