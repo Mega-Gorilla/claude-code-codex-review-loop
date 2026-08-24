@@ -23,7 +23,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, unique
 
-from ..domain.values import RecordKind
 from ..identity.allowlist import DecisionAllowlistState, DecisionContext, ProducerAllowlist
 from ..identity.errors import IdentityError
 from ..identity.record_chain import (
@@ -39,7 +38,6 @@ from ..transport.gh import GhContext, RepoRef, RetryPolicy
 from ..transport.pull_request import UnverifiedPullRequest, get_pull_request
 from .artifacts import ArtifactCheck, artifact_content_hash, read_artifact_bindings, verify_artifact_bindings
 from .direct_answer import (
-    DirectAnswerAccepted,
     DirectAnswerAmbiguous,
     DirectAnswerOutcome,
     DirectAnswerUnavailable,
@@ -83,6 +81,11 @@ class ResumeObservation:
     `artifact_digest`は(run ID, 記録path) -> content hashで、coreを純粋に保つために
     注入する。直接回答を評価する場合は`decision_context`と`decision_allowlist`を対で渡す
     （期待するuser-input record種別の決定はC-10 / C-11の責務）。
+
+    `external_approvals`はchain recordを伴わない承認（D-021のGitHub直接comment）を
+    head照合へ持ち込むための**注入口**で、**呼び出し側（C-11）が本文を意味解釈した
+    結果だけ**を渡す。C-07は候補を`direct_answer`として提示するに留め、自分で承認へ
+    変換しない（ADR-0013 決定15）。
     """
 
     repository: str
@@ -94,6 +97,7 @@ class ResumeObservation:
     decision_context: DecisionContext | None = None
     decision_allowlist: DecisionAllowlistState | None = None
     consumed_comment_ids: frozenset[str] = field(default_factory=frozenset)
+    external_approvals: tuple[ApprovalEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.decision_context is None) != (self.decision_allowlist is None):
@@ -207,32 +211,6 @@ def _selected_summary(summaries: Sequence[RunSummary], run_id: str) -> RunSummar
     raise IdentityError("resume", f"選択したrunのsummaryが無い: {run_id}")  # pragma: no cover
 
 
-def _external_approvals(
-    answer: DirectAnswerOutcome | None, context: DecisionContext | None
-) -> tuple[ApprovalEvidence, ...]:
-    """受理した直接回答のうち、head bindingを持つ承認をreconcileへ渡す形にする。
-
-    GitHub直接commentの承認（D-021）はchain recordを伴わないため（C-06は
-    `PersistRecord`を発行しない）、`reconcile_head`へ`external_approvals`として
-    注入しないとmerge承認が存在しないものとして扱われる（ADR-0012 決定16）。
-    承認種別は`MERGE_APPROVAL`だけで、他のuser-input recordは承認ではない。
-    """
-    if not isinstance(answer, DirectAnswerAccepted) or context is None:
-        return ()
-    if context.kind is not RecordKind.MERGE_APPROVAL:
-        return ()
-    decision = answer.decision
-    return (
-        ApprovalEvidence(
-            kind=context.kind,
-            binding=decision.binding.value,
-            head_sha=decision.head_sha,
-            comment_id=decision.comment_id,
-            detail=context.merge_method,
-        ),
-    )
-
-
 def _evaluate_pending(payload: Mapping[str, object] | None, *, run_id: str,
                       records: Sequence[VerifiedRecord]) -> PendingOutcome:
     """checkpointのtransactionから中断recordの扱いを決める（head照合に依存しない）。"""
@@ -251,8 +229,11 @@ def build_resume_context(observation: ResumeObservation) -> ResumeResult:
 
     **head照合に依存しない観測（pending / 直接回答）を先に集める**。head段階で停止する
     場合でも、C-10がR-P（pending優先）とC-11の意味解釈へ進める材料を落とさないため。
-    受理した直接回答は`external_approvals`としてhead照合へ注入する（D-021の承認は
-    chain recordを伴わない）。
+
+    直接回答は**候補として提示するだけ**で、承認へ変換しない。`accept_user_decision`は
+    本文の意味を判定しないため（受理は「ユーザー判断のexternal evidenceとして扱える」
+    までの確定）、ここで承認へ変換すると反対commentがmerge承認になる。意味解釈済みの
+    承認は`observation.external_approvals`として注入される（二段階経路。ADR-0013 決定15）。
     """
     selection = select_run(observation.summaries)
     if not isinstance(selection, RunSelected):
@@ -315,7 +296,7 @@ def build_resume_context(observation: ResumeObservation) -> ResumeResult:
         records=records,
         heads=read_checkpoint_heads(payload or {}),
         checkpoint_state=status.checkpoint_state,
-        external_approvals=_external_approvals(answer, observation.decision_context),
+        external_approvals=observation.external_approvals,
     )
     if isinstance(reconciliation, ReconciliationStopped):
         return _stop(ResumeStage.HEAD, reconciliation.detail, reconciliation)
@@ -357,6 +338,7 @@ def observe_resume(
     decision_context: DecisionContext | None = None,
     decision_allowlist: DecisionAllowlistState | None = None,
     consumed_comment_ids: frozenset[str] = frozenset(),
+    external_approvals: tuple[ApprovalEvidence, ...] = (),
 ) -> ResumeObservation:
     """GitHubとstate rootから観測を集める（I/O。判定は行わない）。
 
@@ -409,4 +391,5 @@ def observe_resume(
         decision_context=decision_context,
         decision_allowlist=decision_allowlist,
         consumed_comment_ids=consumed_comment_ids,
+        external_approvals=external_approvals,
     )

@@ -32,11 +32,13 @@ from claude_code_codex_review_loop.identity import (
     IdentityError,
 )
 from claude_code_codex_review_loop.state import (
+    ApprovalEvidence,
     ArtifactStatus,
     CheckpointLoaded,
     DirectAnswerAccepted,
     PendingAbsent,
     PendingReissueRequired,
+    ReconciliationStopped,
     ResumeContext,
     ResumeObservation,
     ResumeStage,
@@ -91,6 +93,7 @@ def _observation(
     comments: tuple[UnverifiedComment, ...] = (),
     decision_context: DecisionContext | None = None,
     allowlist: DecisionAllowlist | AllowlistUnavailable | None = None,
+    external_approvals: tuple[ApprovalEvidence, ...] = (),
 ) -> ResumeObservation:
     if summaries is None:
         summaries = (RunSummary(run_id=RUN, verification=verified_chain([_K.REVIEW_RESULT])),)
@@ -103,6 +106,7 @@ def _observation(
         artifact_digest=_digest,
         decision_context=decision_context,
         decision_allowlist=allowlist,
+        external_approvals=external_approvals,
     )
 
 
@@ -301,31 +305,66 @@ class TestObservationsSurviveStops:
             ),
         )
 
-    def test_direct_merge_approval_completes_the_merge_gate(self) -> None:
-        """**D-021の承認をreconcileへ注入する**。chain recordを伴わない承認でも同一headの
-        再確認が成立し、「承認が無いので停止 -> 承認は候補列挙に居るのに見えない」という
-        循環を作らない（ADR-0012 決定16の配線）。"""
-        answer = make_comment(
+    def _answer(self, body: str) -> UnverifiedComment:
+        return make_comment(
             3001,
-            "approve",
+            body,
             author="mega-gorilla",
             created_at="2026-08-24T11:00:00Z",
             repository=REPOSITORY,
             number=NUMBER,
         )
-        observation = _observation(
+
+    def _with_answer(self, body: str, **overrides: object) -> ResumeObservation:
+        return _observation(
             summaries=self._merge_failed_summary(),
-            comments=chain_comments_of([_K.REVIEW_RESULT]) + (answer,),
+            comments=chain_comments_of([_K.REVIEW_RESULT], payloads={1: approved_review_payload()})
+            + (self._answer(body),),
             decision_context=_CONTEXT,
             allowlist=_ALLOWLIST,
+            **overrides,  # type: ignore[arg-type]
         )
-        context = _context(observation)
+
+    @pytest.mark.parametrize(
+        "body",
+        ["Do not merge. I reject this change.", "これは何のためのPRですか？", "approve"],
+        ids=["rejection", "question", "affirmative"],
+    )
+    def test_direct_comments_never_become_merge_approvals(self, body: str) -> None:
+        """**C-11の意味解釈前にmerge承認へ変換しない**。
+
+        `accept_user_decision`はactor / allowlist / 観測元 / 編集 / consumed / markerを
+        検証するだけで、**本文の意味を判定しない**。`DecisionContext.kind=MERGE_APPROVAL`は
+        期待する入力種別へのbindingであって「本文が賛成である」というverdictではない。
+        C-07がここで承認へ変換すると、明示的な反対commentがmerge gateを開けてしまう。
+        """
+        stopped = _stopped(self._with_answer(body))
+        assert stopped.stage is ResumeStage.HEAD
+        assert isinstance(stopped.cause, ReconciliationStopped)
+        assert stopped.cause.missing_approvals == (_K.MERGE_APPROVAL,)
+        # 候補はC-11が意味解釈できるよう保持する（捨てない）
+        assert isinstance(stopped.direct_answer, DirectAnswerAccepted)
+        assert stopped.direct_answer.decision.body == body
+
+    def test_interpreted_approval_completes_the_merge_gate(self) -> None:
+        """二段階経路: 停止に同梱した候補をC-11が解釈し、承認として注入すると成立する。"""
+        stopped = _stopped(self._with_answer("approve"))
+        assert isinstance(stopped.direct_answer, DirectAnswerAccepted)
+        decision = stopped.direct_answer.decision
+        # C-11が「明示的なAPPROVE_MERGE」と解釈した結果だけをevidenceへ変換する
+        interpreted = ApprovalEvidence(
+            kind=_K.MERGE_APPROVAL,
+            binding=decision.binding.value,
+            head_sha=decision.head_sha,
+            comment_id=decision.comment_id,
+            detail="merge",
+        )
+        context = _context(self._with_answer("approve", external_approvals=(interpreted,)))
         assert context.verdict is ResumeVerdict.SAME_HEAD_VALIDATED
         assert [evidence.kind for evidence in context.head.valid_approvals] == [
             _K.REVIEW_RESULT,
             _K.MERGE_APPROVAL,
         ]
-        assert isinstance(context.direct_answer, DirectAnswerAccepted)
 
     def test_head_stop_still_carries_the_pending_directive(self) -> None:
         """C-01のR-Pはpendingを優先するため、head停止でもdirectiveを返せる必要がある。"""
@@ -380,29 +419,6 @@ class TestObservationsSurviveStops:
         stopped = _stopped(observation)
         assert stopped.stage is ResumeStage.DIRECT_ANSWER
         assert isinstance(stopped.pending, PendingReissueRequired)
-
-    def test_non_approval_direct_answers_are_not_injected(self) -> None:
-        """承認以外のuser-input record（例: GATE_QUESTION）は承認として注入しない。"""
-        context = DecisionContext(
-            kind=_K.GATE_QUESTION, repository=REPOSITORY, number=NUMBER, head_sha=HEAD
-        )
-        answer = make_comment(
-            3001,
-            "質問です",
-            author="mega-gorilla",
-            created_at="2026-08-24T11:00:00Z",
-            repository=REPOSITORY,
-            number=NUMBER,
-        )
-        observation = _observation(
-            summaries=self._merge_failed_summary(),
-            comments=chain_comments_of([_K.REVIEW_RESULT]) + (answer,),
-            decision_context=context,
-            allowlist=_ALLOWLIST,
-        )
-        stopped = _stopped(observation)
-        assert stopped.stage is ResumeStage.HEAD
-        assert isinstance(stopped.direct_answer, DirectAnswerAccepted)
 
 
 class TestStops:
