@@ -23,7 +23,14 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, unique
 
-from ..identity.allowlist import DecisionAllowlistState, DecisionContext, ProducerAllowlist
+from ..identity.allowlist import (
+    AcceptedUserDecision,
+    DecisionAllowlistState,
+    DecisionContext,
+    DecisionValidity,
+    ProducerAllowlist,
+    revalidate_user_decision,
+)
 from ..identity.errors import IdentityError
 from ..identity.record_chain import (
     ChainCheckpoint,
@@ -82,10 +89,12 @@ class ResumeObservation:
     注入する。直接回答を評価する場合は`decision_context`と`decision_allowlist`を対で渡す
     （期待するuser-input record種別の決定はC-10 / C-11の責務）。
 
-    `external_approvals`はchain recordを伴わない承認（D-021のGitHub直接comment）を
-    head照合へ持ち込むための**注入口**で、**呼び出し側（C-11）が本文を意味解釈した
-    結果だけ**を渡す。C-07は候補を`direct_answer`として提示するに留め、自分で承認へ
-    変換しない（ADR-0013 決定15）。
+    `interpreted_approvals`はchain recordを伴わない承認（D-021のGitHub直接comment）を
+    head照合へ持ち込むための**注入口**で、**呼び出し側（C-11）が本文を明示的な承認と
+    解釈した`AcceptedUserDecision`だけ**を渡す。C-07は候補を`direct_answer`として提示する
+    に留め、自分で承認へ変換しない（ADR-0013 決定15）。受理時の値をそのまま信用せず、
+    同じ観測窓の現在のcommentに対して`revalidate_user_decision`を通してから承認へ
+    変換する（決定17）。
     """
 
     repository: str
@@ -97,11 +106,23 @@ class ResumeObservation:
     decision_context: DecisionContext | None = None
     decision_allowlist: DecisionAllowlistState | None = None
     consumed_comment_ids: frozenset[str] = field(default_factory=frozenset)
-    external_approvals: tuple[ApprovalEvidence, ...] = ()
+    interpreted_approvals: tuple[AcceptedUserDecision, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.decision_context is None) != (self.decision_allowlist is None):
             raise IdentityError("observation", "decision contextとallowlistは対で渡す")
+        if self.interpreted_approvals and self.decision_context is None:
+            raise IdentityError(
+                "observation", "解釈済み承認の再検証にはdecision contextが要る"
+            )
+
+
+@dataclass(frozen=True)
+class VoidedApproval:
+    """注入された承認が現在のcommentで失効している（採用しない。理由つきで提示する）。"""
+
+    comment_id: str
+    validity: DecisionValidity
 
 
 @unique
@@ -143,6 +164,7 @@ class ResumeStopped:
     run_id: str | None = None
     pending: PendingOutcome | None = None
     direct_answer: DirectAnswerOutcome | None = None
+    voided_approvals: tuple[VoidedApproval, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -160,6 +182,7 @@ class ResumeContext:
     artifacts: tuple[ArtifactCheck, ...]
     direct_answer: DirectAnswerOutcome | None
     checkpoint: Mapping[str, object] | None
+    voided_approvals: tuple[VoidedApproval, ...] = ()
 
     @property
     def verdict(self) -> ResumeVerdict:
@@ -211,6 +234,41 @@ def _selected_summary(summaries: Sequence[RunSummary], run_id: str) -> RunSummar
     raise IdentityError("resume", f"選択したrunのsummaryが無い: {run_id}")  # pragma: no cover
 
 
+def _revalidated_approvals(
+    decisions: Sequence[AcceptedUserDecision],
+    *,
+    comments: Sequence[UnverifiedComment],
+    context: DecisionContext,
+) -> tuple[tuple[ApprovalEvidence, ...], tuple[VoidedApproval, ...]]:
+    """注入された承認を**現在のcomment**に対して再検証してから承認evidenceへ写す。
+
+    受理時の値をそのまま使うと、二段階経路の1回目と2回目の間にcommentが編集・削除
+    されても古い承認でmerge gateが開く（D-031 / ADR-0008 決定20の「編集・削除で判断を
+    失効」に反する）。失効判定はC-06の`revalidate_user_decision`をそのまま使い、
+    取得窓に現在のcommentが無い場合は削除として扱う（fail closed）。
+    """
+    current = {comment.comment_id: comment for comment in comments}
+    evidence: list[ApprovalEvidence] = []
+    voided: list[VoidedApproval] = []
+    for decision in decisions:
+        validity = revalidate_user_decision(
+            decision, current=current.get(decision.comment_id), expected=context
+        )
+        if validity is not DecisionValidity.VALID:
+            voided.append(VoidedApproval(comment_id=decision.comment_id, validity=validity))
+            continue
+        evidence.append(
+            ApprovalEvidence(
+                kind=context.kind,
+                binding=decision.binding.value,
+                head_sha=decision.head_sha,
+                comment_id=decision.comment_id,
+                detail=context.merge_method,
+            )
+        )
+    return tuple(evidence), tuple(voided)
+
+
 def _evaluate_pending(payload: Mapping[str, object] | None, *, run_id: str,
                       records: Sequence[VerifiedRecord]) -> PendingOutcome:
     """checkpointのtransactionから中断recordの扱いを決める（head照合に依存しない）。"""
@@ -233,7 +291,8 @@ def build_resume_context(observation: ResumeObservation) -> ResumeResult:
     直接回答は**候補として提示するだけ**で、承認へ変換しない。`accept_user_decision`は
     本文の意味を判定しないため（受理は「ユーザー判断のexternal evidenceとして扱える」
     までの確定）、ここで承認へ変換すると反対commentがmerge承認になる。意味解釈済みの
-    承認は`observation.external_approvals`として注入される（二段階経路。ADR-0013 決定15）。
+    承認は`observation.interpreted_approvals`として注入され、**現在のcommentに対して
+    再検証してから**承認evidenceになる（二段階経路。ADR-0013 決定15 / 17）。
     """
     selection = select_run(observation.summaries)
     if not isinstance(selection, RunSelected):
@@ -268,6 +327,15 @@ def build_resume_context(observation: ResumeObservation) -> ResumeResult:
             after=records[-1].created_at if records else None,
         )
 
+    approvals: tuple[ApprovalEvidence, ...] = ()
+    voided: tuple[VoidedApproval, ...] = ()
+    if observation.decision_context is not None:
+        approvals, voided = _revalidated_approvals(
+            observation.interpreted_approvals,
+            comments=observation.comments,
+            context=observation.decision_context,
+        )
+
     def _stop(stage: ResumeStage, detail: str, cause: ResumeStopCause) -> ResumeStopped:
         return ResumeStopped(
             stage=stage,
@@ -276,6 +344,7 @@ def build_resume_context(observation: ResumeObservation) -> ResumeResult:
             run_id=run_id,
             pending=pending,
             direct_answer=answer,
+            voided_approvals=voided,
         )
 
     if isinstance(pending, PendingUnavailable):
@@ -296,7 +365,7 @@ def build_resume_context(observation: ResumeObservation) -> ResumeResult:
         records=records,
         heads=read_checkpoint_heads(payload or {}),
         checkpoint_state=status.checkpoint_state,
-        external_approvals=observation.external_approvals,
+        external_approvals=approvals,
     )
     if isinstance(reconciliation, ReconciliationStopped):
         return _stop(ResumeStage.HEAD, reconciliation.detail, reconciliation)
@@ -322,6 +391,7 @@ def build_resume_context(observation: ResumeObservation) -> ResumeResult:
         artifacts=artifacts,
         direct_answer=answer,
         checkpoint=payload,
+        voided_approvals=voided,
     )
 
 
@@ -338,7 +408,7 @@ def observe_resume(
     decision_context: DecisionContext | None = None,
     decision_allowlist: DecisionAllowlistState | None = None,
     consumed_comment_ids: frozenset[str] = frozenset(),
-    external_approvals: tuple[ApprovalEvidence, ...] = (),
+    interpreted_approvals: tuple[AcceptedUserDecision, ...] = (),
 ) -> ResumeObservation:
     """GitHubとstate rootから観測を集める（I/O。判定は行わない）。
 
@@ -391,5 +461,5 @@ def observe_resume(
         decision_context=decision_context,
         decision_allowlist=decision_allowlist,
         consumed_comment_ids=consumed_comment_ids,
-        external_approvals=external_approvals,
+        interpreted_approvals=interpreted_approvals,
     )

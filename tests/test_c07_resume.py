@@ -26,13 +26,15 @@ from c07_support.helpers import (
 from claude_code_codex_review_loop.domain.states import State
 from claude_code_codex_review_loop.domain.values import RecordKind
 from claude_code_codex_review_loop.identity import (
+    AcceptedUserDecision,
     AllowlistUnavailable,
     DecisionAllowlist,
     DecisionContext,
+    DecisionValidity,
     IdentityError,
+    accept_user_decision,
 )
 from claude_code_codex_review_loop.state import (
-    ApprovalEvidence,
     ArtifactStatus,
     CheckpointLoaded,
     DirectAnswerAccepted,
@@ -93,7 +95,7 @@ def _observation(
     comments: tuple[UnverifiedComment, ...] = (),
     decision_context: DecisionContext | None = None,
     allowlist: DecisionAllowlist | AllowlistUnavailable | None = None,
-    external_approvals: tuple[ApprovalEvidence, ...] = (),
+    interpreted_approvals: tuple[AcceptedUserDecision, ...] = (),
 ) -> ResumeObservation:
     if summaries is None:
         summaries = (RunSummary(run_id=RUN, verification=verified_chain([_K.REVIEW_RESULT])),)
@@ -106,7 +108,7 @@ def _observation(
         artifact_digest=_digest,
         decision_context=decision_context,
         decision_allowlist=allowlist,
-        external_approvals=external_approvals,
+        interpreted_approvals=interpreted_approvals,
     )
 
 
@@ -346,25 +348,72 @@ class TestObservationsSurviveStops:
         assert isinstance(stopped.direct_answer, DirectAnswerAccepted)
         assert stopped.direct_answer.decision.body == body
 
-    def test_interpreted_approval_completes_the_merge_gate(self) -> None:
-        """二段階経路: 停止に同梱した候補をC-11が解釈し、承認として注入すると成立する。"""
-        stopped = _stopped(self._with_answer("approve"))
-        assert isinstance(stopped.direct_answer, DirectAnswerAccepted)
-        decision = stopped.direct_answer.decision
-        # C-11が「明示的なAPPROVE_MERGE」と解釈した結果だけをevidenceへ変換する
-        interpreted = ApprovalEvidence(
-            kind=_K.MERGE_APPROVAL,
-            binding=decision.binding.value,
-            head_sha=decision.head_sha,
-            comment_id=decision.comment_id,
-            detail="merge",
+    def _accepted(self, comment: UnverifiedComment) -> AcceptedUserDecision:
+        """C-11が『明示的な承認』と解釈した受理済み判断（1回目の観測で得た値）。"""
+        decision = accept_user_decision(
+            comment, allowlist=_ALLOWLIST, context=_CONTEXT, consumed_comment_ids=frozenset()
         )
-        context = _context(self._with_answer("approve", external_approvals=(interpreted,)))
+        assert isinstance(decision, AcceptedUserDecision)
+        return decision
+
+    def test_interpreted_approval_completes_the_merge_gate(self) -> None:
+        """二段階経路: 停止に同梱した候補をC-11が解釈し、注入すると成立する。"""
+        answer = self._answer("approve")
+        context = _context(
+            self._with_answer("approve", interpreted_approvals=(self._accepted(answer),))
+        )
         assert context.verdict is ResumeVerdict.SAME_HEAD_VALIDATED
         assert [evidence.kind for evidence in context.head.valid_approvals] == [
             _K.REVIEW_RESULT,
             _K.MERGE_APPROVAL,
         ]
+        assert context.voided_approvals == ()
+
+    def test_deleted_comment_voids_the_injected_approval(self) -> None:
+        """**受理後に削除**されたcommentの承認でmerge gateを開けない（D-031）。"""
+        accepted = self._accepted(self._answer("approve"))
+        observation = _observation(
+            summaries=self._merge_failed_summary(),
+            comments=chain_comments_of([_K.REVIEW_RESULT], payloads={1: approved_review_payload()}),
+            decision_context=_CONTEXT,
+            allowlist=_ALLOWLIST,
+            interpreted_approvals=(accepted,),
+        )
+        stopped = _stopped(observation)
+        assert stopped.stage is ResumeStage.HEAD
+        assert [voided.validity for voided in stopped.voided_approvals] == [
+            DecisionValidity.VOIDED_DELETED
+        ]
+
+    def test_edited_comment_voids_the_injected_approval(self) -> None:
+        """**受理後に編集**されたcommentの承認でmerge gateを開けない（ADR-0008 決定20）。"""
+        accepted = self._accepted(self._answer("approve"))
+        edited = make_comment(
+            3001,
+            "approve （後から書き換えた）",
+            author="mega-gorilla",
+            created_at="2026-08-24T11:00:00Z",
+            updated_at="2026-08-24T13:00:00Z",
+            repository=REPOSITORY,
+            number=NUMBER,
+        )
+        observation = _observation(
+            summaries=self._merge_failed_summary(),
+            comments=chain_comments_of([_K.REVIEW_RESULT], payloads={1: approved_review_payload()})
+            + (edited,),
+            decision_context=_CONTEXT,
+            allowlist=_ALLOWLIST,
+            interpreted_approvals=(accepted,),
+        )
+        stopped = _stopped(observation)
+        assert stopped.stage is ResumeStage.HEAD
+        assert [voided.validity for voided in stopped.voided_approvals] == [
+            DecisionValidity.VOIDED_EDITED
+        ]
+
+    def test_injected_approval_requires_a_decision_context(self) -> None:
+        with pytest.raises(IdentityError):
+            _observation(interpreted_approvals=(self._accepted(self._answer("approve")),))
 
     def test_head_stop_still_carries_the_pending_directive(self) -> None:
         """C-01のR-Pはpendingを優先するため、head停止でもdirectiveを返せる必要がある。"""

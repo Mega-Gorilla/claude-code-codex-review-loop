@@ -43,13 +43,14 @@ Phase 7はPR-1（ADR-0010: recordのcanonical projection）、PR-2（ADR-0011: c
 
 14. **head照合に依存しない観測を先に集める**。pending評価と直接回答の列挙はhead照合に依存しないため、head段階の停止より前に実行し、**停止結果にも同梱する**。そうしないと、(a) C-01のR-P（pending保持中の明示resumeは永続化確認を優先）へ渡すdirectiveが停止で失われ、(b) `MERGE_FAILED`で「merge承認を確認できないので停止 -> その承認が居る候補列挙へ到達できない」という循環が生じる
 15. **C-07は直接回答を承認へ変換しない**。`accept_user_decision`はactor / allowlist / 観測元 / 編集 / consumed / markerを検証するだけで、**本文の意味を判定しない**（受理は「ユーザー判断のexternal evidenceとして扱える」までの確定）。`DecisionContext.kind`は期待する入力種別へのbindingであって「本文が賛成である」というverdictではない。ここで承認へ変換すると、**明示的な反対commentがmerge gateを開けてしまう**（不変条件「曖昧な肯定を承認と解釈しない」に正面から反する）。C-07は候補を`direct_answer`として提示するに留める
-16. **意味解釈済みの承認は注入口で受ける**（`ResumeObservation.external_approvals`）。D-021の承認はchain recordを伴わないため、`reconcile_head`へ渡さないと存在しないものとして扱われる。そこで**二段階経路**にする: (1) resumeは候補を同梱した停止を返す -> (2) C-11が明示的な`APPROVE_MERGE`と解釈した結果だけを`ApprovalEvidence`へ変換して注入し、resumeを再実行する。`MERGE_FAILED`の循環（承認を確認できないので停止 -> 承認候補へ到達できない）は、停止結果へ候補を同梱すること（決定14）で解消しており、C-07が意味解釈する必要はない。**ADR-0012 決定16の「組み立てはPR-4」はここで更新する**（組み立てはC-11、PR-4が用意するのは注入口）
-17. **pure coreとI/O収集を分ける**（`build_resume_context` / `observe_resume`）。C-06の`verify_record_chain` + `probe_known_records`と同じ構造で、判定はfixtureだけで決定論的に検証できる
-18. **段階ごとに停止する**（`ResumeStage`: `RUN_SELECTION` / `INTEGRITY` / `HEAD` / `PENDING` / `DIRECT_ANSWER`）。`ResumeStopped`は理由に加えて**原因の値そのもの**（`RunAmbiguous`や`ChainVerification`等の直和）を持ち、detail文字列だけで区別させない
-19. **chain violationは停止**（C-06の契約どおり`is_intact`でgateする）。一方、**artifactの不一致は停止ではなくcacheの破棄**として結果に載せる（GitHub側が常に上位。ADR-0012 決定19）
-20. **pendingとheadの優先順位を決めない**。C-01のR-Pがpendingを優先するため、順序の決定はC-10に属する。C-07は両方を観測結果として返す
-21. **artifactのhash読み出しは注入する**（(run ID, 記録path) -> hash）。coreを純粋に保ち、I/O側は`artifact_content_hash(paths.runs_dir / run_id, path)`を渡す（`run_directory`はdirectoryを作成するため使わない）
-22. **既定値を持たない**。`max_pages`等の設定はすべて引数で受け取る（既定値の解決はC-12）
+16. **意味解釈済みの承認は注入口で受ける**（`ResumeObservation.interpreted_approvals`）。D-021の承認はchain recordを伴わないため、`reconcile_head`へ渡さないと存在しないものとして扱われる。そこで**二段階経路**にする: (1) resumeは候補を同梱した停止を返す -> (2) C-11が明示的な`APPROVE_MERGE`と解釈した結果だけを`ApprovalEvidence`へ変換して注入し、resumeを再実行する。`MERGE_FAILED`の循環（承認を確認できないので停止 -> 承認候補へ到達できない）は、停止結果へ候補を同梱すること（決定14）で解消しており、C-07が意味解釈する必要はない。**ADR-0012 決定15の「組み立てはPR-4」はここで更新する**（意味解釈と組み立てはC-11、PR-4が用意するのは注入口）
+17. **注入された承認を現在のcommentへ再検証してから使う**。受理時の値をそのまま信用すると、二段階経路の1回目と2回目の間にcommentが**編集・削除**されても古い承認でmerge gateが開く（D-031 / ADR-0008 決定20の「編集・削除で判断を失効」に反し、human merge gateを取り消せない）。注入するのは`ApprovalEvidence`ではなく元の`AcceptedUserDecision`とし、**同じ観測窓の現在のcomment**に対してC-06の`revalidate_user_decision`を通し、`VALID`のものだけを承認evidenceへ変換する。取得窓に現在のcommentが無い場合は削除として扱う（fail closed）。失効した注入は`voided_approvals`として理由つきで提示し、silentに捨てない
+18. **pure coreとI/O収集を分ける**（`build_resume_context` / `observe_resume`）。C-06の`verify_record_chain` + `probe_known_records`と同じ構造で、判定はfixtureだけで決定論的に検証できる
+19. **段階ごとに停止する**（`ResumeStage`: `RUN_SELECTION` / `INTEGRITY` / `HEAD` / `PENDING` / `DIRECT_ANSWER`）。`ResumeStopped`は理由に加えて**原因の値そのもの**（`RunAmbiguous`や`ChainVerification`等の直和）を持ち、detail文字列だけで区別させない
+20. **chain violationは停止**（C-06の契約どおり`is_intact`でgateする）。一方、**artifactの不一致は停止ではなくcacheの破棄**として結果に載せる（GitHub側が常に上位。ADR-0012 決定19）
+21. **pendingとheadの優先順位を決めない**。C-01のR-Pがpendingを優先するため、順序の決定はC-10に属する。C-07は両方を観測結果として返す
+22. **artifactのhash読み出しは注入する**（(run ID, 記録path) -> hash）。coreを純粋に保ち、I/O側は`artifact_content_hash(paths.runs_dir / run_id, path)`を渡す（`run_directory`はdirectoryを作成するため使わない）
+23. **既定値を持たない**。`max_pages`等の設定はすべて引数で受け取る（既定値の解決はC-12）
 
 ## Consequences
 
