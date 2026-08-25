@@ -288,11 +288,11 @@ class TestResultFile:
         from dataclasses import replace
 
         from claude_code_codex_review_loop.state import save_checkpoint
-        from claude_code_codex_review_loop.workflow import with_pending_action
+        from claude_code_codex_review_loop.workflow import with_retry_attempt
 
         payload = _payload_of(env)
         save_checkpoint(
-            env.checkpoint, with_pending_action(payload, replace(issued.action, result_path=relative))
+            env.checkpoint, with_retry_attempt(payload, replace(issued.action, result_path=relative))
         )
 
     def test_missing_result_stops(self, tmp_path) -> None:
@@ -518,6 +518,34 @@ class TestFailed:
         env = seed(tmp_path, state=machine_state())
         issued = _issue(env)
         outcome = _submit(env, _failure(env, issued), budget=1)
+        assert isinstance(outcome, SubmitAccepted)
+        assert outcome.retry_available is False and outcome.machine_state.state is State.FAILED
+
+    def test_full_ledger_stops_retrying(self, tmp_path) -> None:
+        """budgetが大きくても、ledgerがcheckpointへ収まらない大きさにはしない。"""
+        import dataclasses
+
+        from claude_code_codex_review_loop.schema.envelope import MAX_SUBMIT_RECEIPTS
+        from claude_code_codex_review_loop.state import save_checkpoint
+        from claude_code_codex_review_loop.workflow import SubmitReceipt, with_receipt
+
+        env = seed(tmp_path, state=machine_state())
+        issued = _issue(env)
+        filler = SubmitReceipt(
+            action_id="old",
+            nonce="old",
+            outcome="FAILED",
+            submit_hash="s" * 64,
+            result_hash="r" * 64,
+            error_category=ErrorCategory.TRANSIENT,
+        )
+        payload = _payload_of(env)
+        for index in range(MAX_SUBMIT_RECEIPTS - 1):
+            payload = with_receipt(
+                payload, dataclasses.replace(filler, action_id=f"old-{index}", nonce=f"n-{index}")
+            )
+        save_checkpoint(env.checkpoint, payload)
+        outcome = _submit(env, _failure(env, issued), budget=MAX_SUBMIT_RECEIPTS * 10)
         assert isinstance(outcome, SubmitAccepted)
         assert outcome.retry_available is False and outcome.machine_state.state is State.FAILED
 

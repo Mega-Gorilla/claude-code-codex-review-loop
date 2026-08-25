@@ -186,6 +186,130 @@ class TestReissue:
         assert isinstance(outcome, EngineStopped) and outcome.code == "envelope_invalid"
 
 
+class TestRetryGate:
+    """receiptがある未完了actionは、**retryできる失敗の場合だけ**次のattemptを発行する。"""
+
+    def _with_receipt(self, env, action, *, outcome: str, category=None, kind=None):
+        from claude_code_codex_review_loop.workflow import SubmitReceipt, with_receipt
+
+        loaded = load_checkpoint(env.checkpoint)
+        assert isinstance(loaded, CheckpointLoaded)
+        receipt = SubmitReceipt(
+            action_id=action.action_id,
+            nonce=action.nonce,
+            outcome=outcome,
+            submit_hash="s" * 64,
+            result_hash="r" * 64,
+            result_kind=kind,
+            error_category=category,
+        )
+        save_checkpoint(env.checkpoint, with_receipt(loaded.payload, receipt))
+
+    def test_completed_receipt_does_not_retry(self, tmp_path) -> None:
+        """v1 -> v2 migrationはCOMPLETED receiptを持つ未完了actionを作り得る。"""
+        env = seed(tmp_path, state=machine_state())
+        issued = _advance(env)
+        assert isinstance(issued, HostActionIssued)
+        self._with_receipt(env, issued.action, outcome="COMPLETED", kind=RecordKind.FIX_RESULT)
+        outcome = _advance(env)
+        assert isinstance(outcome, EngineStopped) and outcome.code == "attempt_not_retryable"
+
+    def test_permanent_failure_receipt_does_not_retry(self, tmp_path) -> None:
+        from claude_code_codex_review_loop.errors import ErrorCategory
+
+        env = seed(tmp_path, state=machine_state())
+        issued = _advance(env)
+        assert isinstance(issued, HostActionIssued)
+        self._with_receipt(env, issued.action, outcome="FAILED", category=ErrorCategory.PERMANENT)
+        outcome = _advance(env)
+        assert isinstance(outcome, EngineStopped) and outcome.code == "attempt_not_retryable"
+
+    def test_transient_failure_receipt_retries(self, tmp_path) -> None:
+        from claude_code_codex_review_loop.errors import ErrorCategory
+
+        env = seed(tmp_path, state=machine_state())
+        issued = _advance(env)
+        assert isinstance(issued, HostActionIssued)
+        self._with_receipt(env, issued.action, outcome="FAILED", category=ErrorCategory.TRANSIENT)
+        outcome = _advance(env, ids=FakeIds("retry"))
+        assert isinstance(outcome, HostActionIssued) and outcome.action.attempt == 2
+
+
+class TestMigratedCheckpoint:
+    def test_v1_completed_action_is_not_re_executed(self, tmp_path) -> None:
+        """v1 -> v2 migrationはCOMPLETED receiptつきのpendingを作る。再実行しない。"""
+        from claude_code_codex_review_loop.workflow import with_machine_state
+
+        env = seed(tmp_path, state=machine_state())
+        v1 = with_machine_state(
+            {
+                "schema_version": 1,
+                "run_id": RUN,
+                "repository": REPOSITORY,
+                "number": NUMBER,
+                "host_action": {
+                    "action_id": "act-v1",
+                    "action_kind": "APPLY_FINDINGS",
+                    "nonce": "nonce-v1",
+                    "expected_head_sha": HEAD,
+                    "result_path": "actions/act-v1/result.json",
+                    "envelope_path": "actions/act-v1/action.json",
+                    "envelope_hash": "e" * 64,
+                    "submit": {
+                        "outcome": "COMPLETED",
+                        "submit_hash": "s" * 64,
+                        "result_hash": "r" * 64,
+                        "result_kind": "FIX_RESULT",
+                    },
+                },
+            },
+            machine_state(),
+        )
+        save_checkpoint(env.checkpoint, v1)
+        outcome = _advance(env)
+        assert isinstance(outcome, EngineStopped) and outcome.code == "attempt_not_retryable"
+
+
+class TestLedgerScope:
+    def test_new_logical_action_drops_the_previous_ledger(self, tmp_path) -> None:
+        """logical actionを跨いでreceiptが累積しない（ADR-0015 決定21）。"""
+        from claude_code_codex_review_loop.workflow import read_receipts
+
+        env = seed(tmp_path, state=machine_state())
+        first = _advance(env)
+        assert isinstance(first, HostActionIssued)
+        TestRetryGate()._with_receipt(
+            env, first.action, outcome="COMPLETED", kind=RecordKind.FIX_RESULT
+        )
+        # actionを完了させた状態（pendingなし・receiptあり）から次のlogical actionを発行する
+        loaded = load_checkpoint(env.checkpoint)
+        assert isinstance(loaded, CheckpointLoaded)
+        from claude_code_codex_review_loop.workflow import without_pending_action
+
+        save_checkpoint(env.checkpoint, without_pending_action(loaded.payload))
+        second = _advance(env, ids=FakeIds("next"))
+        assert isinstance(second, HostActionIssued)
+        after = load_checkpoint(env.checkpoint)
+        assert isinstance(after, CheckpointLoaded)
+        assert read_receipts(after.payload) == ()
+
+    def test_retry_keeps_the_ledger(self, tmp_path) -> None:
+        from claude_code_codex_review_loop.errors import ErrorCategory
+        from claude_code_codex_review_loop.workflow import read_receipts
+
+        env = seed(tmp_path, state=machine_state())
+        first = _advance(env)
+        assert isinstance(first, HostActionIssued)
+        TestRetryGate()._with_receipt(
+            env, first.action, outcome="FAILED", category=ErrorCategory.TRANSIENT
+        )
+        _advance(env, ids=FakeIds("retry"))
+        after = load_checkpoint(env.checkpoint)
+        assert isinstance(after, CheckpointLoaded)
+        receipts = read_receipts(after.payload)
+        assert isinstance(receipts, tuple) and len(receipts) == 1
+
+
 class TestNonActionOutcomes:
     def test_terminal_state_issues_nothing(self, tmp_path) -> None:
         env = seed(tmp_path, state=MachineState(state=State.MERGED))
@@ -278,6 +402,16 @@ class TestRefusals:
         _break_attempt(env)
         outcome = _advance(env)
         assert isinstance(outcome, EngineStopped) and outcome.code == "host_action_unavailable"
+
+    def test_evidence_for_another_head_stops(self, tmp_path) -> None:
+        """AC-C08-07: 根拠recordは、そのactionが束ねられたheadを対象にしていなければならない。"""
+        from c07_support.helpers import verified_chain
+        from c08_support.helpers import NEW_HEAD
+
+        env = seed(tmp_path, state=machine_state())
+        other = verified_chain([RecordKind.REVIEW_RESULT], head=NEW_HEAD).records
+        outcome = _advance(env, evidence=other)
+        assert isinstance(outcome, EngineStopped) and outcome.code == "evidence_head"
 
     def test_evidence_out_of_order_stops(self, tmp_path) -> None:
         from c07_support.helpers import verified_chain

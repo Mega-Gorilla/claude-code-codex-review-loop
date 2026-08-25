@@ -36,42 +36,45 @@ ADR-0014（PR-1）でaction registryと`HOST_ACTION` / `SUBMIT` v2を確定し�
 ### evidence（AC-C08-07）
 
 9. **`verified_records`は対象headの全recordではなく、actionごとに選ぶ**（DOD-02）。`ActionSpec.evidence_kinds`を正本とし、engineは許可kindと**seq昇順**を検査する。違反は停止する（順序が崩れた根拠を渡さない）
-10. 再提出（`REVISE_DECISION_REQUEST`）だけは、差し戻し対象そのものである同種recordを根拠に含む。他のactionでは根拠集合と結果集合が交わらない（contract testで固定）
+10. **根拠recordの対象headが、そのactionの`expected_head_sha`と一致することを検証する**。headを見ないと、あるheadへbindしたenvelopeへ別headの根拠を同梱でき、head bindingを迂回できる。fail closedで停止し、head跨ぎの根拠を要するactionが現れた場合はregistryの明示的な規則として追加する（暗黙に通さない）
+11. 再提出（`REVISE_DECISION_REQUEST`）だけは、差し戻し対象そのものである同種recordを根拠に含む。他のactionでは根拠集合と結果集合が交わらない（contract testで固定）
 
 ### 結果recordの対象head
 
-11. **recordのmarkerに載るheadはpayloadのhead fieldが正本**（`PROJECTION_SPECS`の`head_source`）。`FIX_RESULT`は`pushed_head_sha`＝新しいheadを対象にするため、actionの`expected_head_sha`へ縛れない
-12. ただし**`target_head_sha`を持つrecordは、そのactionが束ねられたheadと一致しなければならない**。head bindingを迂回して別headのrecordを作らせないための構造的な制約である。head自体の正当性（PRのadvertised headとの一致）はC-06 / C-10が検証する
+12. **recordのmarkerに載るheadはpayloadのhead fieldが正本**（`PROJECTION_SPECS`の`head_source`）。`FIX_RESULT`は`pushed_head_sha`＝新しいheadを対象にするため、actionの`expected_head_sha`へ縛れない
+13. ただし**`target_head_sha`を持つrecordは、そのactionが束ねられたheadと一致しなければならない**。head bindingを迂回して別headのrecordを作らせないための構造的な制約である。head自体の正当性（PRのadvertised headとの一致）はC-06 / C-10が検証する
 
 ### result fileの受理
 
-13. result pathは**engineがrun directory内へ払い出す**（plan L295）。受理時に6点を検証する: relative path / run directory配下 / path上にsymlinkと`..`が無い（`path == path.resolve()`の実体判定）/ regular fileとして実在 / **読み込む前に**size上限（`stat`）/ 作成者限定かつ実体を共有しない（`verify_private_file`）
-14. 内容は当該result variantの**既存record schema**で検証し、`result_hash`と実file内容のhashが一致しない場合は停止する
+14. result pathは**engineがrun directory内へ払い出す**（plan L295）。受理時に6点を検証する: relative path / run directory配下 / path上にsymlinkと`..`が無い（`path == path.resolve()`の実体判定）/ regular fileとして実在 / **読み込む前に**size上限（`stat`）/ 作成者限定かつ実体を共有しない（`verify_private_file`）
+15. 内容は当該result variantの**既存record schema**で検証し、`result_hash`と実file内容のhashが一致しない場合は停止する
 
 ### `FAILED` submitの意味
 
-15. **`FAILED`は「hostが結果を出せなかった」に限る**。permission停止・外部依存・質問・判断依頼は`COMPLETED`のresult variant（ADR-0014 決定5）であり、`FAILED`へ落とさない。混ぜるとC-01の構造化blockが失われる
-16. `RunFailed`は「**bounded retry後の失敗**」（`domain/events.py`）である。したがって`FAILED` = 即`RunFailed`ではない。`TRANSIENT`かつretry budget残なら同じlogical actionの次のattemptを発行できる状態にし、それ以外（`PERMANENT` / `AUTH` / `NOT_FOUND`、またはbudget尽き）は`RunFailed`をC-01へ入力する
-17. **retry budgetの管理主体はengine**（次のattemptを発行するか否かを決める）。ただし**「hostが黙ってretryしてもnonceで弾ける」は誤りなので撤回する**。nonceが観測できるのはsubmitだけで、hostが1回のaction実行の内部で何回試したかはprotocol上observableではない
-18. `result_hash`は`FAILED`でも必須のまま、**失敗詳細fileのhash**と定義する。空の失敗を許すとsubmit hashだけが残り診断できない。失敗詳細は`HOST_FAILURE` schema（action kind / error category / summary / detail）で、submitの`error_category`と一致しなければ停止する。run directory内のartifactなのでC-04のredaction対象であり、engineが外へ渡すsummaryにはredactionを適用する
+16. **`FAILED`は「hostが結果を出せなかった」に限る**。permission停止・外部依存・質問・判断依頼は`COMPLETED`のresult variant（ADR-0014 決定5）であり、`FAILED`へ落とさない。混ぜるとC-01の構造化blockが失われる
+17. `RunFailed`は「**bounded retry後の失敗**」（`domain/events.py`）である。したがって`FAILED` = 即`RunFailed`ではない。`TRANSIENT`かつretry budget残なら同じlogical actionの次のattemptを発行できる状態にし、それ以外（`PERMANENT` / `AUTH` / `NOT_FOUND`、またはbudget尽き）は`RunFailed`をC-01へ入力する
+18. **retry budgetの管理主体はengine**（次のattemptを発行するか否かを決める）。ただし**「hostが黙ってretryしてもnonceで弾ける」は誤りなので撤回する**。nonceが観測できるのはsubmitだけで、hostが1回のaction実行の内部で何回試したかはprotocol上observableではない
+19. `result_hash`は`FAILED`でも必須のまま、**失敗詳細fileのhash**と定義する。空の失敗を許すとsubmit hashだけが残り診断できない。失敗詳細は`HOST_FAILURE` schema（action kind / error category / summary / detail）で、submitの`error_category`と一致しなければ停止する。run directory内のartifactなのでC-04のredaction対象であり、engineが外へ渡すsummaryにはredactionを適用する
 
 ### retry済みsubmitの冪等性（blockingへの対応）
 
-19. **attemptごとに新しいaction IDとnonceを発行し、logical actionは`correlation_id`で結ぶ**。binding 8項目（plan L295）を変えずに済み、「1 action ID = 1 nonce = 1 receipt」という単純な不変条件が保てる。`attempt`をbindingへ足す案は正本が定めた8項目を変えることになり、`HOST_ACTION` v3を要するため採らない
-20. **receiptはledgerとして複数保持する**。過去attemptのreceiptを捨てると、遅れて届いた同一submitを判別できず、停止すれば「同一submitの再送は冪等」に反し、受理すればone-time nonceの境界が壊れる。判定は`submit_hash`（submit envelope全体のcanonical hash）で行う: 一致は冪等replay、同じattemptで不一致は停止、ledgerにも未完了actionにも無いattemptはstaleとして停止
-21. ledgerの大きさはretry budgetで有界（logical action 1件分のattemptだけを保持する）
-22. **CHECKPOINTをv2へbumpし、migrationを登録する**。`host_action`の未完了actionを`pending`へ、単一の`submit`を`receipts`配列へ移す。receiptが要る`action_id` / `nonce`は**同じsection内**の値で捏造がなく、ADR-0004 rule 6を満たす**損失のない変換**である（`HOST_ACTION` v1 -> v2と違いchainを張れる）。`host_action`を持たないcheckpointの変換はidentity
+20. **attemptごとに新しいaction IDとnonceを発行し、logical actionは`correlation_id`で結ぶ**。binding 8項目（plan L295）を変えずに済み、「1 action ID = 1 nonce = 1 receipt」という単純な不変条件が保てる。`attempt`をbindingへ足す案は正本が定めた8項目を変えることになり、`HOST_ACTION` v3を要するため採らない
+21. **receiptはledgerとして複数保持する**。過去attemptのreceiptを捨てると、遅れて届いた同一submitを判別できず、停止すれば「同一submitの再送は冪等」に反し、受理すればone-time nonceの境界が壊れる。判定は`submit_hash`（submit envelope全体のcanonical hash）で行う: 一致は冪等replay、同じattemptで不一致は停止、ledgerにも未完了actionにも無いattemptはstaleとして停止
+22. **ledgerはlogical action 1件分だけを保持する**。retry attemptの発行時は保持し、fresh actionの発行時は**入れ替える**（writerを`with_retry_attempt`と`with_new_logical_action`に分け、boolean flagで切り替えない）。持ち越すとrun全体で単調に増え、checkpointのsize上限へ向かって伸びる。入れ替えの代償は「前のlogical actionへの遅れた再送がstaleになる」ことだが、その時点で結果は永続化済みでworkflowは次の作業へ進んでいるため、冪等の適用範囲外として扱う
+23. **上限を構造として持つ**。`receipts`にschemaの`max_items`（`MAX_SUBMIT_RECEIPTS`）を課し、engineは同じ境界でretryを打ち切る。呼び出し側のretry budgetが大きくても、checkpointが書けなくなる方向へは伸ばさない
+24. **未完了actionにreceiptが付いているとき、次のattemptを発行してよいのは`FAILED` + `TRANSIENT`の場合だけ**とする。この不変条件はengineのwriterだけが保つものではなく、v1 -> v2 migrationは`COMPLETED` receiptを持つ未完了actionを作り得る。receiptの内容を見ずに再発行すると**完了済みactionを再実行する**ため、他の組合せは停止する（fail closed）
+25. **CHECKPOINTをv2へbumpし、migrationを登録する**。`host_action`の未完了actionを`pending`へ、単一の`submit`を`receipts`配列へ移す。receiptが要る`action_id` / `nonce`は**同じsection内**の値で捏造がなく、ADR-0004 rule 6を満たす**損失のない変換**である（`HOST_ACTION` v1 -> v2と違いchainを張れる）。`host_action`を持たないcheckpointの変換はidentity
 
 ### 順序（crash windowで重複を作らないための不変条件）
 
-23. `advance`: **action envelopeの保存 -> checkpointの保存 -> hostへ返却**。envelopeは実体を読み直してhash照合できるようにrun directory内へ置く
-24. `submit`: **受理 -> submit receiptとrecord transactionを`同じ`checkpoint更新で保存 -> （後続PR）投稿 -> read-after-write -> transaction消費**。receiptとtransactionを別々に書くと、その間のcrashでnonceだけが消費され投稿対象が失われる。checkpointはatomic replaceの単一fileなので、1回の更新で両方書ける
-25. **新規transactionでは`body_hash`を必須にする**（ADR-0014 決定21の実装）。発行した値をC-07の`read_transaction` -> `evaluate_pending`がそのまま読めることをtestで固定し、producerとresumeの契約を片側だけ変えられないようにする
+26. `advance`: **action envelopeの保存 -> checkpointの保存 -> hostへ返却**。envelopeは実体を読み直してhash照合できるようにrun directory内へ置く
+27. `submit`: **受理 -> submit receiptとrecord transactionを`同じ`checkpoint更新で保存 -> （後続PR）投稿 -> read-after-write -> transaction消費**。receiptとtransactionを別々に書くと、その間のcrashでnonceだけが消費され投稿対象が失われる。checkpointはatomic replaceの単一fileなので、1回の更新で両方書ける
+28. **新規transactionでは`body_hash`を必須にする**（ADR-0014 決定21の実装）。発行した値をC-07の`read_transaction` -> `evaluate_pending`がそのまま読めることをtestで固定し、producerとresumeの契約を片側だけ変えられないようにする
 
 ### 復元と拒否
 
-26. `state` sectionからMachineStateを復元できない場合（`BLOCKED`のblock context等、保存していない付随値を要するstate）は**構造化errorで停止する**。既定値で埋めるとC-01の組合せ不変条件が壊れる。blockはC-06のchain検証で毎回再導出する値である（ADR-0011）
-27. checkpointの`host_action`を解釈できない場合も「無い」へ丸めない（silent repair禁止）。schema検証を通る値でも意味的に不正なもの（`attempt`が0等）は停止する
+29. `state` sectionからMachineStateを復元できない場合（`BLOCKED`のblock context等、保存していない付随値を要するstate）は**構造化errorで停止する**。既定値で埋めるとC-01の組合せ不変条件が壊れる。blockはC-06のchain検証で毎回再導出する値である（ADR-0011）
+30. checkpointの`host_action`を解釈できない場合も「無い」へ丸めない（silent repair禁止）。schema検証を通る値でも意味的に不正なもの（`attempt`が0等）は停止する
 
 ## Consequences
 

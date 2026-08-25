@@ -35,6 +35,7 @@ from ..identity.errors import IdentityError
 from ..identity.fs_permissions import create_private_dir, verify_private_dir, write_private_text
 from ..policy.redaction import redact
 from ..schema.action import HOST_ACTION, HOST_FAILURE, SUBMIT
+from ..schema.envelope import MAX_SUBMIT_RECEIPTS
 from ..schema.migrate import load_with_migration
 from ..schema.projection import PROJECTION_SPECS, canonical_json, canonical_payload_hash
 from ..schema.registry import validate_object
@@ -58,8 +59,9 @@ from .checkpoint_view import (
     read_pending_action,
     read_receipts,
     with_machine_state,
-    with_pending_action,
+    with_new_logical_action,
     with_receipt,
+    with_retry_attempt,
     without_pending_action,
 )
 from .ports import ActionContext, ActionPayloadPort, EvidencePort, RecordBodyPort, RecordSourcePort
@@ -219,12 +221,23 @@ def _build_envelope(
 def _evidence_of(
     spec: ActionSpec, port: EvidencePort, context: ActionContext
 ) -> tuple[tuple[str, str], ...] | EngineStopped:
-    """同梱する検証済みrecord（AC-C08-07）。許可kindとseq昇順を検査する。"""
+    """同梱する検証済みrecord（AC-C08-07）。許可kind・**対象head**・seq昇順を検査する。
+
+    headを検査しないと、`expected_head_sha`が別headのenvelopeへ、その head を対象に
+    していない根拠を同梱できてしまう（head bindingの迂回）。actionは特定headへbindされ、
+    その head を対象に検証されたrecordだけが根拠になり得るため、不一致はfail closedで
+    停止する。head跨ぎの根拠が要るactionが将来現れた場合は、registryの明示的な規則として
+    追加する（暗黙に通さない）。
+    """
     records = tuple(port.evidence_for(context))
     for record in records:
         if record.kind not in spec.evidence_kinds:
             return EngineStopped(
                 "evidence_kind", f"{spec.kind}の根拠に使えないrecord種別: {record.kind.value}"
+            )
+        if record.head_sha != context.head_sha:
+            return EngineStopped(
+                "evidence_head", f"根拠recordの対象headがactionのheadと一致しない: {record.comment_id}"
             )
     if [record.seq for record in records] != sorted(record.seq for record in records):
         return EngineStopped("evidence_order", "根拠recordがseq昇順でない")
@@ -303,7 +316,14 @@ def _issue_action(
         write_private_text(loaded.run_dir / envelope_rel, canonical_json(envelope))
     except IdentityError as error:
         return EngineStopped("envelope_write", f"action envelopeを保存できない: {error}")
-    save_checkpoint(checkpoint_path(paths, run_id), with_pending_action(loaded.payload, action))
+    # retryは同じlogical actionなのでledgerを保ち、fresh actionでは入れ替える
+    # （前のlogical actionのreceiptを持ち越さない。ADR-0015 決定22）
+    updated = (
+        with_retry_attempt(loaded.payload, action)
+        if previous is not None
+        else with_new_logical_action(loaded.payload, action)
+    )
+    save_checkpoint(checkpoint_path(paths, run_id), updated)
     return HostActionIssued(
         action=action,
         envelope=envelope,
@@ -368,8 +388,18 @@ def advance(
         spec = spec_for_kind(pending.action_kind)
         if spec is None:  # pragma: no cover - action_kindはschemaのenumで限定されている
             return EngineStopped("unknown_action_kind", f"未知のaction種別: {pending.action_kind}")
-        if find_receipt(receipts, action_id=pending.action_id, nonce=pending.nonce) is None:
+        receipt = find_receipt(receipts, action_id=pending.action_id, nonce=pending.nonce)
+        if receipt is None:
             return _reissue(loaded, pending)
+        # receiptがあるのに未完了actionが残るのは「retryできる失敗」の場合だけ。他の組合せ
+        # （migrationで持ち上げたCOMPLETED、非retryableな失敗）は、この不変条件が成立して
+        # いないことを意味するので、次のattemptを作らず停止する（完了済みactionの再実行を
+        # 防ぐ。ADR-0015 決定24）
+        if receipt.outcome != "FAILED" or receipt.error_category is not ErrorCategory.TRANSIENT:
+            return EngineStopped(
+                "attempt_not_retryable",
+                f"受理済みsubmit（{receipt.outcome}）を持つactionを再試行しない: {pending.action_id}",
+            )
         return _issue_action(
             loaded,
             spec,
@@ -534,6 +564,7 @@ def _failed(
     run_id: str,
     max_result_bytes: int,
     retry_budget: int,
+    ledger_size: int,
 ) -> SubmitOutcome:
     """失敗submit: 失敗詳細を受理し、retryできるかを決める（ADR-0015）。
 
@@ -551,7 +582,13 @@ def _failed(
     if result.payload.get("error_category") != envelope_category:
         return EngineStopped("failure_mismatch", "失敗詳細のerror_categoryがsubmitと一致しない")
     summary = redact(str(result.payload.get("summary", ""))).text
-    retryable = receipt.error_category is ErrorCategory.TRANSIENT and action.attempt < retry_budget
+    # budgetは呼び出し側が決めるが、ledgerがcheckpointへ収まらない大きさにはしない
+    # （schemaのmax_itemsと同じ境界でretryを打ち切る）
+    retryable = (
+        receipt.error_category is ErrorCategory.TRANSIENT
+        and action.attempt < retry_budget
+        and ledger_size + 1 < MAX_SUBMIT_RECEIPTS
+    )
     payload = with_receipt(loaded.payload, receipt)
     if retryable:
         # 未完了actionは残す。次のadvanceが同じlogical actionの次のattemptを発行する
@@ -652,4 +689,5 @@ def submit(
         run_id=run_id,
         max_result_bytes=max_result_bytes,
         retry_budget=retry_budget,
+        ledger_size=len(receipts),
     )

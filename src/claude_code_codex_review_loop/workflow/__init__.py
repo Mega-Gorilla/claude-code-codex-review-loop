@@ -31,8 +31,9 @@ from .checkpoint_view import (
     read_pending_action,
     read_receipts,
     with_machine_state,
-    with_pending_action,
+    with_new_logical_action,
     with_receipt,
+    with_retry_attempt,
     without_pending_action,
 )
 from .engine import (
@@ -103,7 +104,8 @@ __all__ = [
     "submit",
     "transaction_section",
     "with_machine_state",
-    "with_pending_action",
+    "with_new_logical_action",
     "with_receipt",
+    "with_retry_attempt",
     "without_pending_action",
 ]

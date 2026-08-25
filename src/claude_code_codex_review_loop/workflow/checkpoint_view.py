@@ -272,11 +272,7 @@ def _current_section(payload: Mapping[str, object]) -> dict[str, object]:
     return dict(section) if isinstance(section, dict) else {}
 
 
-def with_pending_action(
-    payload: Mapping[str, object], action: PendingAction
-) -> dict[str, object]:
-    """未完了actionを置く（既存のreceipt ledgerは保つ）。"""
-    section = _current_section(payload)
+def _pending_section(action: PendingAction) -> dict[str, object]:
     pending: dict[str, object] = {
         "action_id": action.action_id,
         "action_kind": action.action_kind,
@@ -290,7 +286,33 @@ def with_pending_action(
     }
     if action.issued_at is not None:
         pending["issued_at"] = action.issued_at
-    section["pending"] = pending
+    return pending
+
+
+def with_retry_attempt(payload: Mapping[str, object], action: PendingAction) -> dict[str, object]:
+    """同じlogical actionの次のattemptを置く（**receipt ledgerを保つ**）。
+
+    過去attemptのreceiptを残すことで、遅れて届いた同一submitを冪等に扱える。
+    """
+    section = _current_section(payload)
+    section["pending"] = _pending_section(action)
+    return _with_section(payload, section)
+
+
+def with_new_logical_action(payload: Mapping[str, object], action: PendingAction) -> dict[str, object]:
+    """新しいlogical actionを置く（**receipt ledgerを入れ替える**）。
+
+    ledgerはlogical action 1件分だけを保持し、attempt数（retry budget）で有界にする
+    （ADR-0015 決定22）。前のlogical actionのreceiptを持ち越すとrun全体で単調に増え、
+    checkpointのsize上限へ向かって伸びる。
+
+    入れ替えの代償は、**前のlogical actionへの遅れた再送がstaleになる**ことである。
+    その時点でそのactionの結果は永続化済みで、workflowは次の作業へ進んでいるため、
+    「同一submitの再送は冪等」の適用範囲外として扱う。
+    """
+    section = _current_section(payload)
+    section.pop("receipts", None)
+    section["pending"] = _pending_section(action)
     return _with_section(payload, section)
 
 

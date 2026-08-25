@@ -44,6 +44,10 @@ from .validate import Field, VersionSpec
 # checkpointは複数sectionを持つため入力上限を広げる
 CHECKPOINT_MAX_INPUT_BYTES = 262_144
 
+# receipt ledgerの上限。1 logical actionのattempt数と等しく、retry budgetがこれより大きくても
+# checkpointが書けなくなる方向へは伸ばさない（C-08がこの値でretryを打ち切る）
+MAX_SUBMIT_RECEIPTS = 32
+
 _STATE_VALUES = tuple(sorted(state.value for state in State))
 _AWAITING_VALUES = tuple(sorted(awaiting.value for awaiting in Awaiting))
 _RECORD_KIND_VALUES = tuple(sorted(kind.value for kind in RecordKind))
@@ -137,8 +141,12 @@ def _host_action_v2() -> Field:
                 },
                 required=False,
             ),
-            # 受理済みsubmit。同一内容の再送を冪等に扱い、内容の異なる再送を止める
-            "receipts": array(obj(_receipt_fields(keyed=True)), required=False),
+            # 受理済みsubmit。同一内容の再送を冪等に扱い、内容の異なる再送を止める。
+            # 保持するのはlogical action 1件分のattemptだけで（fresh action発行時に
+            # 入れ替える）、上限はcheckpointが常に書ける大きさへ構造的に固定する
+            "receipts": array(
+                obj(_receipt_fields(keyed=True)), required=False, max_items=MAX_SUBMIT_RECEIPTS
+            ),
         },
         required=False,
     )

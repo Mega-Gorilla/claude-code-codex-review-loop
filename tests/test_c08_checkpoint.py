@@ -20,6 +20,7 @@ from claude_code_codex_review_loop.domain.values import (
 )
 from claude_code_codex_review_loop.errors import ErrorCategory
 from claude_code_codex_review_loop.schema import REGISTRY, SchemaKind, validate_object
+from claude_code_codex_review_loop.schema.envelope import MAX_SUBMIT_RECEIPTS
 from claude_code_codex_review_loop.workflow import (
     PendingAction,
     SectionUnavailable,
@@ -30,8 +31,9 @@ from claude_code_codex_review_loop.workflow import (
     read_pending_action,
     read_receipts,
     with_machine_state,
-    with_pending_action,
+    with_new_logical_action,
     with_receipt,
+    with_retry_attempt,
     without_pending_action,
 )
 
@@ -64,7 +66,7 @@ def _valid(payload: dict[str, object]) -> bool:
 
 class TestPendingAction:
     def test_round_trip(self) -> None:
-        payload = with_pending_action(checkpoint_payload(), ACTION)
+        payload = with_new_logical_action(checkpoint_payload(), ACTION)
         assert _valid(payload)
         assert read_pending_action(payload) == ACTION
 
@@ -72,14 +74,21 @@ class TestPendingAction:
         assert read_pending_action(checkpoint_payload()) is None
 
     def test_section_without_pending_is_none(self) -> None:
-        payload = without_pending_action(with_pending_action(checkpoint_payload(), ACTION))
+        payload = without_pending_action(with_new_logical_action(checkpoint_payload(), ACTION))
         assert read_pending_action(payload) is None
+
+    def test_retry_attempt_round_trips(self) -> None:
+        import dataclasses
+
+        following = dataclasses.replace(ACTION, action_id="act-2", nonce="nonce-2", attempt=2)
+        payload = with_retry_attempt(with_new_logical_action(checkpoint_payload(), ACTION), following)
+        assert _valid(payload) and read_pending_action(payload) == following
 
     def test_issued_at_is_optional(self) -> None:
         import dataclasses
 
         action = dataclasses.replace(ACTION, issued_at=None)
-        payload = with_pending_action(checkpoint_payload(), action)
+        payload = with_new_logical_action(checkpoint_payload(), action)
         assert _valid(payload) and read_pending_action(payload) == action
 
     def test_absent_correlation_defaults_to_the_action_id(self) -> None:
@@ -145,9 +154,36 @@ class TestReceipts:
         payload = with_receipt(with_receipt(checkpoint_payload(), RECEIPT), second)
         assert read_receipts(payload) == (RECEIPT, second)
 
+    def test_retry_attempt_keeps_the_ledger(self) -> None:
+        """同じlogical actionのattemptでは、過去attemptのreceiptを保つ。"""
+        import dataclasses
+
+        payload = with_receipt(with_new_logical_action(checkpoint_payload(), ACTION), RECEIPT)
+        following = dataclasses.replace(ACTION, action_id="act-2", nonce="nonce-2", attempt=2)
+        assert read_receipts(with_retry_attempt(payload, following)) == (RECEIPT,)
+
+    def test_new_logical_action_replaces_the_ledger(self) -> None:
+        """新しいlogical actionでは前のreceiptを持ち越さない（ADR-0015 決定22）。"""
+        import dataclasses
+
+        payload = with_receipt(with_new_logical_action(checkpoint_payload(), ACTION), RECEIPT)
+        fresh = dataclasses.replace(ACTION, action_id="act-9", nonce="nonce-9", correlation_id="corr-9")
+        assert read_receipts(with_new_logical_action(payload, fresh)) == ()
+
+    def test_ledger_has_a_structural_upper_bound(self) -> None:
+        """checkpointが常に書ける大きさへ構造的に固定する。"""
+        import dataclasses
+
+        payload: dict[str, object] = checkpoint_payload()
+        for index in range(MAX_SUBMIT_RECEIPTS + 1):
+            payload = with_receipt(
+                payload, dataclasses.replace(RECEIPT, action_id=f"act-{index}", nonce=f"n-{index}")
+            )
+        assert not _valid(payload)
+
     def test_absent_ledger_is_empty(self) -> None:
         assert read_receipts(checkpoint_payload()) == ()
-        assert read_receipts(with_pending_action(checkpoint_payload(), ACTION)) == ()
+        assert read_receipts(with_new_logical_action(checkpoint_payload(), ACTION)) == ()
 
     def test_find_receipt_matches_the_attempt(self) -> None:
         receipts = read_receipts(with_receipt(checkpoint_payload(), RECEIPT))
