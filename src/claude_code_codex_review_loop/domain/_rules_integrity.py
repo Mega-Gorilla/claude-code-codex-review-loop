@@ -88,7 +88,7 @@ def _detect_halt_gate_effect(ms: MachineState, event: ev.Event) -> tuple[Machine
     return (
         replace(
             ms,
-            procedure=HaltingForBlockProcedure(block=block),
+            procedure=HaltingForBlockProcedure(block=block, attempt_binding=e.evidence.binding),
             awaiting=None,
             pending_record=None,
             deferred_integrity=(),
@@ -110,7 +110,8 @@ def _detect_halt_gate_union_effect(ms: MachineState, event: ev.Event) -> tuple[M
     e = cast(ev.RecordIntegrityViolationDetected, event)
     procedure = cast(HaltingForBlockProcedure, ms.procedure)
     merged = RecordIntegrityBlock(violations=canonicalize_integrity(procedure.block.violations + (e.evidence,)))
-    return replace(ms, procedure=HaltingForBlockProcedure(block=merged)), _INVALIDATE
+    # attempt bindingは保つ（集合だけ伸ばす。発行済みの停止を別attemptへ差し替えない）
+    return replace(ms, procedure=replace(procedure, block=merged)), _INVALIDATE
 
 
 DETECTION_RULES: tuple[Rule, ...] = (

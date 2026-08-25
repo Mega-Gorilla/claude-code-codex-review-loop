@@ -358,9 +358,13 @@ class CancellationCompleted:
 
 @dataclass(frozen=True)
 class BlockHaltCompleted:
-    """integrity halt gateのprocess停止とcheckpoint保存の完了（block bindingと一致）。"""
+    """integrity halt gateのprocess停止とcheckpoint保存の完了。
 
-    block_binding: OpaqueBinding
+    `attempt_binding`は依頼した停止attemptのidentityで、`HaltingForBlockProcedure`の同名
+    fieldと照合する。halt gate中に違反が追加されても不変である（ADR-0016）。
+    """
+
+    attempt_binding: OpaqueBinding
 
 
 @dataclass(frozen=True)

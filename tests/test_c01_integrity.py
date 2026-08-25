@@ -135,14 +135,13 @@ class TestI3HaltGate:
         assert ms.state is State.APPLYING_FIXES  # 停止完了までBLOCKEDにしない
         assert isinstance(ms.procedure, HaltingForBlockProcedure)
         assert names(commands) == ("InvalidateApprovals", "HaltRun")
-        block_binding = ms.procedure.block.representative_binding
-        blocked, _ = transition(ms, ev.BlockHaltCompleted(block_binding))
+        blocked, _ = transition(ms, ev.BlockHaltCompleted(ms.procedure.attempt_binding))
         assert blocked.state is State.BLOCKED and isinstance(blocked.block, RecordIntegrityBlock)
 
     def test_halt_completion_binding_mismatch_rejected(self) -> None:
         ms, _ = transition(start(), _detect())
         with pytest.raises(TransitionRejected):
-            transition(ms, ev.BlockHaltCompleted(binding("other")))
+            transition(ms, ev.BlockHaltCompleted(attempt_binding=binding("other")))
 
     def test_resumable_state_blocks_directly_and_drops_old_resume_info(self) -> None:
         failed, _ = transition(start(), ev.RunFailed())
@@ -253,6 +252,47 @@ class TestI5UnionNoSilentLoss:
         assert names(commands) == ("InvalidateApprovals",)
         cancelled, _ = _record_incident(recording, "ic-1", ("v-1", "v-2", "v-3"))
         assert cancelled.state is State.CANCELLED
+
+    def test_halt_attempt_binding_survives_a_lower_ordered_violation(self) -> None:
+        """停止gate中に**辞書順で前になる**違反を検出しても、attemptのidentityは変わらない。
+
+        violation bindingは`iv:<condition>:<run>:<subject>`で、辞書順はcondition名が主キー
+        になるため検出順と単調でない。identityを集合の代表値に載せていると、発行済みの停止の
+        完了報告が拒否される（ADR-0016）。
+        """
+        ms, commands = transition(to_applying_fixes(), _detect("v-2"))
+        assert names(commands) == ("InvalidateApprovals", "HaltRun")
+        issued = [c for c in commands if type(c).__name__ == "HaltRun"][0].binding
+        ms, _ = transition(ms, _detect("v-1"))
+        procedure = ms.procedure
+        assert isinstance(procedure, HaltingForBlockProcedure)
+        # 集合は伸びて代表は入れ替わるが（I5）、attemptのidentityは動かない
+        assert procedure.block.representative_binding == binding("v-1")
+        assert procedure.attempt_binding == issued == binding("v-2")
+
+    def test_reissued_halt_keeps_the_same_attempt(self) -> None:
+        """resumeは同じattemptの停止commandを冪等に再発行する（別attemptを作らない）。"""
+        ms, _ = transition(to_applying_fixes(), _detect("v-2"))
+        ms, _ = transition(ms, _detect("v-1"))
+        _, commands = transition(ms, ev.RunFailed())
+        assert names(commands) == ("HaltRun",)
+        assert commands[0].binding == binding("v-2")
+
+    def test_completion_of_the_issued_attempt_is_accepted(self) -> None:
+        """発行した停止の完了報告が受理され、追加違反もblockへ残る（I5と両立する）。"""
+        ms, _ = transition(to_applying_fixes(), _detect("v-2"))
+        ms, _ = transition(ms, _detect("v-1"))
+        blocked, _ = transition(ms, ev.BlockHaltCompleted(attempt_binding=binding("v-2")))
+        assert blocked.state is State.BLOCKED
+        assert isinstance(blocked.block, RecordIntegrityBlock)
+        assert [ref.binding.value for ref in blocked.block.violations] == ["v-1", "v-2"]
+
+    def test_completion_of_the_moved_representative_is_rejected(self) -> None:
+        """代表bindingは停止attemptの識別子ではない（過去・別attemptの完了を受理しない）。"""
+        ms, _ = transition(to_applying_fixes(), _detect("v-2"))
+        ms, _ = transition(ms, _detect("v-1"))
+        with pytest.raises(TransitionRejected):
+            transition(ms, ev.BlockHaltCompleted(attempt_binding=binding("v-1")))
 
     def test_union_during_halt_gate(self) -> None:
         ms, _ = transition(start(), _detect("v-1"))

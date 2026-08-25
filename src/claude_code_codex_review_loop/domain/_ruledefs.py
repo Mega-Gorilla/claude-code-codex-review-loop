@@ -241,7 +241,7 @@ def _derive_binding(ms: MachineState, event: ev.Event) -> BindingMatch | None:
         return BindingMatch.MATCH if matched else BindingMatch.MISMATCH
     if isinstance(event, ev.BlockHaltCompleted):
         if isinstance(ms.procedure, HaltingForBlockProcedure):
-            matched = event.block_binding == ms.procedure.block.representative_binding
+            matched = event.attempt_binding == ms.procedure.attempt_binding
         else:
             matched = False
         return BindingMatch.MATCH if matched else BindingMatch.MISMATCH

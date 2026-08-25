@@ -8,6 +8,7 @@ from claude_code_codex_review_loop.domain import events as ev
 from claude_code_codex_review_loop.domain.commands import Command
 from claude_code_codex_review_loop.domain.values import (
     Awaiting,
+    HaltingForBlockProcedure,
     IntegrityEvidenceRef,
     OpaqueBinding,
     OpaqueFingerprint,
@@ -16,7 +17,9 @@ from claude_code_codex_review_loop.domain.values import (
     Progress,
     ProgressReport,
     RecordEvidence,
+    RecordIntegrityBlock,
     RecordKind,
+    canonicalize_integrity,
 )
 
 HEAD = OpaqueRef("head-1")
@@ -45,6 +48,19 @@ def report(
 
 def violation(bind: str = "v-1", descriptor: str = "hash-mismatch") -> IntegrityEvidenceRef:
     return IntegrityEvidenceRef(binding=binding(bind), descriptor=OpaqueRef(descriptor), head=HEAD)
+
+
+def halt_gate(*binds: str, attempt: str | None = None) -> HaltingForBlockProcedure:
+    """halt gate procedure。attempt bindingは既定で**最初に渡した違反**（＝検出順の1件目）。
+
+    violation集合はcanonical order（binding昇順）へ正規化されるため、attempt bindingが
+    集合の先頭とは限らない状態をtestから作れる。
+    """
+    refs = tuple(violation(bind) for bind in (binds or ("v-1",)))
+    return HaltingForBlockProcedure(
+        block=RecordIntegrityBlock(canonicalize_integrity(refs)),
+        attempt_binding=binding(attempt) if attempt is not None else refs[0].binding,
+    )
 
 
 def names(commands: tuple[Command, ...]) -> tuple[str, ...]:

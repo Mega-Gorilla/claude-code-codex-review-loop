@@ -378,9 +378,24 @@ class CancellingProcedure:
 
 @dataclass(frozen=True)
 class HaltingForBlockProcedure:
-    """integrity halt gate: process停止完了を待ってからBLOCKEDへ入る。"""
+    """integrity halt gate: process停止完了を待ってからBLOCKEDへ入る。
+
+    `attempt_binding`は**停止attemptのidentity**で、halt gate中は変わらない。violation集合
+    （`block.violations`）とは別の値である必要がある: I5は停止gate中の追加検出で上書き・
+    silent lossを作らないこと（＝集合が伸びること）を要求する。集合の代表値は検出順と無関係な
+    binding順の先頭なので、後から前へ入る違反が届けば**変わり得る**。identityを集合へ載せると
+    「発行した停止の完了報告が拒否される」経路がここで開く。
+    `CancellingProcedure`と同じ語彙・同じ不変性を持つ（ADR-0016）。
+    """
 
     block: RecordIntegrityBlock
+    attempt_binding: OpaqueBinding
+
+    def __post_init__(self) -> None:
+        if self.attempt_binding not in {violation.binding for violation in self.block.violations}:
+            raise IllegalMachineStateError(
+                "HALT_ATTEMPT_BINDING", "attempt bindingはblockのviolationのいずれかでなければならない"
+            )
 
 
 @dataclass(frozen=True)
