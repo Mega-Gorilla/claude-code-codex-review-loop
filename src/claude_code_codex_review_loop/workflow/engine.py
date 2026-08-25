@@ -40,11 +40,8 @@ from ..schema.migrate import load_with_migration
 from ..schema.projection import PROJECTION_SPECS, canonical_json, canonical_payload_hash
 from ..schema.registry import validate_object
 from ..state import (
-    CheckpointLoaded,
     StatePaths,
     checkpoint_path,
-    load_checkpoint,
-    run_directory,
     save_checkpoint,
 )
 from ..transport.render import prepare_public_body
@@ -55,7 +52,6 @@ from .checkpoint_view import (
     SubmitReceipt,
     find_receipt,
     next_attempt,
-    read_machine_state,
     read_pending_action,
     read_receipts,
     with_machine_state,
@@ -66,6 +62,7 @@ from .checkpoint_view import (
 )
 from .ports import ActionContext, ActionPayloadPort, EvidencePort, RecordBodyPort, RecordSourcePort
 from .results import ResultRejected, read_result
+from .run_context import EngineStopped, RunContext, load_run
 from .transaction import IssuedTransaction, TransactionUnavailable, issue_transaction, transaction_section
 
 ACTIONS_DIR = "actions"
@@ -77,14 +74,6 @@ SUBMIT_VERSION = 2
 _USER_INPUT_AWAITINGS = frozenset(
     {Awaiting.USER_INPUT_DECISION, Awaiting.USER_INPUT_GATE, Awaiting.USER_INPUT_PERMISSION}
 )
-
-
-@dataclass(frozen=True)
-class EngineStopped:
-    """進められない（推測して進めない）。codeは診断とtestの安定した識別子。"""
-
-    code: str
-    detail: str
 
 
 @dataclass(frozen=True)
@@ -144,38 +133,11 @@ class SubmitReplayed:
 SubmitOutcome = SubmitAccepted | SubmitReplayed | EngineStopped
 
 
-@dataclass(frozen=True)
-class _Loaded:
-    """checkpointと、そこから復元した状態。"""
-
-    payload: dict[str, object]
-    machine_state: MachineState
-    run_dir: Path
-
-
 def _ensure_private_dir(path: Path) -> None:
     if path.exists():
         verify_private_dir(path)
         return
     create_private_dir(path)
-
-
-def _load(
-    paths: StatePaths, *, run_id: str, repository: str, number: int
-) -> _Loaded | EngineStopped:
-    """checkpointを読み、runの同一性とMachineStateの復元まで済ませる。"""
-    result = load_checkpoint(checkpoint_path(paths, run_id))
-    if not isinstance(result, CheckpointLoaded):
-        return EngineStopped("checkpoint_unavailable", f"checkpointを読めない: {type(result).__name__}")
-    payload = result.payload
-    if payload.get("run_id") != run_id:
-        return EngineStopped("run_mismatch", "checkpointのrun IDが一致しない")
-    if payload.get("repository") != repository or payload.get("number") != number:
-        return EngineStopped("target_mismatch", "checkpointのrepository / 番号が一致しない")
-    machine_state = read_machine_state(payload)
-    if isinstance(machine_state, SectionUnavailable):
-        return EngineStopped("state_unavailable", machine_state.detail)
-    return _Loaded(payload=payload, machine_state=machine_state, run_dir=run_directory(paths, run_id))
 
 
 def _action_paths(run_dir: Path, action_id: str) -> tuple[str, str]:
@@ -245,7 +207,7 @@ def _evidence_of(
 
 
 def _issue_action(
-    loaded: _Loaded,
+    loaded: RunContext,
     spec: ActionSpec,
     *,
     paths: StatePaths,
@@ -333,7 +295,7 @@ def _issue_action(
     )
 
 
-def _reissue(loaded: _Loaded, action: PendingAction) -> HostActionIssued | EngineStopped:
+def _reissue(loaded: RunContext, action: PendingAction) -> HostActionIssued | EngineStopped:
     """未完了actionを**そのまま**再提示する（新しいactionを生成しない。ADR-0014 決定22）。"""
     path = loaded.run_dir / action.envelope_path
     if not path.is_file():
@@ -370,7 +332,7 @@ def advance(
     未完了actionがある間は**新しいactionを発行しない**。既にsubmitを受理した
     （receiptがある）未完了actionは、retryできる失敗として次のattemptを発行する。
     """
-    loaded = _load(paths, run_id=run_id, repository=repository, number=number)
+    loaded = load_run(paths, run_id=run_id, repository=repository, number=number)
     if isinstance(loaded, EngineStopped):
         return loaded
     machine_state = loaded.machine_state
@@ -491,7 +453,7 @@ def _receipt_of(
 
 
 def _completed(
-    loaded: _Loaded,
+    loaded: RunContext,
     action: PendingAction,
     receipt: SubmitReceipt,
     spec: ActionSpec,
@@ -529,13 +491,17 @@ def _completed(
     prepared = prepare_public_body(
         body_port.body_for(receipt.result_kind, result.payload), speaker=speaker, model=model
     )
+    chain = records_port.chain(run_id)
+    if not chain.is_intact:
+        # 壊れたchainの上でseqとprevを決めない（integrityの解消はC-01のblockが扱う）
+        return EngineStopped("chain_violation", f"chainにviolationがある（{len(chain.violations)}件）")
     issued = issue_transaction(
         kind=receipt.result_kind,
         payload=result.payload,
         run_id=run_id,
         head_sha=head_sha,
         body=prepared.text,
-        records=records_port.verified_records(run_id),
+        records=chain.records,
     )
     if isinstance(issued, TransactionUnavailable):
         return EngineStopped("transaction_unavailable", issued.detail)
@@ -556,7 +522,7 @@ def _completed(
 
 
 def _failed(
-    loaded: _Loaded,
+    loaded: RunContext,
     action: PendingAction,
     receipt: SubmitReceipt,
     *,
@@ -638,7 +604,7 @@ def submit(
     envelope = parsed.payload
     if envelope.get("run_id") != run_id:
         return EngineStopped("run_mismatch", "submitのrun IDが一致しない")
-    loaded = _load(paths, run_id=run_id, repository=repository, number=number)
+    loaded = load_run(paths, run_id=run_id, repository=repository, number=number)
     if isinstance(loaded, EngineStopped):
         return loaded
     receipts = read_receipts(loaded.payload)

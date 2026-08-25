@@ -16,15 +16,24 @@ from claude_code_codex_review_loop.domain import events as ev
 from claude_code_codex_review_loop.domain._ruledefs import AWAITING_COMMANDS
 from claude_code_codex_review_loop.domain._rules_workflow import PRODUCED_RULES
 from claude_code_codex_review_loop.domain.commands import HostAction, RequestHostAction
-from claude_code_codex_review_loop.domain.values import AWAITING_HOME, Awaiting, RecordKind
+from claude_code_codex_review_loop.domain.values import (
+    AWAITING_HOME,
+    Awaiting,
+    OpaqueBinding,
+    OpaqueRef,
+    RecordEvidence,
+    RecordKind,
+)
 from claude_code_codex_review_loop.schema import REGISTRY
 from claude_code_codex_review_loop.schema.action import HOST_ACTION_KINDS, HOST_ACTION_PAYLOADS
 from claude_code_codex_review_loop.schema.projection import PROJECTION_SPECS
 from claude_code_codex_review_loop.workflow import (
     ACTION_SPECS,
     RESULT_VARIANTS,
+    ActionRegistryError,
     ActionSpec,
     ResultVariant,
+    build_event,
     spec_for,
     spec_for_kind,
 )
@@ -191,6 +200,29 @@ class TestResultHead:
     )
     def test_result_definition_is_the_record_schema(self, variant: ResultVariant) -> None:
         assert variant.result_definition is REGISTRY[variant.result_schema]
+
+
+class TestBuildEvent:
+    """`extra_event_inputs`の宣言と実際の入力が一致しなければeventを作らない。"""
+
+    def _evidence(self, kind: RecordKind) -> RecordEvidence:
+        return RecordEvidence(kind=kind, binding=OpaqueBinding("cr:x"), ref=OpaqueRef("c-1"))
+
+    def test_builds_an_event_without_extra_inputs(self) -> None:
+        variant = RESULT_VARIANTS[RecordKind.GATE_ANSWER]
+        event = build_event(variant, self._evidence(RecordKind.GATE_ANSWER), {})
+        assert isinstance(event, ev.GateAnswerVerified)
+
+    def test_missing_extra_input_is_rejected(self) -> None:
+        variant = RESULT_VARIANTS[RecordKind.FIX_RESULT]
+        with pytest.raises(ActionRegistryError):
+            build_event(variant, self._evidence(RecordKind.FIX_RESULT), {})
+
+    def test_unexpected_extra_input_is_rejected(self) -> None:
+        """C-08が作らない値をNoneで埋めたり、余計な値を渡したりしない。"""
+        variant = RESULT_VARIANTS[RecordKind.GATE_ANSWER]
+        with pytest.raises(ActionRegistryError):
+            build_event(variant, self._evidence(RecordKind.GATE_ANSWER), {"report": None})
 
 
 class TestVariantLookup:

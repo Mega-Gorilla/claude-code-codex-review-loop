@@ -17,6 +17,7 @@ from .actions import (
     ActionRegistryError,
     ActionSpec,
     ResultVariant,
+    build_event,
     spec_for,
     spec_for_awaiting,
     spec_for_kind,
@@ -39,7 +40,6 @@ from .checkpoint_view import (
 from .engine import (
     AdvanceOutcome,
     AwaitUser,
-    EngineStopped,
     HostActionIssued,
     PersistRequired,
     SubmitAccepted,
@@ -49,8 +49,23 @@ from .engine import (
     advance,
     submit,
 )
-from .ports import ActionContext, ActionPayloadPort, EvidencePort, RecordBodyPort, RecordSourcePort
+from .persistence import (
+    IntegrityDetected,
+    PersistFailed,
+    PersistOutcome,
+    RecordPersisted,
+    persist,
+)
+from .ports import (
+    ActionContext,
+    ActionPayloadPort,
+    EvidencePort,
+    RecordBodyPort,
+    RecordEventPort,
+    RecordSourcePort,
+)
 from .results import ResultAccepted, ResultOutcome, ResultRejected, read_result
+from .run_context import EngineStopped, RunContext, load_run
 from .transaction import (
     IssuedTransaction,
     TransactionOutcome,
@@ -74,13 +89,19 @@ __all__ = [
     "HostActionIssued",
     "IssuedTransaction",
     "PendingAction",
+    "PersistFailed",
+    "PersistOutcome",
     "PersistRequired",
+    "IntegrityDetected",
     "RecordBodyPort",
+    "RecordEventPort",
+    "RecordPersisted",
     "RecordSourcePort",
     "ResultAccepted",
     "ResultOutcome",
     "ResultRejected",
     "ResultVariant",
+    "RunContext",
     "SectionUnavailable",
     "SubmitAccepted",
     "SubmitOutcome",
@@ -90,10 +111,13 @@ __all__ = [
     "TransactionOutcome",
     "TransactionUnavailable",
     "advance",
+    "build_event",
     "find_receipt",
     "issue_transaction",
+    "load_run",
     "next_attempt",
     "next_sequence",
+    "persist",
     "read_machine_state",
     "read_pending_action",
     "read_receipts",
