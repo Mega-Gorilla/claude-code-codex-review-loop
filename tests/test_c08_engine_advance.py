@@ -394,6 +394,24 @@ class TestRefusals:
         outcome = _advance(env)
         assert isinstance(outcome, EngineStopped) and outcome.code == "envelope_write"
 
+    def test_reused_action_id_stops(self, tmp_path) -> None:
+        """注入されたid_sourceがIDを再生成しても、既存envelopeを上書きしない（fail closed）。
+
+        `id_source`は呼び出し側から注入するため、engineはその一意性を前提にできない。
+        既存のaction directoryへ書き込めないことで、古いresult fileを新しいactionの
+        結果として受理する経路を塞ぐ。
+        """
+        from claude_code_codex_review_loop.workflow import without_pending_action
+
+        env = seed(tmp_path, state=machine_state())
+        first = _advance(env, ids=FakeIds())
+        assert isinstance(first, HostActionIssued)
+        loaded = load_checkpoint(env.checkpoint)
+        assert isinstance(loaded, CheckpointLoaded)
+        save_checkpoint(env.checkpoint, without_pending_action(loaded.payload))
+        outcome = _advance(env, ids=FakeIds())
+        assert isinstance(outcome, EngineStopped) and outcome.code == "envelope_write"
+
     def test_unreadable_pending_action_stops(self, tmp_path) -> None:
         """schemaは通るが解釈できないpending actionを「無い」へ丸めない。"""
         env = seed(tmp_path, state=machine_state())

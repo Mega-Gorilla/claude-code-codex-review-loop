@@ -82,3 +82,5 @@ ADR-0014（PR-1）でaction registryと`HOST_ACTION` / `SUBMIT` v2を確定し�
 - `AWAIT_USER`搬送路（user-input submitのvariantと転記順序）は次PRで実装する。C-13が所有するのは意味解釈とgate semanticsで、Phase 8が定めるのは搬送路に限る
 - C-10 / C-11はportの本実装を差し替えるだけでよい。engineはregistryとschemaを疑わずに動く
 - `HOST_FAILURE`はC-02のschema registryへ加わった（30 -> 31 kind）
+- **action directoryは残り続ける**。attemptごとに`actions/<action_id>/`（envelopeと結果）を作り、engineは削除しない。checkpointはledgerの入れ替えで有界だが、run directoryのartifactは1 attemptあたり約800 byteずつ増える（実測）。削除はretention policyの決定を要するためPhase 14（C-07 retention、#19）が扱う。監査のため完了済みattemptの証跡を残す判断でもある
+- **`id_source`の一意性をengineは前提にしない**。同じaction IDが再生成された場合、既存のaction directoryへ書き込めないことで停止する（古いresult fileを新しいactionの結果として受理する経路を塞ぐ）
