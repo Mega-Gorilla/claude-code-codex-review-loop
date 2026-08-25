@@ -389,6 +389,70 @@ class TestVerifiedMachineState:
         assert isinstance(read_machine_state(payload), SectionUnavailable)
 
 
+class TestFieldsThatDisappear:
+    """次の状態に無い付随値は残さない（残すと正当な遷移が保存できなくなる）。"""
+
+    def _violation(self) -> IntegrityEvidenceRef:
+        return IntegrityEvidenceRef(
+            binding=OpaqueBinding("iv:marker:run-1:c1"),
+            descriptor=OpaqueRef("desc"),
+            head=OpaqueRef("head-1"),
+        )
+
+    def _halt_gate(self) -> MachineState:
+        violation = self._violation()
+        return MachineState(
+            state=State.APPLYING_FIXES,
+            procedure=HaltingForBlockProcedure(
+                block=RecordIntegrityBlock((violation,)), attempt_binding=violation.binding
+            ),
+        )
+
+    def test_halt_completion_drops_the_procedure(self) -> None:
+        """停止完了でhalt gateを抜け、`BLOCKED`へ入る（procedureが消える）。"""
+        saved = with_machine_state(checkpoint_payload(), self._halt_gate())
+        blocked = MachineState(
+            state=State.BLOCKED, block=RecordIntegrityBlock((self._violation(),))
+        )
+        payload = with_verified_machine_state(saved, blocked)
+        assert not isinstance(payload, SectionUnavailable)
+        assert "procedure" not in payload["state"]
+        assert read_machine_state(payload) == blocked
+
+    def test_returning_to_normal_drops_the_procedure(self) -> None:
+        saved = with_machine_state(checkpoint_payload(), self._halt_gate())
+        normal = MachineState(state=State.APPLYING_FIXES)
+        payload = with_verified_machine_state(saved, normal)
+        assert not isinstance(payload, SectionUnavailable)
+        assert "procedure" not in payload["state"]
+        assert read_machine_state(payload) == normal
+
+    def test_block_resolution_drops_the_block(self) -> None:
+        """block解消でRUNNING_REVIEWへ戻る（blockが消える）。"""
+        blocked = MachineState(
+            state=State.BLOCKED, block=RecordIntegrityBlock((self._violation(),))
+        )
+        saved = with_machine_state(checkpoint_payload(), blocked)
+        resumed = MachineState(state=State.RUNNING_REVIEW, awaiting=Awaiting.CODEX_CODE_REVIEW)
+        payload = with_verified_machine_state(saved, resumed)
+        assert not isinstance(payload, SectionUnavailable)
+        assert "block" not in payload["state"]
+        assert read_machine_state(payload) == resumed
+
+    def test_consuming_deferred_integrity_drops_the_set(self) -> None:
+        deferred = MachineState(
+            state=State.MERGING,
+            awaiting=Awaiting.MERGE_OUTCOME_EXECUTE,
+            deferred_integrity=(self._violation(),),
+        )
+        saved = with_machine_state(checkpoint_payload(), deferred)
+        consumed = MachineState(state=State.MERGING, awaiting=Awaiting.MERGE_OUTCOME_EXECUTE)
+        payload = with_verified_machine_state(saved, consumed)
+        assert not isinstance(payload, SectionUnavailable)
+        assert "deferred_integrity" not in payload["state"]
+        assert read_machine_state(payload) == consumed
+
+
 class TestUnreadableStateSections:
     """解釈できないstate sectionを「無い」へ丸めない（silent repair禁止）。"""
 

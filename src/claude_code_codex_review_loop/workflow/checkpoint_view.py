@@ -310,7 +310,17 @@ def with_machine_state(
     updated = dict(payload)
     section = updated.get("state")
     values: dict[str, object] = dict(section) if isinstance(section, dict) else {}
-    for name in ("awaiting", "return_to", "recovery_to", "pending_record"):
+    # 次の状態に無い付随値は**必ず消す**。残すと前の状態の値が混ざり、round-trip検証が
+    # 正当な遷移まで拒否する（halt完了・block解消・deferred消費で消えるfieldがある）
+    for name in (
+        "awaiting",
+        "return_to",
+        "recovery_to",
+        "pending_record",
+        "procedure",
+        "block",
+        "deferred_integrity",
+    ):
         values.pop(name, None)
     values["state"] = machine_state.state.value
     if machine_state.awaiting is not None:
