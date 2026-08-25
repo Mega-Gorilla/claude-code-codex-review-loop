@@ -382,8 +382,9 @@ class HaltingForBlockProcedure:
 
     `attempt_binding`は**停止attemptのidentity**で、halt gate中は変わらない。violation集合
     （`block.violations`）とは別の値である必要がある: I5は停止gate中の追加検出で上書き・
-    silent lossを作らないこと（＝集合が伸びること）を要求し、集合の代表値は検出順と無関係な
-    binding順で動くため、identityを集合へ載せると「発行した停止の完了報告が拒否される」。
+    silent lossを作らないこと（＝集合が伸びること）を要求する。集合の代表値は検出順と無関係な
+    binding順の先頭なので、後から前へ入る違反が届けば**変わり得る**。identityを集合へ載せると
+    「発行した停止の完了報告が拒否される」経路がここで開く。
     `CancellingProcedure`と同じ語彙・同じ不変性を持つ（ADR-0016）。
     """
 

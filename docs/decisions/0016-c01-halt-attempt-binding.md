@@ -25,7 +25,7 @@ C-03へ渡した停止attemptの identity が、C-01側で入れ替わってい�
 ## Decision
 
 1. **identityとviolation集合を別の値にする**。`HaltingForBlockProcedure`へ不変の`attempt_binding`を持たせ、発行・resumeの再発行・完了eventの照合はすべてこの値を使う。violation集合は追加検出で伸びる別の値として扱う（unionは維持する）
-2. **I5と安定性は、同じ値へ載せている限り両立しない**。I5は集合が伸びることを要求し、代表値はその先頭なので必然的に動く。分離以外に両方を満たす方法が無い。これが本ADRの中心的な理由である
+2. **I5と安定性は、同じ値へ載せている限り両立しない**。I5は集合が伸びることを要求し、代表値はその先頭なので、**追加bindingが現在の先頭より辞書順で前なら変わり得る**。identityに必要なのは「変わらない保証」であり、「変わり得る」時点で成立しない。分離以外に両方を満たす方法が無く、これが本ADRの中心的な理由である
 3. `attempt_binding`は**halt gateへ入る契機となった違反のbinding**（`_detect_halt_gate_effect`が受け取ったevidence）とする
 4. **不変条件**: `attempt_binding`は`block.violations`のいずれかと一致しなければならない。unionは集合を伸ばすだけなので追加検出後も保たれる。違反は`IllegalMachineStateError("HALT_ATTEMPT_BINDING")`で**構築段階から拒否**する。checkpointから復元する際に、blockと無関係なattempt bindingを注入した状態を作れない（C-08が復元を実装するときの防御）
 5. `BlockHaltCompleted.block_binding`を**`attempt_binding`へ改名**する。実体は「blockの現在の代表値」ではなく停止attemptの識別子であり、`CancellationCompleted.attempt_binding`と同じ語彙にすることで2つの停止手続きが揃う。C-01内部のeventで外部互換性の制約は無い
