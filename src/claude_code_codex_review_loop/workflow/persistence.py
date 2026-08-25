@@ -50,7 +50,7 @@ from ..state import (
 from ..transport.conversation import ensure_comment_posted
 from ..transport.gh import GhContext, RepoRef, RetryPolicy, TransportError
 from .actions import ActionRegistryError
-from .checkpoint_view import with_machine_state
+from .checkpoint_view import SectionUnavailable, with_verified_machine_state
 from .ports import RecordEventPort, RecordSourcePort
 from .run_context import EngineStopped, RunContext, load_run
 
@@ -89,12 +89,22 @@ PersistOutcome = RecordPersisted | IntegrityDetected | PersistFailed | EngineSto
 def _apply(
     run: RunContext, event: ev.Event, *, paths: StatePaths, run_id: str
 ) -> tuple[MachineState, tuple[Command, ...]] | EngineStopped:
-    """C-01へeventを入力し、結果のstateをcheckpointへ保存する。"""
+    """C-01へeventを入力し、結果のstateをcheckpointへ保存する。
+
+    **読み戻せない状態は保存しない**。C-01が返す状態にはcheckpointがまだ表現しない
+    付随値を持つものがあり、黙って落とすと次のresumeが復元できないcheckpointになる。
+    その場合は保存せず停止する（検出自体はchain検証が冪等に再現するため失われない）。
+    """
     try:
         machine_state, commands = transition(run.machine_state, event)
     except (TransitionRejected, ev.IllegalEventError) as error:
         return EngineStopped("illegal_event", f"C-01が{type(event).__name__}を受理しない: {error}")
-    save_checkpoint(checkpoint_path(paths, run_id), with_machine_state(run.payload, machine_state))
+    payload = with_verified_machine_state(run.payload, machine_state)
+    if isinstance(payload, SectionUnavailable):  # pragma: no cover - 保存できない状態は読めず、
+        # この入口（読み込めたcheckpoint + integrity検出 / RunFailed）からは到達しない。
+        # 表現範囲を広げるPhaseがここを踏むまで、防御として残す
+        return EngineStopped("state_not_persistable", payload.detail)
+    save_checkpoint(checkpoint_path(paths, run_id), payload)
     return machine_state, commands
 
 
@@ -108,7 +118,7 @@ def _detect_violations(
     """violationを1件ずつC-01へ入力する（集合への追加はC-01がunionする）。"""
     current = run
     machine_state = run.machine_state
-    commands: tuple[Command, ...] = ()
+    collected: list[Command] = []
     for violation in violations:
         applied = _apply(
             current,
@@ -119,10 +129,15 @@ def _detect_violations(
         if isinstance(applied, EngineStopped):
             return applied
         machine_state, commands = applied
+        # **順に蓄積する**。最初の検出だけがhalt gateへ入り`HaltRun`を発行するため、
+        # 上書きすると停止命令が呼び出し側へ届かない
+        collected.extend(commands)
         current = RunContext(
             payload=current.payload, machine_state=machine_state, run_dir=current.run_dir
         )
-    return IntegrityDetected(violations=violations, machine_state=machine_state, commands=commands)
+    return IntegrityDetected(
+        violations=violations, machine_state=machine_state, commands=tuple(collected)
+    )
 
 
 def _post(
@@ -194,7 +209,9 @@ def _verify_and_advance(
         machine_state, commands = transition(run.machine_state, event)
     except (TransitionRejected, ev.IllegalEventError) as error:
         return EngineStopped("illegal_event", f"C-01が{type(event).__name__}を受理しない: {error}")
-    payload = with_machine_state(run.payload, machine_state)
+    payload = with_verified_machine_state(run.payload, machine_state)
+    if isinstance(payload, SectionUnavailable):
+        return EngineStopped("state_not_persistable", payload.detail)
     payload.pop("transaction", None)
     save_checkpoint(checkpoint_path(paths, run_id), payload)
     return RecordPersisted(
@@ -232,6 +249,13 @@ def persist(
         return EngineStopped("transaction_missing", "pending recordに対応するtransactionが無い")
     if transaction.binding != pending.binding.value or transaction.kind is not pending.kind:
         return EngineStopped("transaction_mismatch", "transactionがpending recordと一致しない")
+    if transaction.body_hash is None:
+        # 完成本文hashが無いと、投稿したrecordが意図した本文かを検証できない。schema上
+        # optionalなのは既存fieldの制約を強化しないためで（ADR-0013 決定9）、producerが
+        # 省略してよい意味ではない（ADR-0014 決定21）。**投稿する前に**停止する
+        return EngineStopped(
+            "body_hash_missing", "transactionに完成本文hashが無い（投稿前にfail closedする）"
+        )
 
     chain = records_port.chain(run_id)
     if not chain.is_intact:

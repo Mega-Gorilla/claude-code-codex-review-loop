@@ -19,6 +19,7 @@ from c08_support.helpers import (
 
 from claude_code_codex_review_loop.domain import events as ev
 from claude_code_codex_review_loop.domain.values import (
+    HaltingForBlockProcedure,
     IntegrityEvidenceRef,
     MachineState,
     OpaqueBinding,
@@ -39,6 +40,7 @@ from claude_code_codex_review_loop.workflow import (
     PersistFailed,
     RecordPersisted,
     persist,
+    read_machine_state,
     with_machine_state,
 )
 
@@ -204,6 +206,61 @@ class TestRefusals:
         assert isinstance(outcome, EngineStopped) and outcome.code == "event_unavailable"
 
 
+class TestBodyHashContract:
+    def test_missing_body_hash_stops_before_posting(self, tmp_path) -> None:
+        """完成本文hashが無いtransactionは、**投稿する前に**拒否する。
+
+        schema上optionalなのは既存fieldの制約を強化しないためで（ADR-0013 決定9）、
+        producerが省略してよい意味ではない（ADR-0014 決定21）。投稿してから検証で
+        落とすと、外部commentだけが増えてtransactionが残る。
+        """
+        env = persist_env(tmp_path)
+        payload = _payload(env)
+        transaction = dict(payload["transaction"])  # type: ignore[arg-type]
+        transaction.pop("body_hash")
+        payload["transaction"] = transaction
+        save_checkpoint(checkpoint_path(env.paths, RUN), payload)
+        outcome = persist(**env.kwargs())
+        assert isinstance(outcome, EngineStopped) and outcome.code == "body_hash_missing"
+        assert env.comment_count() == 1  # 投稿していない
+        assert "transaction" in _payload(env)
+
+
+class _CancelEvents:
+    """`UserCancelVerified`を返すport（cancel手続きへ入る）。"""
+
+    def event_for(self, evidence, record):  # type: ignore[no-untyped-def]
+        return ev.UserCancelVerified(evidence=evidence)
+
+
+class TestStateThatCannotBePersisted:
+    def test_event_leading_to_an_unrepresentable_state_stops(self, tmp_path) -> None:
+        """C-01が返す状態をcheckpointが表現できない場合、保存せず停止する。
+
+        `UserCancelVerified`はcancel手続きへ入るが、その付随値（`CancellingProcedure`）は
+        まだcheckpointが表現しない。落として保存すると復元できないcheckpointになるため、
+        表現できるようになるまでは停止する（ADR-0017）。
+        """
+        from c02_support.helpers import REPRESENTATIVE
+
+        from claude_code_codex_review_loop.schema import SchemaKind
+
+        payload = dict(REPRESENTATIVE[SchemaKind.USER_CANCEL])
+        payload["target_head_sha"] = HEAD
+        env = persist_env(tmp_path, kind=RecordKind.USER_CANCEL, payload=payload)
+        state = MachineState(
+            state=State.APPLYING_FIXES,
+            pending_record=PendingRecord(
+                kind=RecordKind.USER_CANCEL,
+                binding=OpaqueBinding(env.issued.binding),
+                source_state=State.APPLYING_FIXES,
+            ),
+        )
+        save_checkpoint(checkpoint_path(env.paths, RUN), with_machine_state(_payload(env), state))
+        outcome = persist(**env.kwargs(event_port=_CancelEvents()))
+        assert isinstance(outcome, EngineStopped) and outcome.code == "state_not_persistable"
+
+
 class TestUnreachableCheckpoint:
     def test_missing_checkpoint_stops(self, tmp_path) -> None:
         env = persist_env(tmp_path)
@@ -283,20 +340,73 @@ class TestEventsTheStateRejects:
 
 
 class TestIntegrityRouting:
-    def test_violation_before_posting_goes_to_c01(self, tmp_path) -> None:
-        """壊れたchainの上では投稿しない。violationはC-01のintegrity経路へ渡す。"""
-        env = persist_env(
-            tmp_path,
-            state=MachineState(
-                state=State.APPLYING_FIXES,
-                pending_record=None,
-            ),
-        )
+    def test_state_after_integrity_round_trips(self, tmp_path) -> None:
+        """integrity遷移後のcheckpointを、そのまま読み戻せる（次のresumeが復元できる）。"""
+        env = persist_env(tmp_path)
         broken = FakeRecordSource(
             records=verified_chain([RecordKind.REVIEW_RESULT]).records, violations=(_violation(),)
         )
-        # pending recordを戻してからintegrityへ入る経路を見る
-        save_checkpoint(checkpoint_path(env.paths, RUN), _restored(env))
+        outcome = persist(**env.kwargs(records_port=broken))
+        assert isinstance(outcome, IntegrityDetected)
+        restored = read_machine_state(_payload(env))
+        assert restored == outcome.machine_state
+
+    def test_halt_gate_survives_the_checkpoint(self, tmp_path) -> None:
+        """active stateではhalt gateが保存され、停止完了前に落ちても復元できる。"""
+        env = persist_env(
+            tmp_path, kind=RecordKind.DECISION_BRIEF, payload=_decision_brief_payload()
+        )
+        state = MachineState(
+            state=State.REVIEWING_DECISION_REQUEST,
+            pending_record=PendingRecord(
+                kind=RecordKind.DECISION_BRIEF,
+                binding=OpaqueBinding(env.issued.binding),
+                source_state=State.REVIEWING_DECISION_REQUEST,
+            ),
+        )
+        save_checkpoint(checkpoint_path(env.paths, RUN), with_machine_state(_payload(env), state))
+        broken = FakeRecordSource(
+            records=verified_chain([RecordKind.REVIEW_RESULT]).records, violations=(_violation(),)
+        )
+        outcome = persist(**env.kwargs(records_port=broken))
+        assert isinstance(outcome, IntegrityDetected)
+        restored = read_machine_state(_payload(env))
+        assert isinstance(restored, MachineState)
+        assert isinstance(restored.procedure, HaltingForBlockProcedure)
+        assert restored == outcome.machine_state
+
+    def test_multiple_violations_keep_the_halt_command(self, tmp_path) -> None:
+        """複数violationでも、最初の検出が出した`HaltRun`を落とさない。"""
+        env = persist_env(
+            tmp_path, kind=RecordKind.DECISION_BRIEF, payload=_decision_brief_payload()
+        )
+        state = MachineState(
+            state=State.REVIEWING_DECISION_REQUEST,
+            pending_record=PendingRecord(
+                kind=RecordKind.DECISION_BRIEF,
+                binding=OpaqueBinding(env.issued.binding),
+                source_state=State.REVIEWING_DECISION_REQUEST,
+            ),
+        )
+        save_checkpoint(checkpoint_path(env.paths, RUN), with_machine_state(_payload(env), state))
+        broken = FakeRecordSource(
+            records=verified_chain([RecordKind.REVIEW_RESULT]).records,
+            violations=(_violation("iv:marker:run-1:c1"), _violation("iv:actor:run-1:c2")),
+        )
+        outcome = persist(**env.kwargs(records_port=broken))
+        assert isinstance(outcome, IntegrityDetected)
+        names = [type(command).__name__ for command in outcome.commands]
+        assert names.count("HaltRun") == 1
+        assert names == ["InvalidateApprovals", "HaltRun", "InvalidateApprovals"]
+
+
+class TestIntegrityAfterPosting:
+    def test_violation_before_posting_skips_the_post(self, tmp_path) -> None:
+        """壊れたchainの上では投稿しない。violationはC-01のintegrity経路へ渡す。"""
+        env = persist_env(tmp_path)
+        broken = FakeRecordSource(
+            records=verified_chain([RecordKind.REVIEW_RESULT]).records, violations=(_violation(),)
+        )
         outcome = persist(**env.kwargs(records_port=broken))
         assert isinstance(outcome, IntegrityDetected)
         assert outcome.violations == (_violation(),)

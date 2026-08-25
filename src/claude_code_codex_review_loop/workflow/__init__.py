@@ -35,6 +35,7 @@ from .checkpoint_view import (
     with_new_logical_action,
     with_receipt,
     with_retry_attempt,
+    with_verified_machine_state,
     without_pending_action,
 )
 from .engine import (
@@ -131,5 +132,6 @@ __all__ = [
     "with_new_logical_action",
     "with_receipt",
     "with_retry_attempt",
+    "with_verified_machine_state",
     "without_pending_action",
 ]
