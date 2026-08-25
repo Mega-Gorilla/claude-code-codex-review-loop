@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import pytest
-from c01_support.helpers import HEAD, binding, violation
+from c01_support.helpers import HEAD, binding, halt_gate, violation
 
 from claude_code_codex_review_loop.domain import State
 from claude_code_codex_review_loop.domain import events as ev
@@ -91,7 +91,7 @@ class TestMachineStateInvariants:
             "BLOCKED_NO_HALT_GATE",
             state=_S.BLOCKED,
             block=_progress_block(),
-            procedure=HaltingForBlockProcedure(block=RecordIntegrityBlock((violation(),))),
+            procedure=halt_gate(),
         )
         _expect(
             "BLOCKED_PENDING_KIND",
@@ -123,7 +123,7 @@ class TestMachineStateInvariants:
             awaiting=Awaiting.CODEX_CODE_REVIEW,
         )
         _expect("MERGING_NO_CANCELLING", state=_S.MERGING, procedure=CancellingProcedure(binding("c-1")))
-        halt = HaltingForBlockProcedure(block=RecordIntegrityBlock((violation(),)))
+        halt = halt_gate()
         _expect("HALT_GATE_STATE", state=_S.WAITING_CI, procedure=halt)
         _expect("HALT_GATE_STATE", state=_S.MERGING, procedure=halt)
         _expect(
@@ -189,6 +189,18 @@ class TestBlockValueObjects:
         with pytest.raises(IllegalMachineStateError) as unordered:
             RecordIntegrityBlock(violations=(violation("v-2"), violation("v-1")))
         assert unordered.value.code == "INTEGRITY_BLOCK_ORDER"
+
+    def test_halt_attempt_binding_must_be_a_violation_of_the_block(self) -> None:
+        """attempt bindingはblockのviolationのいずれかに限る（ADR-0016）。
+
+        checkpointから復元する際に、blockと無関係なattempt bindingを注入した状態を
+        構築段階で拒否する。
+        """
+        block = RecordIntegrityBlock((violation("v-1"), violation("v-2")))
+        assert HaltingForBlockProcedure(block=block, attempt_binding=binding("v-2"))
+        with pytest.raises(IllegalMachineStateError) as unknown:
+            HaltingForBlockProcedure(block=block, attempt_binding=binding("v-9"))
+        assert unknown.value.code == "HALT_ATTEMPT_BINDING"
         block = RecordIntegrityBlock(violations=(violation("v-1"), violation("v-2")))
         assert block.representative_binding == binding("v-1")
         assert block.head == HEAD

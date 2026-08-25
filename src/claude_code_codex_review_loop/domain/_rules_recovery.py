@@ -444,7 +444,7 @@ def _reissue_halt_for_cancel(ms: MachineState, event: ev.Event) -> tuple[Machine
 
 def _reissue_halt_for_block(ms: MachineState, event: ev.Event) -> tuple[MachineState, tuple[Command, ...]]:
     procedure = cast(HaltingForBlockProcedure, ms.procedure)
-    return ms, (HaltRun(procedure.block.representative_binding),)
+    return ms, (HaltRun(procedure.attempt_binding),)
 
 
 def _reissue_incident_request(ms: MachineState, event: ev.Event) -> tuple[MachineState, tuple[Command, ...]]:

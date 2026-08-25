@@ -113,7 +113,11 @@ def _procedure_options(state: State) -> tuple[Procedure, ...]:
     if state is not State.MERGING:
         options.append(CancellingProcedure(_PROC_BINDING))
     if state in ACTIVE_STATES and state is not State.MERGING:
-        options.append(HaltingForBlockProcedure(RecordIntegrityBlock((_HALT_VIOLATION,))))
+        options.append(
+            HaltingForBlockProcedure(
+                block=RecordIntegrityBlock((_HALT_VIOLATION,)), attempt_binding=_HALT_VIOLATION.binding
+            )
+        )
     options.append(RecordingIncidentProcedure(IncidentTarget.MERGED, None))
     options.append(
         RecordingIncidentProcedure(
@@ -277,8 +281,8 @@ def events_for(ms: MachineState) -> list[ev.Event]:
             ev.CancellationCompleted(attempt_binding=_PROC_BINDING),
             ev.CancellationCompleted(attempt_binding=OpaqueBinding("stale-attempt")),
             ev.CancellationCompleted(emergency_evidence=OpaqueRef("ckpt-1")),
-            ev.BlockHaltCompleted(OpaqueBinding("hv-1")),
-            ev.BlockHaltCompleted(OpaqueBinding("other-halt")),
+            ev.BlockHaltCompleted(attempt_binding=OpaqueBinding("hv-1")),
+            ev.BlockHaltCompleted(attempt_binding=OpaqueBinding("other-halt")),
             ev.RecordIntegrityViolationDetected(_HALT_VIOLATION),
             ev.RecordIntegrityViolationDetected(
                 IntegrityEvidenceRef(OpaqueBinding("nv-1"), OpaqueRef("desc"), HEAD)
