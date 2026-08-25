@@ -12,9 +12,13 @@ from c07_support.helpers import checkpoint_payload
 
 from claude_code_codex_review_loop.domain.values import (
     Awaiting,
+    HaltingForBlockProcedure,
+    IntegrityEvidenceRef,
     MachineState,
     OpaqueBinding,
+    OpaqueRef,
     PendingRecord,
+    RecordIntegrityBlock,
     RecordKind,
     State,
 )
@@ -34,6 +38,7 @@ from claude_code_codex_review_loop.workflow import (
     with_new_logical_action,
     with_receipt,
     with_retry_attempt,
+    with_verified_machine_state,
     without_pending_action,
 )
 
@@ -297,6 +302,206 @@ class TestMachineState:
         )
         outcome = read_machine_state(payload)
         assert isinstance(outcome, SectionUnavailable) and "pending_record" in outcome.detail
+
+
+class TestVerifiedMachineState:
+    """**読み戻せない状態を書かない**（ADR-0017）。"""
+
+    def test_representable_state_round_trips(self) -> None:
+        violation = IntegrityEvidenceRef(
+            binding=OpaqueBinding("iv:marker:run-1:c1"),
+            descriptor=OpaqueRef("desc"),
+            head=OpaqueRef("head-1"),
+        )
+        state = MachineState(
+            state=State.APPLYING_FIXES,
+            procedure=HaltingForBlockProcedure(
+                block=RecordIntegrityBlock((violation,)), attempt_binding=violation.binding
+            ),
+        )
+        payload = with_verified_machine_state(checkpoint_payload(), state)
+        assert not isinstance(payload, SectionUnavailable)
+        assert _valid(payload) and read_machine_state(payload) == state
+
+    def test_blocked_state_round_trips(self) -> None:
+        violation = IntegrityEvidenceRef(
+            binding=OpaqueBinding("iv:gap:run-1:00000002"),
+            descriptor=OpaqueRef("desc"),
+            head=OpaqueRef("head-1"),
+        )
+        state = MachineState(state=State.BLOCKED, block=RecordIntegrityBlock((violation,)))
+        payload = with_verified_machine_state(checkpoint_payload(), state)
+        assert not isinstance(payload, SectionUnavailable)
+        assert read_machine_state(payload) == state
+
+    def test_deferred_integrity_round_trips(self) -> None:
+        violation = IntegrityEvidenceRef(
+            binding=OpaqueBinding("iv:edited:run-1:c3"),
+            descriptor=OpaqueRef("desc"),
+            head=OpaqueRef("head-1"),
+        )
+        state = MachineState(
+            state=State.MERGING,
+            awaiting=Awaiting.MERGE_OUTCOME_EXECUTE,
+            deferred_integrity=(violation,),
+        )
+        payload = with_verified_machine_state(checkpoint_payload(), state)
+        assert not isinstance(payload, SectionUnavailable)
+        assert read_machine_state(payload) == state
+
+    def test_unrepresentable_procedure_is_refused(self) -> None:
+        """checkpointがまだ表現しない付随値は、黙って落とさず保存を拒否する。"""
+        from claude_code_codex_review_loop.domain.values import CancellingProcedure
+
+        state = MachineState(
+            state=State.APPLYING_FIXES,
+            procedure=CancellingProcedure(attempt_binding=OpaqueBinding("cancel-1")),
+        )
+        outcome = with_verified_machine_state(checkpoint_payload(), state)
+        assert isinstance(outcome, SectionUnavailable)
+
+    def test_unknown_procedure_kind_is_reported(self) -> None:
+        payload = checkpoint_payload(
+            state={"state": "APPLYING_FIXES", "procedure": {"kind": "CANCELLING"}}
+        )
+        outcome = read_machine_state(payload)
+        assert isinstance(outcome, SectionUnavailable) and "procedure" in outcome.detail
+
+    def test_halt_gate_without_attempt_binding_is_reported(self) -> None:
+        payload = checkpoint_payload(
+            state={"state": "APPLYING_FIXES", "procedure": {"kind": "HALTING_FOR_BLOCK"}}
+        )
+        assert isinstance(read_machine_state(payload), SectionUnavailable)
+
+    def test_unknown_block_kind_is_reported(self) -> None:
+        payload = checkpoint_payload(state={"state": "BLOCKED", "block": {"kind": "PROGRESS"}})
+        outcome = read_machine_state(payload)
+        assert isinstance(outcome, SectionUnavailable) and "block" in outcome.detail
+
+    def test_malformed_violation_is_reported(self) -> None:
+        payload = checkpoint_payload(
+            state={
+                "state": "MERGING",
+                "awaiting": "MERGE_OUTCOME_EXECUTE",
+                "deferred_integrity": [{"binding": "iv:a:r:1"}],
+            }
+        )
+        assert isinstance(read_machine_state(payload), SectionUnavailable)
+
+
+class TestFieldsThatDisappear:
+    """次の状態に無い付随値は残さない（残すと正当な遷移が保存できなくなる）。"""
+
+    def _violation(self) -> IntegrityEvidenceRef:
+        return IntegrityEvidenceRef(
+            binding=OpaqueBinding("iv:marker:run-1:c1"),
+            descriptor=OpaqueRef("desc"),
+            head=OpaqueRef("head-1"),
+        )
+
+    def _halt_gate(self) -> MachineState:
+        violation = self._violation()
+        return MachineState(
+            state=State.APPLYING_FIXES,
+            procedure=HaltingForBlockProcedure(
+                block=RecordIntegrityBlock((violation,)), attempt_binding=violation.binding
+            ),
+        )
+
+    def test_halt_completion_drops_the_procedure(self) -> None:
+        """停止完了でhalt gateを抜け、`BLOCKED`へ入る（procedureが消える）。"""
+        saved = with_machine_state(checkpoint_payload(), self._halt_gate())
+        blocked = MachineState(
+            state=State.BLOCKED, block=RecordIntegrityBlock((self._violation(),))
+        )
+        payload = with_verified_machine_state(saved, blocked)
+        assert not isinstance(payload, SectionUnavailable)
+        assert "procedure" not in payload["state"]
+        assert read_machine_state(payload) == blocked
+
+    def test_returning_to_normal_drops_the_procedure(self) -> None:
+        saved = with_machine_state(checkpoint_payload(), self._halt_gate())
+        normal = MachineState(state=State.APPLYING_FIXES)
+        payload = with_verified_machine_state(saved, normal)
+        assert not isinstance(payload, SectionUnavailable)
+        assert "procedure" not in payload["state"]
+        assert read_machine_state(payload) == normal
+
+    def test_block_resolution_drops_the_block(self) -> None:
+        """block解消でRUNNING_REVIEWへ戻る（blockが消える）。"""
+        blocked = MachineState(
+            state=State.BLOCKED, block=RecordIntegrityBlock((self._violation(),))
+        )
+        saved = with_machine_state(checkpoint_payload(), blocked)
+        resumed = MachineState(state=State.RUNNING_REVIEW, awaiting=Awaiting.CODEX_CODE_REVIEW)
+        payload = with_verified_machine_state(saved, resumed)
+        assert not isinstance(payload, SectionUnavailable)
+        assert "block" not in payload["state"]
+        assert read_machine_state(payload) == resumed
+
+    def test_consuming_deferred_integrity_drops_the_set(self) -> None:
+        deferred = MachineState(
+            state=State.MERGING,
+            awaiting=Awaiting.MERGE_OUTCOME_EXECUTE,
+            deferred_integrity=(self._violation(),),
+        )
+        saved = with_machine_state(checkpoint_payload(), deferred)
+        consumed = MachineState(state=State.MERGING, awaiting=Awaiting.MERGE_OUTCOME_EXECUTE)
+        payload = with_verified_machine_state(saved, consumed)
+        assert not isinstance(payload, SectionUnavailable)
+        assert "deferred_integrity" not in payload["state"]
+        assert read_machine_state(payload) == consumed
+
+
+class TestUnreadableStateSections:
+    """解釈できないstate sectionを「無い」へ丸めない（silent repair禁止）。"""
+
+    @pytest.mark.parametrize(
+        "section",
+        [
+            {"state": "APPLYING_FIXES", "procedure": "text"},
+            {"state": "BLOCKED", "block": "text"},
+            {"state": "MERGING", "awaiting": "MERGE_OUTCOME_EXECUTE", "deferred_integrity": "text"},
+            {
+                "state": "MERGING",
+                "awaiting": "MERGE_OUTCOME_EXECUTE",
+                "deferred_integrity": ["text"],
+            },
+        ],
+        ids=["procedure", "block", "deferred_not_list", "violation_not_object"],
+    )
+    def test_malformed_section_is_reported(self, section: dict[str, object]) -> None:
+        assert isinstance(read_machine_state(checkpoint_payload(state=section)), SectionUnavailable)
+
+    def test_normal_procedure_is_accepted(self) -> None:
+        """明示的な`NORMAL`も読める（省略と同じ意味）。"""
+        payload = checkpoint_payload(
+            state={"state": "APPLYING_FIXES", "procedure": {"kind": "NORMAL"}}
+        )
+        assert read_machine_state(payload) == MachineState(state=State.APPLYING_FIXES)
+
+    def test_state_needing_an_unsupported_block_is_refused(self) -> None:
+        """まだ表現しないblock種別を持つ状態は、保存すると読めなくなるので拒否する。"""
+        from claude_code_codex_review_loop.domain.values import (
+            BlockedContinuation,
+            Budget,
+            Progress,
+            ProgressBlock,
+        )
+
+        block = ProgressBlock(
+            binding=OpaqueBinding("b-1"),
+            head=OpaqueRef("head-1"),
+            reason=Progress.NO_PROGRESS,
+            budget=Budget.REVIEW_ROUND,
+            counter_snapshot=None,
+            fingerprint=None,
+            continuation=BlockedContinuation(
+                resume_state=State.RUNNING_REVIEW, awaiting=Awaiting.CODEX_CODE_REVIEW, commands=()
+            ),
+        )
+        state = MachineState(state=State.BLOCKED, block=block)
+        assert isinstance(with_verified_machine_state(checkpoint_payload(), state), SectionUnavailable)
 
 
 class TestNextAttempt:

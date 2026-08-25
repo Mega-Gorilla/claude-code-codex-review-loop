@@ -12,6 +12,7 @@ additive変更とし、非互換な変更のみversionをbumpしてmigrationを�
 
 from __future__ import annotations
 
+from ..domain._ruledefs import BlockKind, ProcedureKind
 from ..domain.states import State
 from ..domain.values import Awaiting, RecordKind
 from .action import HOST_ACTION_KINDS, SUBMIT_ERROR_CATEGORIES, SUBMIT_OUTCOMES
@@ -48,6 +49,8 @@ CHECKPOINT_MAX_INPUT_BYTES = 262_144
 # checkpointが書けなくなる方向へは伸ばさない（C-08がこの値でretryを打ち切る）
 MAX_SUBMIT_RECEIPTS = 32
 
+_PROCEDURE_KINDS: tuple[str, ...] = tuple(sorted(kind.value for kind in ProcedureKind))
+_BLOCK_KINDS: tuple[str, ...] = tuple(sorted(kind.value for kind in BlockKind))
 _STATE_VALUES = tuple(sorted(state.value for state in State))
 _AWAITING_VALUES = tuple(sorted(awaiting.value for awaiting in Awaiting))
 _RECORD_KIND_VALUES = tuple(sorted(kind.value for kind in RecordKind))
@@ -80,6 +83,11 @@ def _optional_opaque() -> Field:
 # retryはattemptごとに新しいaction ID / nonceを発行するため（ADR-0015）、過去attemptの
 # 同一再送を冪等に扱うにはreceiptを**複数**保持する必要がある。v2で未完了actionを`pending`
 # へ入れ、`submit`を`receipts`配列へ置き換えた（version bumpの理由）
+
+
+def _violation_field() -> Field:
+    """integrity violationの参照（`IntegrityEvidenceRef`と同じ3値）。"""
+    return obj({"binding": opaque(), "descriptor": opaque(), "head": opaque()})
 
 
 def _pending_action_fields() -> dict[str, Field]:
@@ -184,6 +192,31 @@ _SECTIONS: dict[str, Field] = {
                 },
                 required=False,
             ),
+            # procedure / block / deferred_integrityはPhase 8 PR-2bのadditive追加。
+            # C-01がintegrity検出で返す状態（halt gateとRECORD_INTEGRITY block）を
+            # **そのまま読み戻せる**ようにする。読み戻せない状態を書くと、次のresumeが
+            # 復元できないcheckpointになる（ADR-0017）。
+            #
+            # violation集合はC-06のchain検証で毎回再導出できる値だが（ADR-0011 決定8）、
+            # readerは純粋関数でありGitHubへ問い合わせられない。ここに保存するのは
+            # **状態復元のためのcache**であり、検出の正本は常にchain検証である
+            # （保存値が古くても、再検証が違反を再び検出する）
+            "procedure": obj(
+                {
+                    "kind": enum_field(_PROCEDURE_KINDS),
+                    "attempt_binding": _optional_opaque(),
+                    "violations": array(_violation_field(), required=False),
+                },
+                required=False,
+            ),
+            "block": obj(
+                {
+                    "kind": enum_field(_BLOCK_KINDS),
+                    "violations": array(_violation_field(), required=False),
+                },
+                required=False,
+            ),
+            "deferred_integrity": array(_violation_field(), required=False),
         },
         required=False,
     ),

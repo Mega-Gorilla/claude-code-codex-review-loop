@@ -71,13 +71,16 @@ def _issue(env, *, ids=None, state=None):
 
 
 def _submit(env, payload, *, records=None, budget=RETRY_BUDGET):
+    port = records if hasattr(records, "chain") else FakeRecordSource(
+        records=review_records() if records is None else records
+    )
     return submit(
         raw(payload),
         paths=env.paths,
         run_id=RUN,
         repository=REPOSITORY,
         number=NUMBER,
-        records_port=FakeRecordSource(review_records() if records is None else records),
+        records_port=port,
         body_port=FakeBodyPort(),
         max_result_bytes=MAX_RESULT_BYTES,
         retry_budget=budget,
@@ -421,6 +424,24 @@ class TestCheckpointRefusals:
         save_checkpoint(env.checkpoint, checkpoint)
         outcome = _submit(env, payload)
         assert isinstance(outcome, EngineStopped) and outcome.code == "state_unavailable"
+
+
+class TestChainGate:
+    def test_submit_on_a_broken_chain_stops(self, tmp_path) -> None:
+        """壊れたchainの上でseqとprevを決めない（integrityの解消はC-01のblockが扱う）。"""
+        from claude_code_codex_review_loop.domain.values import IntegrityEvidenceRef, OpaqueBinding, OpaqueRef
+
+        env = seed(tmp_path, state=machine_state())
+        issued = _issue(env)
+        payload = _completed(env, issued)
+        violation = IntegrityEvidenceRef(
+            binding=OpaqueBinding("iv:tamper:run-1:c1"),
+            descriptor=OpaqueRef("desc"),
+            head=OpaqueRef(HEAD),
+        )
+        broken = FakeRecordSource(records=review_records(), violations=(violation,))
+        outcome = _submit(env, payload, records=broken)
+        assert isinstance(outcome, EngineStopped) and outcome.code == "chain_violation"
 
 
 class TestVariantRules:

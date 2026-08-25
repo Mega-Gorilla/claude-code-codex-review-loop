@@ -14,8 +14,23 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from ..domain._ruledefs import BlockKind, ProcedureKind
 from ..domain.states import State
-from ..domain.values import Awaiting, IllegalMachineStateError, MachineState, OpaqueBinding, PendingRecord, RecordKind
+from ..domain.values import (
+    NORMAL,
+    Awaiting,
+    BlockContext,
+    HaltingForBlockProcedure,
+    IllegalMachineStateError,
+    IntegrityEvidenceRef,
+    MachineState,
+    OpaqueBinding,
+    OpaqueRef,
+    PendingRecord,
+    Procedure,
+    RecordIntegrityBlock,
+    RecordKind,
+)
 from ..errors import ErrorCategory
 
 _SECTION = "host_action"
@@ -209,14 +224,71 @@ def read_machine_state(
         record = _pending_record_of(pending) if pending is not None else None
         machine_state = MachineState(
             state=State(state_value),
+            procedure=_procedure_of(section.get("procedure")),
             awaiting=Awaiting(awaiting_value) if awaiting_value is not None else None,
             pending_record=record,
+            deferred_integrity=_violations_of(section.get("deferred_integrity")),
             return_to=State(return_value) if return_value is not None else None,
             recovery_to=State(recovery_value) if recovery_value is not None else None,
+            block=_block_of(section.get("block")),
         )
-    except (ValueError, IllegalMachineStateError) as error:
+    except (ValueError, TypeError, IllegalMachineStateError) as error:
         return SectionUnavailable(detail=f"stateからMachineStateを復元できない: {error}")
     return machine_state
+
+
+def _violation_of(entry: object) -> IntegrityEvidenceRef:
+    if not isinstance(entry, dict):
+        raise TypeError("violationがobjectでない")
+    binding = _text(entry, "binding")
+    descriptor = _text(entry, "descriptor")
+    head = _text(entry, "head")
+    if binding is None or descriptor is None or head is None:
+        raise ValueError("violationのbinding / descriptor / headが欠如または不正")
+    return IntegrityEvidenceRef(
+        binding=OpaqueBinding(binding), descriptor=OpaqueRef(descriptor), head=OpaqueRef(head)
+    )
+
+
+def _violations_of(section: object) -> tuple[IntegrityEvidenceRef, ...]:
+    if section is None:
+        return ()
+    if not isinstance(section, list):
+        raise TypeError("violation列がlistでない")
+    return tuple(_violation_of(entry) for entry in section)
+
+
+def _procedure_of(section: object) -> Procedure:
+    """`procedure`を復元する（未対応の種別はerrorにして`NORMAL`へ丸めない）。"""
+    if section is None:
+        return NORMAL
+    if not isinstance(section, dict):
+        raise TypeError("state.procedureがobjectでない")
+    kind = _text(section, "kind")
+    if kind == ProcedureKind.NORMAL.value:
+        return NORMAL
+    if kind == ProcedureKind.HALTING_FOR_BLOCK.value:
+        attempt = _text(section, "attempt_binding")
+        if attempt is None:
+            raise ValueError("halt gateのattempt_bindingが欠如している")
+        return HaltingForBlockProcedure(
+            block=RecordIntegrityBlock(violations=_violations_of(section.get("violations"))),
+            attempt_binding=OpaqueBinding(attempt),
+        )
+    # CANCELLING / RECORDING_INCIDENTの保存はこれらを発行するPhaseが追加する（fail closed）
+    raise ValueError(f"未対応のprocedure種別: {kind}")
+
+
+def _block_of(section: object) -> BlockContext | None:
+    """`block`を復元する（RECORD_INTEGRITY以外はそれを発行するPhaseが追加する）。"""
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        raise TypeError("state.blockがobjectでない")
+    kind = _text(section, "kind")
+    if kind == BlockKind.RECORD_INTEGRITY.value:
+        return RecordIntegrityBlock(violations=_violations_of(section.get("violations")))
+    raise ValueError(f"未対応のblock種別: {kind}")
 
 
 def _pending_record_of(section: Mapping[str, object]) -> PendingRecord:
@@ -238,7 +310,17 @@ def with_machine_state(
     updated = dict(payload)
     section = updated.get("state")
     values: dict[str, object] = dict(section) if isinstance(section, dict) else {}
-    for name in ("awaiting", "return_to", "recovery_to", "pending_record"):
+    # 次の状態に無い付随値は**必ず消す**。残すと前の状態の値が混ざり、round-trip検証が
+    # 正当な遷移まで拒否する（halt完了・block解消・deferred消費で消えるfieldがある）
+    for name in (
+        "awaiting",
+        "return_to",
+        "recovery_to",
+        "pending_record",
+        "procedure",
+        "block",
+        "deferred_integrity",
+    ):
         values.pop(name, None)
     values["state"] = machine_state.state.value
     if machine_state.awaiting is not None:
@@ -254,7 +336,54 @@ def with_machine_state(
             "binding": record.binding.value,
             "source_state": record.source_state.value,
         }
+    if isinstance(machine_state.procedure, HaltingForBlockProcedure):
+        values["procedure"] = {
+            "kind": ProcedureKind.HALTING_FOR_BLOCK.value,
+            "attempt_binding": machine_state.procedure.attempt_binding.value,
+            "violations": _violation_entries(machine_state.procedure.block.violations),
+        }
+    if isinstance(machine_state.block, RecordIntegrityBlock):
+        values["block"] = {
+            "kind": BlockKind.RECORD_INTEGRITY.value,
+            "violations": _violation_entries(machine_state.block.violations),
+        }
+    if machine_state.deferred_integrity:
+        values["deferred_integrity"] = _violation_entries(machine_state.deferred_integrity)
     updated["state"] = values
+    return updated
+
+
+def _violation_entries(
+    violations: Sequence[IntegrityEvidenceRef],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "binding": violation.binding.value,
+            "descriptor": violation.descriptor.value,
+            "head": violation.head.value,
+        }
+        for violation in violations
+    ]
+
+
+def with_verified_machine_state(
+    payload: Mapping[str, object], machine_state: MachineState
+) -> dict[str, object] | SectionUnavailable:
+    """**そのまま読み戻せることを確認してから**stateを書いたpayloadを返す。
+
+    C-01が返す状態には、まだcheckpointが表現できない付随値（`CancellingProcedure`や
+    `ProgressBlock`等）を持つものがある。それを黙って落として保存すると、次のresumeが
+    復元できないcheckpointになる。書く前に往復させ、一致しなければ**保存しない**
+    （ADR-0017。表現できる範囲は、それを発行するPhaseがadditiveに広げる）。
+    """
+    updated = with_machine_state(payload, machine_state)
+    restored = read_machine_state(updated)
+    if isinstance(restored, SectionUnavailable):
+        return restored
+    if restored != machine_state:
+        return SectionUnavailable(
+            detail="MachineStateをそのまま読み戻せない（checkpointが表現しない付随値がある）"
+        )
     return updated
 
 

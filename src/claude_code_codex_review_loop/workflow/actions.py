@@ -24,14 +24,14 @@ active hostへ依頼する作業（`HOST_ACTION`）ごとに、**入力・結果
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 
 from ..domain import events as ev
 from ..domain.commands import HostAction
 from ..domain.events import Event
-from ..domain.values import Awaiting, RecordKind
+from ..domain.values import Awaiting, RecordEvidence, RecordKind
 from ..schema import REGISTRY
 from ..schema.registry import SchemaDefinition, SchemaKind
 
@@ -188,6 +188,25 @@ def spec_for(action: HostAction) -> ActionSpec:
     if spec is None:  # pragma: no cover - registryは全HostActionを覆う（contract testで固定）
         raise ActionRegistryError(f"registryに無いaction: {action.value}")
     return spec
+
+
+def build_event(
+    variant: ResultVariant, evidence: RecordEvidence, inputs: Mapping[str, object]
+) -> Event:
+    """検証済みrecordのevidenceからC-01 eventを組み立てる（registryが持つ知識）。
+
+    `evidence`以外に要る値は`extra_event_inputs`が宣言したものだけで、**過不足があれば
+    構築しない**（C-08が作らない値をNoneで埋める経路を作らない。ADR-0014 決定9）。
+    """
+    if set(inputs) != set(variant.extra_event_inputs):
+        raise ActionRegistryError(
+            f"{variant.record_kind.value}のevent入力が宣言と一致しない: "
+            f"{sorted(inputs)} != {sorted(variant.extra_event_inputs)}"
+        )
+    # eventの型は`type[Event]`（直和全体）なので、registryが保証する形をcastで示す。
+    # 実際の一致は`test_c08_actions.py`のcontract test（EXPECTED_KINDとfield名）が固定する
+    factory = cast(Callable[..., Event], variant.event)
+    return factory(evidence=evidence, **inputs)
 
 
 def spec_for_awaiting(awaiting: Awaiting) -> ActionSpec | None:

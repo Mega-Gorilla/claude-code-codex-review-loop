@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..domain.commands import HostAction
-from ..domain.values import RecordKind
-from ..identity.record_chain import VerifiedRecord
+from ..domain.events import Event
+from ..domain.values import RecordEvidence, RecordKind
+from ..identity.record_chain import ChainVerification, VerifiedRecord
 
 
 @dataclass(frozen=True)
@@ -52,9 +53,30 @@ class EvidencePort(Protocol):
 
 
 class RecordSourcePort(Protocol):
-    """当該runの検証済みrecord列（seq昇順）。binding採番とprev body hashに要る。"""
+    """当該runのchain検証結果（C-06の`verify_record_chain`の出力そのもの）。
 
-    def verified_records(self, run_id: str) -> Sequence[VerifiedRecord]: ...
+    **violationsを捨てない**。recordだけを返すと、壊れたchainの上でtransactionを発行したり
+    recordを投稿したりできてしまう。engineは`ChainVerification.is_intact`でgateし、violationが
+    あればC-01のintegrity経路へ渡す（ADR-0017）。
+    """
+
+    def chain(self, run_id: str) -> ChainVerification: ...
+
+
+class RecordEventPort(Protocol):
+    """検証済みrecordから、C-01へ入力するeventを作る。
+
+    `PersistRecord`は**任意のrecord**を扱う汎用境界であり、扱うkindはhost actionの結果
+    （registryの8 variant）に限らない。C-09以降の`REVIEW_RESULT` / `FINAL_REPORT`等も同じ
+    経路を通り、これらは**値によるdiscrimination**（`REVIEW_RESULT`の2値、
+    `CLARIFICATION_ANSWER`の5値等）を要するためC-10 / C-11の領域である（ADR-0014 決定8）。
+    さらに`extra_event_inputs`（`ProgressReport` / `head`）もC-08が作らない値である。
+
+    そこでrecord -> eventの写像は**portが担う**。host actionの結果については、registryの
+    `build_event`をそのまま使えば1対1の対応が得られる（Phase 8のfakeがその形を示す）。
+    """
+
+    def event_for(self, evidence: RecordEvidence, record: VerifiedRecord) -> Event: ...
 
 
 class RecordBodyPort(Protocol):
