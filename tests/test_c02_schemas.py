@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""C-02の全schema（29 kind）の受入test（AC-C02-01）。
+"""C-02の全schema（31 kind）の受入test（AC-C02-01）。
 
 kindごとに、representative payloadの受理と、未知version / 必須field欠落 / 型不一致 /
 size超過 / cross-field違反が**区別できるerror**になることを検証する。
@@ -39,6 +39,7 @@ REQUIRED_PROBE: dict[SchemaKind, str] = {
     SchemaKind.GATE_CHANGES: "body",
     SchemaKind.HOST_ACTION: "nonce",
     SchemaKind.SUBMIT: "result_hash",
+    SchemaKind.HOST_FAILURE: "summary",
     SchemaKind.PERMISSION_BLOCK: "permission_id",
     SchemaKind.CI_TIMEOUT: "waited_seconds",
     SchemaKind.CI_CODE_FAILURE: "summary",

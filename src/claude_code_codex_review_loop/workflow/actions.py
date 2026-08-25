@@ -32,7 +32,8 @@ from ..domain import events as ev
 from ..domain.commands import HostAction
 from ..domain.events import Event
 from ..domain.values import Awaiting, RecordKind
-from ..schema.registry import SchemaKind
+from ..schema import REGISTRY
+from ..schema.registry import SchemaDefinition, SchemaKind
 
 
 class ActionRegistryError(Exception):
@@ -47,6 +48,11 @@ class ResultVariant:
     result_schema: SchemaKind
     event: type[Event]
     extra_event_inputs: tuple[str, ...] = ()
+
+    @property
+    def result_definition(self) -> SchemaDefinition:
+        """結果payloadの検証に使う既存のrecord schema（新しいresult schemaを作らない）。"""
+        return REGISTRY[self.result_schema]
 
 
 # record kindごとの結果契約。kindとeventは1対1で、`extra_event_inputs`はC-08が作らない値
@@ -105,6 +111,7 @@ class ActionSpec:
     action: HostAction
     awaiting: Awaiting
     result_kinds: tuple[RecordKind, ...]
+    evidence_kinds: tuple[RecordKind, ...] = ()
 
     @property
     def kind(self) -> str:
@@ -134,31 +141,43 @@ ACTION_SPECS: Final[Mapping[HostAction, ActionSpec]] = {
             RecordKind.EXTERNAL_DEPENDENCY,
             RecordKind.PERMISSION_BLOCK,
         ),
+        # 根拠: 対象のreview結果と、修正方針を確定させたclarificationの回答
+        evidence_kinds=(RecordKind.REVIEW_RESULT, RecordKind.CLARIFICATION_ANSWER),
     ),
     HostAction.DRAFT_DECISION_REQUEST: ActionSpec(
         action=HostAction.DRAFT_DECISION_REQUEST,
         awaiting=Awaiting.HOST_DRAFT_DECISION_REQUEST,
         result_kinds=(RecordKind.DECISION_REQUEST,),
+        # 根拠: 判断が必要になった契機のreview結果
+        evidence_kinds=(RecordKind.REVIEW_RESULT,),
     ),
     HostAction.REVISE_DECISION_REQUEST: ActionSpec(
         action=HostAction.REVISE_DECISION_REQUEST,
         awaiting=Awaiting.HOST_REVISE_DECISION_REQUEST,
         result_kinds=(RecordKind.DECISION_REQUEST,),
+        # 根拠: 再提出を求めたverdictと、その対象の判断依頼
+        evidence_kinds=(RecordKind.DECISION_REQUEST, RecordKind.DECISION_VERDICT),
     ),
     HostAction.DRAFT_DECISION_BRIEF: ActionSpec(
         action=HostAction.DRAFT_DECISION_BRIEF,
         awaiting=Awaiting.HOST_DRAFT_DECISION_BRIEF,
         result_kinds=(RecordKind.DECISION_BRIEF,),
+        # 根拠: 判断依頼とverdict（briefは両者を反映する）
+        evidence_kinds=(RecordKind.DECISION_REQUEST, RecordKind.DECISION_VERDICT),
     ),
     HostAction.RECORD_DECISION: ActionSpec(
         action=HostAction.RECORD_DECISION,
         awaiting=Awaiting.HOST_RECORD_DECISION,
         result_kinds=(RecordKind.DECISION_RECORD,),
+        # 根拠: 提示したbriefと、それに対するユーザーの判断
+        evidence_kinds=(RecordKind.DECISION_BRIEF, RecordKind.USER_DECISION),
     ),
     HostAction.ANSWER_GATE_QUESTION: ActionSpec(
         action=HostAction.ANSWER_GATE_QUESTION,
         awaiting=Awaiting.HOST_ANSWER_GATE_QUESTION,
         result_kinds=(RecordKind.GATE_ANSWER,),
+        # 根拠: 回答対象のgate質問
+        evidence_kinds=(RecordKind.GATE_QUESTION,),
     ),
 }
 
@@ -169,6 +188,14 @@ def spec_for(action: HostAction) -> ActionSpec:
     if spec is None:  # pragma: no cover - registryは全HostActionを覆う（contract testで固定）
         raise ActionRegistryError(f"registryに無いaction: {action.value}")
     return spec
+
+
+def spec_for_awaiting(awaiting: Awaiting) -> ActionSpec | None:
+    """C-01のawaitingから契約を引く（host action以外はNone）。"""
+    for spec in ACTION_SPECS.values():
+        if spec.awaiting is awaiting:
+            return spec
+    return None
 
 
 def spec_for_kind(action_kind: str) -> ActionSpec | None:

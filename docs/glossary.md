@@ -18,6 +18,8 @@
 | action | active hostが1回で実行する作業単位。`HOST_ACTION`として構造化する |
 | action registry | actionごとに入力payload・結果schema・投稿するrecord・組み立てるC-01 eventを対応づけた表。正本はC-01の`HostAction`で、規約はADR-0014 |
 | result path | Controllerがrun directory内へ払い出す、action結果fileのpath。呼び出し側から任意pathを受理しない |
+| logical action | 同じ作業に対するattemptの列。attemptごとに新しいaction IDとnonceを発行し、`correlation_id`で結ぶ |
+| receipt ledger | 受理済みsubmitの記録列。過去attemptの同一再送を冪等に扱い、内容の異なる再送を止める（ADR-0015） |
 | clarification turn | ClaudeからCodexへの1回の質問と、Codexからの1回の回答の一往復。同一topicあたり最大5回 |
 
 ## 記録と状態

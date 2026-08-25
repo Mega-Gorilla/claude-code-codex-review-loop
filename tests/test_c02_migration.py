@@ -138,25 +138,61 @@ INCOMPLETE_MIGRATION_CHAINS: dict[SchemaKind, str] = {
 }
 
 
+def _checkpoint(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "run_id": "run-1",
+        "repository": "owner/repo",
+        "number": 12,
+    }
+    payload.update(overrides)
+    return payload
+
+
+_V1_HOST_ACTION: dict[str, object] = {
+    "action_id": "act-1",
+    "action_kind": "APPLY_FINDINGS",
+    "nonce": "nonce-1",
+    "expected_head_sha": "a" * 40,
+    "result_path": "actions/act-1/result.json",
+    "envelope_path": "actions/act-1/action.json",
+    "envelope_hash": "e" * 64,
+}
+
+
 class TestProductionDefinitions:
-    def test_checkpoint_v1_loads_without_migration(self) -> None:
-        payload = {
-            "schema_version": 1,
-            "run_id": "run-1",
-            "repository": "owner/repo",
-            "number": 12,
-        }
+    def test_checkpoint_v1_migrates_to_current(self) -> None:
+        """host_actionを持たないcheckpointは、version以外が変わらない（ADR-0015）。"""
+        result = load_with_migration(REGISTRY[SchemaKind.CHECKPOINT], _raw(_checkpoint()))
+        assert result.ok and result.payload == _checkpoint(schema_version=2)
+
+    def test_checkpoint_v1_pending_action_moves_under_pending(self) -> None:
+        payload = _checkpoint(host_action=dict(_V1_HOST_ACTION))
         result = load_with_migration(REGISTRY[SchemaKind.CHECKPOINT], _raw(payload))
-        assert result.ok and result.payload == payload
+        assert result.ok and result.payload is not None
+        assert result.payload["host_action"] == {"pending": _V1_HOST_ACTION}
+
+    def test_checkpoint_v1_submit_becomes_a_keyed_receipt(self) -> None:
+        """単一submitは、同じsectionのaction ID / nonceを鍵にした1件のreceiptへ写る。"""
+        submit = {
+            "outcome": "COMPLETED",
+            "submit_hash": "s" * 64,
+            "result_hash": "r" * 64,
+            "result_kind": "FIX_RESULT",
+        }
+        payload = _checkpoint(host_action={**_V1_HOST_ACTION, "submit": submit})
+        result = load_with_migration(REGISTRY[SchemaKind.CHECKPOINT], _raw(payload))
+        assert result.ok and result.payload is not None
+        section = result.payload["host_action"]
+        assert section == {
+            "pending": _V1_HOST_ACTION,
+            "receipts": [{**submit, "action_id": "act-1", "nonce": "nonce-1"}],
+        }
 
     def test_checkpoint_unknown_version_is_rejected(self) -> None:
-        payload = {
-            "schema_version": 2,
-            "run_id": "run-1",
-            "repository": "owner/repo",
-            "number": 12,
-        }
-        result = load_with_migration(REGISTRY[SchemaKind.CHECKPOINT], _raw(payload))
+        result = load_with_migration(
+            REGISTRY[SchemaKind.CHECKPOINT], _raw(_checkpoint(schema_version=3))
+        )
         assert (result.ok, result.stage) == (False, "version")
 
     def test_production_versions_are_contiguous_from_one(self) -> None:

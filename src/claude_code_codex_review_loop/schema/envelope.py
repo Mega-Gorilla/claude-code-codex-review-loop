@@ -64,6 +64,86 @@ def _optional_opaque() -> Field:
 
 
 # TE 10.1の18項目を16のoptional sectionへ写像する（外枠の識別項目1を除く）
+# host_actionはPhase 8（C-08）の追加: 未完了の`HOST_ACTION`と、受理済みsubmitの記録。
+# 別processからのresume（AC-C08-06）が**同じactionを再提示**し、新しいactionを生成しない
+# ために要る（ADR-0014）。
+#
+# binding 8項目だけでは、payload / verified recordsが違う2つの有効なactionが同じ保存値へ
+# 潰れる。envelope全体をcanonical hashで固定し、実体はrun directory内のenvelope fileから
+# 読み直す（hashが一致しなければ再提示しない）。submitも同様にenvelope全体のhashを持つ。
+#
+# v1は未完了actionのfieldをsection直下に置き、受理済みsubmitを**1件**だけ保持していた。
+# retryはattemptごとに新しいaction ID / nonceを発行するため（ADR-0015）、過去attemptの
+# 同一再送を冪等に扱うにはreceiptを**複数**保持する必要がある。v2で未完了actionを`pending`
+# へ入れ、`submit`を`receipts`配列へ置き換えた（version bumpの理由）
+
+
+def _pending_action_fields() -> dict[str, Field]:
+    """未完了`HOST_ACTION`の識別子（v1はsection直下、v2は`pending`配下に置く）。"""
+    return {
+        "action_id": opaque(),
+        "action_kind": enum_field(HOST_ACTION_KINDS),
+        "nonce": opaque(),
+        "expected_head_sha": sha(),
+        "result_path": text(),
+        # 発行した`HOST_ACTION` envelopeの実体（run directory相対）とcanonical hash
+        "envelope_path": text(),
+        "envelope_hash": opaque(),
+        "issued_at": _optional_text(),
+    }
+
+
+def _receipt_fields(*, keyed: bool) -> dict[str, Field]:
+    """受理済みsubmitの記録。判定は`submit_hash`（envelope全体のcanonical hash）で行う。
+
+    `keyed`はattemptを識別する`action_id` / `nonce`を持つか（v2のreceipt配列で必須）。
+    v1はsectionが単一actionを表していたため、この2値をsection直下から引いていた。
+    """
+    keys: dict[str, Field] = {"action_id": opaque(), "nonce": opaque()} if keyed else {}
+    return {
+        **keys,
+        "outcome": enum_field(SUBMIT_OUTCOMES),
+        "submit_hash": opaque(),
+        "result_hash": opaque(),
+        # `result_kind`はeventの組み立てに、`error_category`は失敗の診断に使う
+        "result_kind": enum_field(_RECORD_KIND_VALUES, required=False),
+        "error_category": enum_field(SUBMIT_ERROR_CATEGORIES, required=False),
+        "accepted_at": _optional_text(),
+    }
+
+
+def _host_action_v1() -> Field:
+    return obj(
+        {
+            **_pending_action_fields(),
+            "submit": obj(_receipt_fields(keyed=False), required=False),
+        },
+        required=False,
+    )
+
+
+def _host_action_v2() -> Field:
+    """未完了actionを`pending`へ、受理済みsubmitを`receipts`配列へ分けた形（ADR-0015）。"""
+    return obj(
+        {
+            "pending": obj(
+                {
+                    **_pending_action_fields(),
+                    # logical action（同一作業のattempt列）と、その中での試行番号。
+                    # attemptごとに新しいaction ID / nonceを発行するため、binding 8項目
+                    # （plan L295）は変えずに済む
+                    "correlation_id": opaque(required=False),
+                    "attempt": integer(required=False),
+                },
+                required=False,
+            ),
+            # 受理済みsubmit。同一内容の再送を冪等に扱い、内容の異なる再送を止める
+            "receipts": array(obj(_receipt_fields(keyed=True)), required=False),
+        },
+        required=False,
+    )
+
+
 _SECTIONS: dict[str, Field] = {
     # 2. base / observed / approved head SHA
     "heads": obj(
@@ -235,40 +315,6 @@ _SECTIONS: dict[str, Field] = {
         },
         required=False,
     ),
-    # host_actionはPhase 8（C-08）のadditive追加: 未完了の`HOST_ACTION`と、受理済みsubmitの
-    # fingerprint。別processからのresume（AC-C08-06）が**同じactionを再提示**し、新しい
-    # actionを生成しないために要る（ADR-0014）。
-    #
-    # binding 8項目だけでは、payload / verified recordsが違う2つの有効なactionが同じ保存値へ
-    # 潰れる。envelope全体をcanonical hashで固定し、実体はrun directory内のenvelope fileから
-    # 読み直す（hashが一致しなければ再提示しない）。submitも同様にenvelope全体のhashを持つ
-    "host_action": obj(
-        {
-            "action_id": opaque(),
-            "action_kind": enum_field(HOST_ACTION_KINDS),
-            "nonce": opaque(),
-            "expected_head_sha": sha(),
-            "result_path": text(),
-            # 発行した`HOST_ACTION` envelopeの実体（run directory相対）とcanonical hash
-            "envelope_path": text(),
-            "envelope_hash": opaque(),
-            "issued_at": _optional_text(),
-            # 受理済みsubmitの記録。同一内容の再送を冪等に扱い、内容の異なる再送を止める
-            # （判定は`submit_hash`。`outcome` / `result_kind`はeventの組み立てに使う）
-            "submit": obj(
-                {
-                    "outcome": enum_field(SUBMIT_OUTCOMES),
-                    "submit_hash": opaque(),
-                    "result_hash": opaque(),
-                    "result_kind": enum_field(_RECORD_KIND_VALUES, required=False),
-                    "error_category": enum_field(SUBMIT_ERROR_CATEGORIES, required=False),
-                    "accepted_at": _optional_text(),
-                },
-                required=False,
-            ),
-        },
-        required=False,
-    ),
     # 11. 最後に成功したGitHub mutation、idempotency marker、read-after-write確認結果
     "mutation": obj(
         {
@@ -369,19 +415,49 @@ _SECTIONS: dict[str, Field] = {
     ),
 }
 
+def _envelope_fields(host_action: Field) -> dict[str, Field]:
+    return {
+        # 必須の外枠: 1. run ID、repository、Issue / PR番号
+        "schema_version": schema_version_field(),
+        "run_id": opaque(),
+        "repository": text(),
+        "number": integer(),
+        **_SECTIONS,
+        "host_action": host_action,
+    }
+
+
+_V1_PENDING_KEYS: tuple[str, ...] = tuple(_pending_action_fields())
+
+
+def _checkpoint_v1_to_v2(payload: dict[str, object]) -> dict[str, object]:
+    """`host_action`のv1形をv2形へ写す（損失なし。ADR-0004 rule 6 / ADR-0015）。
+
+    section直下の未完了actionを`pending`へ移し、単一の`submit`を1要素の`receipts`へ
+    入れる。receiptが要る`action_id` / `nonce`は**同じsection内**の値で、捏造しない。
+    `host_action`を持たないcheckpointは変換対象が無い（大多数はこちら）。
+    """
+    section = payload.get("host_action")
+    if not isinstance(section, dict):
+        return payload
+    migrated = dict(payload)
+    pending = {key: section[key] for key in _V1_PENDING_KEYS if key in section}
+    converted: dict[str, object] = {"pending": pending}
+    submit = section.get("submit")
+    if isinstance(submit, dict):
+        converted["receipts"] = [
+            {**submit, "action_id": section["action_id"], "nonce": section["nonce"]}
+        ]
+    migrated["host_action"] = converted
+    return migrated
+
+
 CHECKPOINT = SchemaDefinition(
     kind=SchemaKind.CHECKPOINT,
     max_input_bytes=CHECKPOINT_MAX_INPUT_BYTES,
     versions={
-        1: VersionSpec(
-            fields={
-                # 必須の外枠: 1. run ID、repository、Issue / PR番号
-                "schema_version": schema_version_field(),
-                "run_id": opaque(),
-                "repository": text(),
-                "number": integer(),
-                **_SECTIONS,
-            },
-        )
+        1: VersionSpec(fields=_envelope_fields(_host_action_v1())),
+        2: VersionSpec(fields=_envelope_fields(_host_action_v2())),
     },
+    migrations={1: _checkpoint_v1_to_v2},
 )

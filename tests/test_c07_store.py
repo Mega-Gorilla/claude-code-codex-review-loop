@@ -42,7 +42,7 @@ class TestSaveAndLoad:
         save_checkpoint(path, payload)
         result = load_checkpoint(path)
         assert isinstance(result, CheckpointLoaded)
-        assert result.payload == payload and result.version == 1
+        assert result.payload == payload and result.version == 2
 
     def test_saved_file_is_private(self, tmp_path: Path) -> None:
         path = _path(tmp_path)
@@ -124,8 +124,11 @@ class TestLoadResults:
         save_checkpoint(path, checkpoint_payload())
         definition = store_module.CHECKPOINT
         spec = definition.versions[1]
-        # v2を宣言しつつmigrationを登録しない定義へ差し替える（chainが現行へ到達しない）
-        future = dataclasses.replace(definition, versions={1: spec, 2: spec})
+        # 現行の次のversionを宣言しつつmigrationを登録しない定義へ差し替える
+        # （chainが現行へ到達しない）
+        future = dataclasses.replace(
+            definition, versions={**definition.versions, definition.current_version + 1: spec}
+        )
         monkeypatch.setattr(store_module, "CHECKPOINT", future)
         result = load_checkpoint(path)
         assert isinstance(result, CheckpointMigrationUnavailable)

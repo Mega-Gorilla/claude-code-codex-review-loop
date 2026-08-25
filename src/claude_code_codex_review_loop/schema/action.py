@@ -201,6 +201,29 @@ def _submit_fields(kinds: tuple[str, ...], *, typed_result: bool) -> dict[str, F
     }
 
 
+# 失敗詳細fileの上限。診断に足りる長さを持ちつつ、result fileのsize検証と両立させる
+MAX_FAILURE_DETAIL_CHARS: Final = 16_384
+
+# `FAILED` submitが指すresult file。`result_hash`は`COMPLETED`と同じく必須で、その中身が
+# 本schemaである（ADR-0015）。空の失敗を許すとsubmit hashだけが残り診断できない。
+# 本fileはrun directory内のartifactなので、C-04のredactionが適用される前提で書く
+HOST_FAILURE = SchemaDefinition(
+    kind=SchemaKind.HOST_FAILURE,
+    versions={
+        1: VersionSpec(
+            fields={
+                "schema_version": schema_version_field(),
+                "action_kind": enum_field(HOST_ACTION_KINDS),
+                "error_category": enum_field(SUBMIT_ERROR_CATEGORIES),
+                "summary": text(),
+                "detail": text(required=False, max_len=MAX_FAILURE_DETAIL_CHARS),
+                "occurred_at": text(required=False),
+            }
+        )
+    },
+)
+
+
 SUBMIT = SchemaDefinition(
     kind=SchemaKind.SUBMIT,
     versions={

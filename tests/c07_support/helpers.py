@@ -37,7 +37,8 @@ def state_paths(tmp_path: Path, *, name: str = "state") -> StatePaths:
 def checkpoint_payload(**overrides: object) -> dict[str, object]:
     """schema検証を通る最小のcheckpoint payload。"""
     payload: dict[str, object] = {
-        "schema_version": 1,
+        # producerは常に現行versionで書く（旧versionはmigration testが直接組み立てる）
+        "schema_version": 2,
         "run_id": RUN,
         "repository": REPOSITORY,
         "number": NUMBER,

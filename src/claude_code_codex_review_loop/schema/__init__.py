@@ -6,7 +6,7 @@ agent入出力とcheckpoint envelopeのschema・validation・versioning・migrat
 migration policyはADR-0004に従う。
 """
 
-from .action import HOST_ACTION, HOST_ACTION_KINDS, SUBMIT
+from .action import HOST_ACTION, HOST_ACTION_KINDS, HOST_FAILURE, SUBMIT
 from .decision import (
     DECISION_BRIEF,
     DECISION_RECORD,
@@ -83,6 +83,7 @@ _DEFINITIONS: tuple[SchemaDefinition, ...] = (
     GATE_CHANGES,
     HOST_ACTION,
     SUBMIT,
+    HOST_FAILURE,
     PERMISSION_BLOCK,
     CI_TIMEOUT,
     CI_CODE_FAILURE,
