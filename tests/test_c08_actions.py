@@ -19,6 +19,7 @@ from claude_code_codex_review_loop.domain.commands import HostAction, RequestHos
 from claude_code_codex_review_loop.domain.values import AWAITING_HOME, Awaiting, RecordKind
 from claude_code_codex_review_loop.schema import REGISTRY
 from claude_code_codex_review_loop.schema.action import HOST_ACTION_KINDS, HOST_ACTION_PAYLOADS
+from claude_code_codex_review_loop.schema.projection import PROJECTION_SPECS
 from claude_code_codex_review_loop.workflow import (
     ACTION_SPECS,
     RESULT_VARIANTS,
@@ -152,6 +153,44 @@ class TestResultAndEvent:
         from claude_code_codex_review_loop.domain.values import INTERNAL_RECORD_KINDS
 
         assert set(RESULT_VARIANTS) <= INTERNAL_RECORD_KINDS
+
+
+class TestEvidenceSelection:
+    """`verified_records`は対象headの全recordではなく、actionごとの根拠を選ぶ（DOD-02）。"""
+
+    @pytest.mark.parametrize("spec", list(ACTION_SPECS.values()), ids=lambda spec: spec.kind)
+    def test_evidence_kinds_are_declared(self, spec: ActionSpec) -> None:
+        assert spec.evidence_kinds
+
+    @pytest.mark.parametrize("spec", list(ACTION_SPECS.values()), ids=lambda spec: spec.kind)
+    def test_evidence_kinds_are_unique(self, spec: ActionSpec) -> None:
+        assert len(set(spec.evidence_kinds)) == len(spec.evidence_kinds)
+
+    def test_evidence_is_not_the_action_result(self) -> None:
+        """根拠はそのactionの入力であって、そのactionが作る結果ではない。"""
+        for spec in ACTION_SPECS.values():
+            if spec.action is not HostAction.REVISE_DECISION_REQUEST:
+                assert not set(spec.evidence_kinds) & set(spec.result_kinds), spec.kind
+
+    def test_revise_takes_the_previous_request_as_evidence(self) -> None:
+        """再提出だけは、直前の同種recordを根拠にする（差し戻し対象そのもの）。"""
+        spec = spec_for(HostAction.REVISE_DECISION_REQUEST)
+        assert RecordKind.DECISION_REQUEST in spec.evidence_kinds
+
+
+class TestResultHead:
+    @pytest.mark.parametrize(
+        "variant", list(RESULT_VARIANTS.values()), ids=lambda variant: variant.record_kind.value
+    )
+    def test_every_result_declares_a_head_source(self, variant: ResultVariant) -> None:
+        """結果recordの対象headはpayloadから決まる（engineが既定値で埋めない）。"""
+        assert PROJECTION_SPECS[variant.record_kind].head_source is not None
+
+    @pytest.mark.parametrize(
+        "variant", list(RESULT_VARIANTS.values()), ids=lambda variant: variant.record_kind.value
+    )
+    def test_result_definition_is_the_record_schema(self, variant: ResultVariant) -> None:
+        assert variant.result_definition is REGISTRY[variant.result_schema]
 
 
 class TestVariantLookup:

@@ -256,6 +256,13 @@ REPRESENTATIVE: dict[SchemaKind, dict[str, object]] = {
         "outcome": "COMPLETED",
         "result_kind": "FIX_RESULT",
     },
+    SchemaKind.HOST_FAILURE: {
+        "schema_version": 1,
+        "action_kind": "APPLY_FINDINGS",
+        "error_category": "TRANSIENT",
+        "summary": "gh apiが一時的に失敗した",
+        "detail": "exit 1 / status unknown",
+    },
     SchemaKind.PERMISSION_BLOCK: {
         "schema_version": 1,
         "permission_id": "perm-1",
