@@ -166,3 +166,75 @@ class TestInstanceBoundary:
         assert set(stored) == {"pending"}
         outcome = submit(raw(_respond(env, again, RecordKind.MERGE_APPROVAL)), **env.submit_kwargs())
         assert isinstance(outcome, UserInputAccepted)
+
+
+class TestDecisionAnswer:
+    """`USER_DECISION`はkindだけでは正規化intentが決まらない（ADR-0018 決定7）。
+
+    同じdecision instanceへの`[1]`と`[2]`は**別のintent**である。kindだけのkeyだと
+    両者が同一intentへ潰れ、2経路が別回答を主張しても競合にならない。
+    """
+
+    def _decision(self, env, issued: AwaitUser, answer: str) -> dict[str, object]:
+        payload = user_record_payload(RecordKind.USER_DECISION)
+        payload["answer"] = answer
+        digest = write_result(env.run_dir, issued.request.result_path, payload)
+        return user_submit_payload(
+            request_id=issued.request.request_id,
+            nonce=issued.request.nonce,
+            result_hash=digest,
+            awaiting=env.awaiting,
+            result_kind=RecordKind.USER_DECISION.value,
+        )
+
+    def _consume(self, env, issued: AwaitUser, answer: str) -> None:
+        key = intent_key(
+            run_id=RUN,
+            awaiting=issued.request.awaiting,
+            since_seq=issued.request.since_seq,
+            head_sha=issued.request.expected_head_sha,
+            kind=RecordKind.USER_DECISION,
+            intent_value=answer,
+        )
+        save_checkpoint(
+            checkpoint_path(env.paths, RUN),
+            with_consumed_intent(
+                _payload(env),
+                ConsumedIntent(intent_key=key, binding=GITHUB_BINDING, route="github_comment"),
+            ),
+        )
+
+    def _env(self, tmp_path):
+        return user_env(
+            tmp_path, awaiting=Awaiting.USER_INPUT_DECISION, seeded=(RecordKind.DECISION_BRIEF,)
+        )
+
+    def test_a_different_answer_conflicts(self, tmp_path) -> None:
+        env = self._env(tmp_path)
+        issued = _issued(env)
+        self._consume(env, issued, "[1]で進めてください")
+        outcome = submit(
+            raw(self._decision(env, issued, "[2]で進めてください")), **env.submit_kwargs()
+        )
+        assert isinstance(outcome, EngineStopped) and outcome.code == "user_intent_conflict"
+
+    def test_the_same_answer_is_idempotent(self, tmp_path) -> None:
+        """同一回答の再送は冪等のまま（すべてを競合にしない）。"""
+        env = self._env(tmp_path)
+        issued = _issued(env)
+        self._consume(env, issued, "[1]で進めてください")
+        outcome = submit(
+            raw(self._decision(env, issued, "[1]で進めてください")), **env.submit_kwargs()
+        )
+        assert isinstance(outcome, UserIntentAlreadyRecorded)
+        assert outcome.consumed.binding == GITHUB_BINDING
+
+    def test_whitespace_does_not_change_the_intent(self, tmp_path) -> None:
+        """改行と前後空白だけを揃える（表記の揺れで別intentにしない）。"""
+        env = self._env(tmp_path)
+        issued = _issued(env)
+        self._consume(env, issued, "[1]で進めてください")
+        outcome = submit(
+            raw(self._decision(env, issued, "  [1]で進めてください  ")), **env.submit_kwargs()
+        )
+        assert isinstance(outcome, UserIntentAlreadyRecorded)

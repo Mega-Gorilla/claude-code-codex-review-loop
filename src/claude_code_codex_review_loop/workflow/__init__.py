@@ -17,6 +17,7 @@ entry pointで受ける。
 
 from .actions import (
     ACTION_SPECS,
+    INTENT_VALUE_FIELDS,
     RESULT_VARIANTS,
     USER_REQUEST_SPECS,
     ActionRegistryError,
@@ -24,7 +25,9 @@ from .actions import (
     ResultVariant,
     UserRequestSpec,
     build_event,
+    intent_digest,
     intent_key,
+    intent_value_of,
     spec_for,
     spec_for_awaiting,
     spec_for_kind,
@@ -113,6 +116,7 @@ from .user_input import (
 
 __all__ = [
     "ACTION_SPECS",
+    "INTENT_VALUE_FIELDS",
     "ActionContext",
     "ActionPayloadPort",
     "ActionRegistryError",
@@ -165,7 +169,9 @@ __all__ = [
     "advance",
     "build_event",
     "find_receipt",
+    "intent_digest",
     "intent_key",
+    "intent_value_of",
     "issue_transaction",
     "issue_user_request",
     "load_run",

@@ -42,7 +42,7 @@ from ..schema.registry import validate_object
 from ..schema.user_input import HOST_TRANSCRIPT_ROUTE, PERMISSION_RESUME, USER_REQUEST
 from ..state import StatePaths, checkpoint_path, save_checkpoint
 from ..transport.render import prepare_user_body
-from .actions import UserRequestSpec, intent_key, user_spec_for
+from .actions import UserRequestSpec, intent_key, intent_value_of, user_spec_for
 from .checkpoint_view import (
     ConsumedIntent,
     PendingUserRequest,
@@ -286,14 +286,20 @@ def _dedup(
     *,
     run_id: str,
     kind: RecordKind,
+    payload: Mapping[str, object],
 ) -> UserIntentAlreadyRecorded | EngineStopped | str:
-    """2経路の重複防止（ADR-0018 決定6 / 7）。通れば当該intentのkeyを返す。"""
+    """2経路の重複防止（ADR-0018 決定7 / 8）。通れば当該intentのkeyを返す。
+
+    `payload`は**検証済みのrecord payload**である。`USER_DECISION`のようにkindだけでは
+    正規化intentが決まらない種別があるため、keyを作る前に結果を読み終えている必要がある。
+    """
     key = intent_key(
         run_id=run_id,
         awaiting=request.awaiting,
         since_seq=request.since_seq,
         head_sha=request.expected_head_sha,
         kind=kind,
+        intent_value=intent_value_of(kind, payload),
     )
     if consumed is None:
         return key
@@ -312,7 +318,7 @@ def _record_path(
     spec: UserRequestSpec,
     *,
     kind: RecordKind,
-    key: str,
+    consumed: ConsumedIntent | None,
     result_hash: str,
     paths: StatePaths,
     run_id: str,
@@ -343,6 +349,14 @@ def _record_path(
         # 転記経路のrecordがGitHub直接comment由来を名乗ると、C-06 / C-13が受理主体を
         # 取り違える（D-031の照合対象が変わる）。経路の詐称を構造的に止める
         return EngineStopped("input_route_mismatch", "転記recordのinput_routeが転記経路でない")
+    # **結果を読み終えてからkeyを作る**。`USER_DECISION`の正規化intentは回答値であり、
+    # kindだけで作ったkeyでは同じdecisionへの別回答が同一intentへ潰れる
+    deduped = _dedup(request, consumed, run_id=run_id, kind=kind, payload=result.payload)
+    if not isinstance(deduped, str):
+        return deduped
+    stale = _still_awaited(run, request)
+    if stale is not None:
+        return stale
     prepared = prepare_user_body(
         body_port.body_for(kind, result.payload), speaker=speaker, route=HOST_TRANSCRIPT_ROUTE
     )
@@ -364,7 +378,7 @@ def _record_path(
         nonce=request.nonce,
         submit_hash=submit_hash,
         result_hash=result_hash,
-        intent_key=key,
+        intent_key=deduped,
         result_kind=kind,
         accepted_at=accepted_at,
     )
@@ -372,7 +386,7 @@ def _record_path(
     payload["transaction"] = transaction_section(issued)
     payload = with_consumed_intent(
         with_user_receipt(without_user_request(payload), receipt),
-        ConsumedIntent(intent_key=key, binding=issued.binding, route=HOST_TRANSCRIPT_ROUTE),
+        ConsumedIntent(intent_key=deduped, binding=issued.binding, route=HOST_TRANSCRIPT_ROUTE),
     )
     save_checkpoint(checkpoint_path(paths, run_id), payload)
     return UserInputAccepted(
@@ -478,9 +492,12 @@ def accept_user_submit(
 ) -> UserInputOutcome:
     """user-input submitを一度だけconsumeする（`HOST_ACTION` submitと同じ規則）。
 
-    順序は`binding echo -> 冪等判定 -> 重複防止key -> C-01がまだ待っているか -> 結果検証`。
-    key照合を先に置くのは、別経路で決定済みのときに「requestが古い」ではなく
-    **どのbindingで確定したか**を返すためである。
+    順序は`binding echo -> 冪等判定 -> 結果検証 -> 重複防止key -> C-01がまだ待っているか`。
+
+    - 結果検証をkeyより先に置くのは、`USER_DECISION`のように**正規化intentが結果の中にある**
+      種別があるためである（ADR-0018 決定7）
+    - key照合を`C-01がまだ待っているか`より先に置くのは、別経路で決定済みのときに
+      「requestが古い」ではなく**どのbindingで確定したか**を返すためである（決定9）
     """
     section = read_user_section(run.payload)
     if isinstance(section, SectionUnavailable):
@@ -503,26 +520,16 @@ def accept_user_submit(
     spec = user_spec_for(request.awaiting)
     if spec is None:  # pragma: no cover - awaitingはschemaのenumで3値に限定されている
         return EngineStopped("not_user_input", f"{request.awaiting.value}はユーザー入力待ちではない")
-    kind_value = envelope.get("result_kind")
     # `result_kind`の有無がrecordを作る応答かを決める（不在はpermission resume。schemaの
     # cross-field ruleがその組み合わせを`USER_INPUT_PERMISSION`へ限定している）
-    record: tuple[RecordKind, str] | None = None
+    kind_value = envelope.get("result_kind")
     if isinstance(kind_value, str):
-        deduped = _dedup(request, section.consumed, run_id=run_id, kind=RecordKind(kind_value))
-        if not isinstance(deduped, str):
-            return deduped
-        record = (RecordKind(kind_value), deduped)
-    stale = _still_awaited(run, request)
-    if stale is not None:
-        return stale
-    if record is not None:
-        kind, key = record
         return _record_path(
             run,
             request,
             spec,
-            kind=kind,
-            key=key,
+            kind=RecordKind(kind_value),
+            consumed=section.consumed,
             result_hash=str(envelope["result_hash"]),
             paths=paths,
             run_id=run_id,
@@ -533,6 +540,9 @@ def accept_user_submit(
             speaker=speaker,
             submit_hash=submit_hash,
         )
+    stale = _still_awaited(run, request)
+    if stale is not None:
+        return stale
     return _resume_path(
         run,
         request,

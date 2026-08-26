@@ -23,7 +23,7 @@ from claude_code_codex_review_loop.domain.values import (
     RecordEvidence,
     RecordKind,
 )
-from claude_code_codex_review_loop.schema import REGISTRY
+from claude_code_codex_review_loop.schema import REGISTRY, SchemaKind
 from claude_code_codex_review_loop.schema.projection import PROJECTION_SPECS
 from claude_code_codex_review_loop.schema.user_input import (
     INPUT_ROUTES,
@@ -33,11 +33,15 @@ from claude_code_codex_review_loop.schema.user_input import (
     USER_SUBMIT,
 )
 from claude_code_codex_review_loop.workflow import (
+    INTENT_VALUE_FIELDS,
     RESULT_VARIANTS,
     USER_REQUEST_SPECS,
+    ActionRegistryError,
     UserRequestSpec,
     build_event,
+    intent_digest,
     intent_key,
+    intent_value_of,
     user_spec_for,
 )
 
@@ -216,3 +220,69 @@ class TestInputRoutes:
     def test_the_request_and_resume_schemas_are_registered(self) -> None:
         for definition in (USER_REQUEST, USER_SUBMIT, PERMISSION_RESUME):
             assert REGISTRY[definition.kind] is definition
+
+
+class TestIntentValue:
+    """kindだけでは正規化intentが決まらない種別の契約（ADR-0018 決定7）。"""
+
+    def test_only_free_text_kinds_declare_a_value(self) -> None:
+        """merge gateの4 intentはkindと1対1なので値を宣言しない。"""
+        assert set(INTENT_VALUE_FIELDS) == {RecordKind.USER_DECISION}
+
+    @pytest.mark.parametrize(
+        ("kind", "field"), sorted(INTENT_VALUE_FIELDS.items(), key=lambda item: item[0].value)
+    )
+    def test_the_declared_field_is_a_required_text_field(
+        self, kind: RecordKind, field: str
+    ) -> None:
+        """宣言するfieldはrecord schemaの必須textでなければならない（両経路が必ず持てる）。"""
+        definition = REGISTRY[SchemaKind(kind.value)]
+        spec = definition.versions[definition.current_version]
+        declared = spec.fields[field]
+        assert declared.types == (str,) and declared.required
+
+    def test_the_value_comes_from_the_validated_payload(self) -> None:
+        payload = {"decision_id": "D-1", "answer": "[1]で進める", "input_route": "host_transcript"}
+        assert intent_value_of(RecordKind.USER_DECISION, payload) == "[1]で進める"
+        assert intent_value_of(RecordKind.MERGE_APPROVAL, payload) is None
+
+    def test_different_values_produce_different_keys(self) -> None:
+        first = intent_key(
+            run_id="run-1",
+            awaiting=Awaiting.USER_INPUT_DECISION,
+            since_seq=1,
+            head_sha=HEAD,
+            kind=RecordKind.USER_DECISION,
+            intent_value="[1]",
+        )
+        second = intent_key(
+            run_id="run-1",
+            awaiting=Awaiting.USER_INPUT_DECISION,
+            since_seq=1,
+            head_sha=HEAD,
+            kind=RecordKind.USER_DECISION,
+            intent_value="[2]",
+        )
+        assert first != second
+
+    def test_only_whitespace_is_normalized(self) -> None:
+        """表記の揺れで別intentにしないが、**意味の解釈はしない**。"""
+        assert intent_digest("答え") == intent_digest("  答え" + chr(13) + chr(10) + "  ")
+        assert intent_digest("答え") != intent_digest("答 え")
+
+    @pytest.mark.parametrize(
+        ("kind", "value"),
+        [(RecordKind.USER_DECISION, None), (RecordKind.MERGE_APPROVAL, "APPROVE")],
+        ids=["missing", "unexpected"],
+    )
+    def test_declaration_and_argument_must_agree(self, kind: RecordKind, value: str | None) -> None:
+        """片方だけの経路が別のkeyを作らないよう、宣言との食い違いを受理しない。"""
+        with pytest.raises(ActionRegistryError):
+            intent_key(
+                run_id="run-1",
+                awaiting=Awaiting.USER_INPUT_GATE,
+                since_seq=1,
+                head_sha=HEAD,
+                kind=kind,
+                intent_value=value,
+            )

@@ -31,19 +31,22 @@ Phase 1計画はuser-input recordを2経路と定める。GitHub直接comment（
 
 ### 重複防止key
 
-7. **key = `ui:{run_id, awaiting, since_seq, head_sha, kind}`のcanonical JSON**。`request_id`を唯一の相関keyにはできない: GitHub直接comment（経路2）は`AWAIT_USER`のrequest IDを持たないためである。両経路がcheckpointから導出できる値だけで構成する
+7. **key = `ui:{run_id, awaiting, since_seq, head_sha, kind, intent}`のcanonical JSON**。`request_id`を唯一の相関keyにはできない: GitHub直接comment（経路2）は`AWAIT_USER`のrequest IDを持たないためである。両経路がcheckpointから導出できる値だけで構成する
     - **awaiting instance = `since_seq`**（request発行時点のchain最大seq）。同じstateとheadへ再び戻ってきた次のinstanceと、この値で区別される
-    - **正規化intent = record kind**。merge gateではintentとkindが1対1で（`QUESTION`->`GATE_QUESTION` / `REQUEST_CHANGES`->`GATE_CHANGES` / `APPROVE_MERGE`->`MERGE_APPROVAL` / `CANCEL`->`USER_CANCEL`）、C-01は1 instanceにつきuser-input recordを1件しか受理しない（PRODUCED時にawaitingを消費する）
+    - **正規化intentはrecord kind**である。merge gateではintentとkindが1対1で（`QUESTION`->`GATE_QUESTION` / `REQUEST_CHANGES`->`GATE_CHANGES` / `APPROVE_MERGE`->`MERGE_APPROVAL` / `CANCEL`->`USER_CANCEL`）、C-01は1 instanceにつきuser-input recordを1件しか受理しない
+    - ただし**kindだけで正規化intentが決まらない種別がある**。`USER_DECISION`は同じkindの中に回答値を持ち、同じdecision instanceへの「[1]で進める」と「[2]で進める」はkindが同一である。kindだけのkeyでは2経路が別の回答を主張しても同一intentへ潰れ、Issue #13が求める「異なるintentはfail closed」が成立しない。そこで`INTENT_VALUE_FIELDS`が**値を持つfieldをkindごとに宣言**し、keyへその値のdigestを含める。宣言と実引数が食い違う呼び出しは受理しない（片方の経路だけが別のkeyを作るのを防ぐ）
+    - digestが揃えるのは**改行と前後の空白だけ**である。表記の揺れで別intentにしないための正規化で、言い換えが同じ回答かどうかの判定はC-11 / C-13の領域である。したがって**cross-routeで文言が異なる自由記述は競合として停止する**。これは意図した挙動で、2経路がユーザーの決定について食い違っている状態を人へ差し戻す
+    - 値はkeyを作る**前に結果を読み終えて**取り出す。record payloadは当該kindのschemaを通ったものに限り、宣言するfieldは必須textでなければならない（contract test）
     - 区切り文字を含むopaque値でも衝突しないよう、sorted keysのcompact JSONで導出する（`identity.allowlist`の受理binding導出と同じ方式）
 8. **同一keyが消費済みなら冪等**（`UserIntentAlreadyRecorded`）、**別keyなら停止**（`user_intent_conflict`）。後者は2経路がユーザーの意思について食い違っている状態で、どちらが正しいかを推測しない（「曖昧な入力を承認として解釈しない」と同じ原則）
-9. key照合は**binding echoの直後、C-01の待機確認より前**に置く。別経路で決定済みのときに「requestが古い」とだけ返すと、runが壊れたのか決定が済んだのかを呼び出し側が区別できない。**どのbindingで、どの経路で確定したか**を返す
-10. **本ADRが保証するのは「消費済みkeyが台帳にあれば重複を作らない」ところまで**である。経路2のcommentをGitHubから見つけて受理する（allowlist設定・`DecisionContext`の構成・consumed comment IDの管理）のはC-12 / C-13の責務で、C-08はkeyの導出・台帳の読み書き・engine側の判定だけを提供する。C-13は`accept_user_decision`の受理時に同じkeyを`with_consumed_intent`で書き、**未応答requestは残す**（消すと、遅れて届く転記submitへ確定bindingを返せない）
+9. key照合は**結果の検証を終えた直後、C-01の待機確認より前**に置く。結果より後なのは正規化intentが結果の中にある種別があるためで、待機確認より前なのは、別経路で決定済みのときに「requestが古い」とだけ返すとrunが壊れたのか決定が済んだのかを呼び出し側が区別できないためである。**どのbindingで、どの経路で確定したか**を返す
+10. **本ADRが保証するのは「消費済みkeyが台帳にあれば重複を作らない」ところまで**である。経路2のcommentをGitHubから見つけて受理する（allowlist設定・`DecisionContext`の構成・consumed comment IDの管理）のはC-12 / C-13の責務で、C-08はkeyの導出・台帳の読み書き・engine側の判定だけを提供する。C-13は`accept_user_decision`の受理時に同じkeyを`with_consumed_intent`で書き、**未応答requestは残す**（消すと、遅れて届く転記submitへ確定bindingを返せない）。残したrequestが次のinstanceへ漏れないことは決定20〜22が担保する
 
 ### 順序と検証
 
-11. 順序は `binding echo -> 冪等判定 -> 重複防止key -> C-01がまだ待っているか -> result受理 -> head照合 -> 入力経路照合 -> chain gate -> render -> transaction -> RecordProduced`。以降の投稿・確認・検証は**PR-2bの`persist`をそのまま通る**（record kindで分岐しない汎用境界として作ったため、転記専用の実装を持たない）
+11. 順序は `binding echo -> 冪等判定 -> result受理 -> head照合 -> 入力経路照合 -> 重複防止key -> C-01がまだ待っているか -> chain gate -> render -> transaction -> RecordProduced`。以降の投稿・確認・検証は**PR-2bの`persist`をそのまま通る**（record kindで分岐しない汎用境界として作ったため、転記専用の実装を持たない）
 12. **user-input recordの対象headはrequestのheadと一致しなければならない**。`FIX_RESULT`のようにpush後の新しいheadを対象にするrecordは無いため、`target_head_sha`も`approved_head_sha`も例外なくrequestが束ねたheadを要求する。ここを緩めると、承認を別headのrecordとして作らせる余地ができる（head binding。D-031）
-13. **壊れたchainの上でユーザーへ判断を求めない**。`advance`はuser requestを払い出す前にchainを検証し、violationがあれば停止する。提示する根拠recordの正当性が確かめられていない状態では、承認をそこへbindできない
+13. **壊れたchainの上でユーザーへ判断を求めない**。`advance`はchainを**pending判定より先に**検証し、violationがあれば停止する。requestを発行した後にchainが壊れることがあり、pendingがあるからと素通しすると壊れたchain上での**再提示**が残る。提示する根拠recordの正当性が確かめられていない状態では、承認をそこへbindできない
 14. **転記本文は入力経路を明示する**。`prepare_public_body`はagent発言用でmodelの明示を要求するが、転記recordの内容を書いたのはmodelではなくユーザーである。`prepare_user_body`を追加し、同じ`改行正規化 -> sanitize -> redact`を通したうえでheaderに入力経路を書く（TE「Controllerが入力経路を明記して転記したPR comment」）
 15. **採番から`RecordProduced`までをhost actionと共有する**（`produce_record`）。host actionの結果とユーザー入力の転記は本文の作り方と受理の記録だけが違い、chain gate・transaction発行・C-01の受理判定は同一である。分けて書くと同じ判断が2箇所へ散る
 
@@ -53,6 +56,12 @@ Phase 1計画はuser-input recordを2経路と定める。GitHub直接comment（
 17. **`receipt`と`consumed`は単数**とする。上限を数字で決めたのではなく構造的な帰結である: engineはユーザー入力へretry attemptを発行せず（人間の入力にbudgetを課さない）、C-01は1 awaiting instanceにつきuser-input recordを1件しか受理しない
 18. **新しいrequestはsection全体を入れ替える**。重複防止keyは`since_seq`を含むためinstanceを跨いで一致せず、前instanceのreceiptとconsumedを残しても判定に使えないまま伸びるだけである
 19. **sectionは1回でまとめて読む**（`read_user_section`）。entryごとに呼び出し側で直和を捌くと、同じ「解釈できない」を3箇所で分岐することになる。読み出しの失敗は1点へ集約する
+
+### instance照合
+
+20. **未応答requestを再提示するのは、それが現在のinstanceを指す場合だけ**である。`awaiting`（C-01が別の入力を待っていれば答えられない）・`head_sha`（headが動けばrecordのbind先が変わる）・`since_seq`（awaiting instanceの識別子）の3つがすべて一致することを要求する
+21. 一致しないrequestは**停止理由ではなく、現在のinstanceのrequestを新規発行する契機**である。sectionごと入れ替わるため、前instanceのreceiptと消費済みintentも残らない。停止にすると、決定10で未応答requestを残した後にstateが正当に進んだだけのrunが、手動介入なしには進めなくなる
+22. この照合が無いと決定10が具体的な欠陥になる: 経路2が受理して未応答requestを残し、その後stateとchainが進んで同種awaitingへ再到達すると、**前instanceの消費済みintentが次のユーザー入力を重複と判定して飲み込む**（同じ`since_seq`でkeyを作るため）
 
 ## Consequences
 

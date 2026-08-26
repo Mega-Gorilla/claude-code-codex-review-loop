@@ -55,6 +55,7 @@ from ..transport.render import prepare_public_body
 from .actions import ActionSpec, spec_for_awaiting, spec_for_kind, user_spec_for
 from .checkpoint_view import (
     PendingAction,
+    PendingUserRequest,
     SectionUnavailable,
     SubmitReceipt,
     find_receipt,
@@ -366,6 +367,29 @@ def _reissue(loaded: RunContext, action: PendingAction) -> HostActionIssued | En
     )
 
 
+def _describes_current_instance(
+    request: PendingUserRequest, *, awaiting: Awaiting, head_sha: str, since_seq: int
+) -> bool:
+    """未応答requestが**今の待機**を指しているか（ADR-0018 決定12）。
+
+    3つとも一致しなければ再提示しない。
+
+    - `awaiting`: C-01が別の入力を待っていれば、そのrequestはもう答えられない
+    - `head_sha`: headが動けばrecordのbind先が変わる（head binding）
+    - `since_seq`: awaiting instanceの識別子。ここがずれたまま再提示すると、前instanceの
+      消費済みintentが**次の入力を重複と判定して飲み込む**（決定10で未応答requestを残す
+      契約のため、同種awaitingへ再到達したときに現れる）
+
+    一致しないrequestは停止理由ではなく、**現在のinstanceのrequestを新規発行する**契機で
+    ある。sectionごと入れ替わるので、前instanceのreceiptと消費済みintentも残らない。
+    """
+    return (
+        request.awaiting is awaiting
+        and request.expected_head_sha == head_sha
+        and request.since_seq == since_seq
+    )
+
+
 def _await_user(
     loaded: RunContext,
     awaiting: Awaiting,
@@ -380,25 +404,28 @@ def _await_user(
     id_source: Callable[[], str],
     issued_at: str,
 ) -> AdvanceOutcome:
-    """ユーザー入力待ちのrequestを返す（未応答があればそのまま再提示する）。"""
+    """ユーザー入力待ちのrequestを返す（**現在のinstanceの**未応答があれば再提示する）。
+
+    chain検証は再提示にも先立って行う。requestを発行した後にchainが壊れることがあり、
+    pendingがあるからと素通しすると、壊れたchainの上で判断を求めることになる
+    （ADR-0018 決定13）。
+    """
     spec = user_spec_for(awaiting)
     if spec is None:  # pragma: no cover - 呼び出し元が3値のawaitingでのみ入る
         return EngineStopped("not_user_input", f"{awaiting.value}はユーザー入力待ちではない")
-    section = read_user_section(loaded.payload)
-    if isinstance(section, SectionUnavailable):
-        return EngineStopped("user_request_unavailable", section.detail)
-    pending = section.pending
-    if pending is not None:
-        if pending.awaiting is not awaiting:
-            # C-01が別の入力を待っている状態で古いrequestを再提示すると、hostは終わった
-            # 待機へ答えてしまう。新しいrequestを黙って上書きもしない（fail closed）
-            return EngineStopped("user_request_stale", "保存済みrequestが現在の待機と一致しない")
-        return reissue_user_request(loaded, pending)
     chain = records_port.chain(run_id)
     if not chain.is_intact:
         # 壊れたchainの上でユーザーへ判断を求めない。提示する根拠recordの正当性が
         # 確かめられておらず、承認をそこへbindできない（integrityの解消が先）
         return EngineStopped("chain_violation", f"chainにviolationがある（{len(chain.violations)}件）")
+    section = read_user_section(loaded.payload)
+    if isinstance(section, SectionUnavailable):
+        return EngineStopped("user_request_unavailable", section.detail)
+    pending = section.pending
+    if pending is not None and _describes_current_instance(
+        pending, awaiting=awaiting, head_sha=head_sha, since_seq=chain.max_seq
+    ):
+        return reissue_user_request(loaded, pending)
     context = UserRequestContext(
         awaiting=awaiting, run_id=run_id, repository=repository, number=number, head_sha=head_sha
     )

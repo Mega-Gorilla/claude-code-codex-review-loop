@@ -45,13 +45,17 @@ from claude_code_codex_review_loop.state import (
 )
 from claude_code_codex_review_loop.workflow import (
     AwaitUser,
+    ConsumedIntent,
     EngineStopped,
     UserInputAccepted,
     UserInputReplayed,
     advance,
+    intent_key,
+    read_consumed_intent,
     read_user_receipt,
     read_user_request,
     submit,
+    with_consumed_intent,
 )
 
 GATE = Awaiting.USER_INPUT_GATE
@@ -109,6 +113,15 @@ def _respond(
 
 def _submit(env, envelope, **overrides):
     return submit(raw(envelope), **env.submit_kwargs(**overrides))
+
+
+def _save(env, payload: dict[str, object]) -> None:
+    save_checkpoint(checkpoint_path(env.paths, RUN), payload)
+
+
+def user_env_records(env, kinds) -> FakeRecordSource:
+    """chainが進んだ状態のrecords port（seq=len(kinds)まで伸びている）。"""
+    return FakeRecordSource(records=verified_chain(list(kinds)).records)
 
 
 def _restate(env, machine_state: MachineState) -> None:
@@ -205,15 +218,78 @@ class TestReissue:
             "request_mismatch",
             "request_invalid",
         }
+    def test_a_broken_chain_stops_before_reissuing(self, tmp_path) -> None:
+        """request発行**後**にchainが壊れた場合も、再提示せず停止する（決定13）。
 
-    def test_a_request_for_another_awaiting_stops(self, tmp_path) -> None:
-        """C-01が別の入力を待つ状態で古いrequestを再提示しない。"""
+        pendingがあるからと素通しすると、壊れたchainの上で判断を求めることになる。
+        """
         env = user_env(tmp_path)
         _issue(env)
-        _restate(env, user_machine_state(DECISION))
-        outcome = advance(**env.advance_kwargs())
-        assert isinstance(outcome, EngineStopped) and outcome.code == "user_request_stale"
+        violation = IntegrityEvidenceRef(
+            binding=OpaqueBinding("iv:gap:run-1:2"),
+            descriptor=OpaqueRef("gap"),
+            head=OpaqueRef(HEAD),
+        )
+        outcome = advance(
+            **env.advance_kwargs(
+                records_port=FakeRecordSource(records=env.records, violations=(violation,))
+            )
+        )
+        assert isinstance(outcome, EngineStopped) and outcome.code == "chain_violation"
 
+    def test_a_request_for_another_awaiting_is_replaced(self, tmp_path) -> None:
+        """C-01が別の入力を待っていれば、古いrequestを再提示せず新規発行する。"""
+        env = user_env(tmp_path, awaiting=GATE)
+        first = _issue(env)
+        _restate(env, user_machine_state(DECISION))
+        outcome = _issue(env, id_source=FakeIds("req2"), evidence_port=FakeEvidencePort(()))
+        assert outcome.reissued is False
+        assert outcome.awaiting is DECISION
+        assert outcome.request.request_id != first.request.request_id
+
+    def test_a_request_for_another_head_is_replaced(self, tmp_path) -> None:
+        """headが動けばrecordのbind先が変わるため、古いrequestは再提示しない。"""
+        env = user_env(tmp_path)
+        first = _issue(env)
+        outcome = _issue(
+            env, head_sha=NEW_HEAD, id_source=FakeIds("req2"), evidence_port=FakeEvidencePort(())
+        )
+        assert outcome.reissued is False
+        assert outcome.request.expected_head_sha == NEW_HEAD
+        assert outcome.request.request_id != first.request.request_id
+
+    def test_a_request_from_an_earlier_instance_is_replaced(self, tmp_path) -> None:
+        """chainが進んだ後の同種awaitingは別instanceであり、古いrequestを引き継がない。
+
+        経路2の受理は未応答requestを残す契約（決定10）のため、その後にchainとstateが進んで
+        同じawaitingへ再到達すると、instance照合が無ければ**前instanceの消費済みintentが
+        次の入力を重複と判定して飲み込む**。
+        """
+        env = user_env(tmp_path)
+        first = _issue(env)
+        consumed = ConsumedIntent(
+            intent_key=intent_key(
+                run_id=RUN,
+                awaiting=GATE,
+                since_seq=first.request.since_seq,
+                head_sha=HEAD,
+                kind=RecordKind.GATE_QUESTION,
+            ),
+            binding="ud:github",
+            route="github_comment",
+        )
+        _save(env, with_consumed_intent(_payload(env), consumed))
+        # 経路2の受理でstateが進み、hostの回答recordでchainが伸びてからgateへ戻る
+        advanced = user_env_records(env, (RecordKind.FINAL_REPORT, RecordKind.GATE_ANSWER))
+        outcome = _issue(
+            env,
+            records_port=advanced,
+            id_source=FakeIds("req2"),
+            evidence_port=FakeEvidencePort(()),
+        )
+        assert outcome.reissued is False
+        assert outcome.request.since_seq == 2
+        assert read_consumed_intent(_payload(env)) is None
 
 class TestBindingEcho:
     def test_accepts_a_matching_submit(self, tmp_path) -> None:
@@ -497,6 +573,15 @@ class TestPermissionResume:
         save_checkpoint(checkpoint_path(env.paths, RUN), payload)
         outcome = _submit(env, envelope)
         assert isinstance(outcome, EngineStopped) and outcome.code == "permission_unavailable"
+
+    def test_a_resume_after_the_wait_was_consumed_stops(self, tmp_path) -> None:
+        """別経路でstateが進んでいれば、record無しの応答も受理しない。"""
+        env = user_env(tmp_path, awaiting=PERMISSION)
+        issued = _issue(env, evidence_port=FakeEvidencePort(()))
+        envelope = _respond(env, issued, permission=True)
+        _restate(env, MachineState(state=State.RUNNING_REVIEW, awaiting=Awaiting.CODEX_CODE_REVIEW))
+        outcome = _submit(env, envelope)
+        assert isinstance(outcome, EngineStopped) and outcome.code == "request_superseded"
 
     def test_a_resume_result_hash_mismatch_stops(self, tmp_path) -> None:
         env = user_env(tmp_path, awaiting=PERMISSION)
