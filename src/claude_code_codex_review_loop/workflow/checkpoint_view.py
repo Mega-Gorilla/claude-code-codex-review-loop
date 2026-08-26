@@ -930,6 +930,7 @@ def with_consumed_intent(
 # ---------------------------------------------------------------------------
 
 _PROCESS_SECTION = "processes"
+_STOP_REQUEST_SECTION = "stop_request"
 
 
 def read_active_trees(
@@ -991,6 +992,70 @@ def _tree_entry(ref: TreeRef) -> dict[str, object]:
     if isinstance(ref, JobObjectRef):
         return {"kind": JOB_OBJECT_TREE, "pid": ref.pid, "job_name": ref.job_name}
     return {"kind": PROCESS_GROUP_TREE, "pid": ref.pid, "pgid": ref.pgid}
+
+
+@dataclass(frozen=True)
+class StopRequest:
+    """記録済みの緊急停止要求（ADR-0021）。
+
+    `evidence`は要求時に一度だけ導出した値で、resumeは**そのまま再生する**。再導出すると
+    値がぶれ、同じ要求が別のeventになる。
+    """
+
+    requested_at: str
+    evidence: OpaqueRef
+    source_state: State
+
+
+def read_stop_request(
+    payload: Mapping[str, object],
+) -> StopRequest | None | SectionUnavailable:
+    """緊急停止要求を読む（無ければNone）。
+
+    schemaは全fieldをoptionalにしている（sectionごとoptionalなため）ので、**必須検査は
+    ここで行う**。欠けたfieldを既定値で埋めると、停止意図の内容を推測することになる。
+    """
+    section = payload.get(_STOP_REQUEST_SECTION)
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        return SectionUnavailable(detail="stop_requestがobjectでない")
+    requested_at = section.get("requested_at")
+    evidence = section.get("evidence")
+    state = section.get("source_state")
+    if not isinstance(requested_at, str) or not requested_at:
+        return SectionUnavailable(detail="stop_request.requested_atが無い")
+    if not isinstance(evidence, str) or not evidence:
+        return SectionUnavailable(detail="stop_request.evidenceが無い")
+    if not isinstance(state, str):
+        return SectionUnavailable(detail="stop_request.source_stateが無い")
+    try:
+        source_state = State(state)
+    except ValueError:  # pragma: no cover - schemaのenum検証が値域を保証する
+        return SectionUnavailable(detail=f"stop_request.source_stateが未知のstate: {state}")
+    return StopRequest(
+        requested_at=requested_at, evidence=OpaqueRef(evidence), source_state=source_state
+    )
+
+
+def with_stop_request(
+    payload: Mapping[str, object], request: StopRequest | None
+) -> dict[str, object]:
+    """緊急停止要求を置き換える（Noneで消す）。
+
+    書き手は要求を受け取ったC-08で、`emergency_stop`は停止を完了させてから消す。
+    **停止より先に書く**のがこのsectionの要点である（ADR-0021 決定3）。
+    """
+    updated = dict(payload)
+    if request is None:
+        updated.pop(_STOP_REQUEST_SECTION, None)
+        return updated
+    updated[_STOP_REQUEST_SECTION] = {
+        "requested_at": request.requested_at,
+        "evidence": request.evidence.value,
+        "source_state": request.source_state.value,
+    }
+    return updated
 
 
 def with_active_trees(

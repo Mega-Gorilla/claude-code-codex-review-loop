@@ -24,6 +24,7 @@ from ..workflow import Blocked, EngineStopped, Terminal
 from .config import SessionConfig
 from .ports import PortSet
 from .session import HostWork, StepOutcome, StepResult, step, submit_result
+from .signals import StopSignal
 
 
 class HostPort(Protocol):
@@ -65,6 +66,7 @@ def drive(
     ports: PortSet,
     clock: DriveClock,
     max_rounds: int,
+    stop: StopSignal | None = None,
 ) -> DriveResult:
     """host作業が無くなるまで`step` -> `execute` -> `submit`を繰り返す。
 
@@ -83,13 +85,22 @@ def drive(
             ports=ports,
             id_source=clock.id_source,
             issued_at=clock.issued_at(),
+            stop=stop,
         )
         outcome = result.outcome
         if isinstance(outcome, (Terminal, Blocked, EngineStopped)):
             return DriveResult(outcome=outcome, rounds=rounds, submitted=tuple(submitted))
         rounds += 1
+        raw = host.execute(outcome)
+        if stop is not None and stop.requested:
+            # host作業は最も長い区間で、その最中のsignalは戻り直後が最初の安全点になる。
+            # 結果をsubmitせずに次のstepへ渡し、停止要求の記録と実行をそこで行う
+            return _stopped_round(
+                paths=paths, config=config, ports=ports, clock=clock, stop=stop,
+                rounds=rounds, submitted=tuple(submitted),
+            )
         accepted = submit_result(
-            host.execute(outcome),
+            raw,
             paths=paths,
             config=config,
             ports=ports,
@@ -103,3 +114,30 @@ def drive(
         rounds=rounds,
         submitted=tuple(submitted),
     )
+
+
+def _stopped_round(
+    *,
+    paths: StatePaths,
+    config: SessionConfig,
+    ports: PortSet,
+    clock: DriveClock,
+    stop: StopSignal,
+    rounds: int,
+    submitted: tuple[str, ...],
+) -> DriveResult:
+    """host作業中にsignalを受けた場合の締めくくり。
+
+    未submitの結果は捨てる。hostへ出したactionはcheckpointに未完了として残っており、
+    停止後にresumeすれば**同じactionが再提示される**（ADR-0014 決定22）。ここで結果だけを
+    先に受理すると、停止要求を挟んだ状態遷移がsignalの有無で変わる。
+    """
+    result = step(
+        paths=paths,
+        config=config,
+        ports=ports,
+        id_source=clock.id_source,
+        issued_at=clock.issued_at(),
+        stop=stop,
+    )
+    return DriveResult(outcome=result.outcome, rounds=rounds, submitted=submitted)

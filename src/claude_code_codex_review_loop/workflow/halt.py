@@ -31,6 +31,7 @@ durableに表現する方法（C-01のprocedure追加か、C-08側の停止要�
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ..domain import events as ev
@@ -53,6 +54,41 @@ from .checkpoint_view import (
 )
 from .ports import ProcessStopPort
 from .run_context import EngineStopped, RunContext, load_run
+
+
+@dataclass(frozen=True)
+class TreesStopped:
+    """台帳のtreeをすべて停止した。"""
+
+    results: tuple[StopResult, ...]
+
+
+@dataclass(frozen=True)
+class TreeStopFailed:
+    """1つ止められなかった。`remaining`は**まだ止まっていない**ref（先頭が失敗したref）。"""
+
+    detail: str
+    remaining: tuple[TreeRef, ...]
+
+
+def stop_trees(
+    refs: Sequence[TreeRef], *, stop_port: ProcessStopPort, grace_seconds: float
+) -> TreesStopped | TreeStopFailed:
+    """台帳のtreeを順に停止する（停止の共通機構）。
+
+    `HaltRun`の実行（`halt`）と緊急停止（`emergency`）が同じ機構を使う。**1つでも
+    止められなければそこで打ち切る**。止まっていないrefを呼び出し側が台帳へ残せるよう、
+    失敗位置以降を`remaining`で返す（`stop_tree_by_ref`は冪等なので再試行してよい）。
+    """
+    stopped: list[StopResult] = []
+    for index, ref in enumerate(refs):
+        try:
+            stopped.append(stop_port.stop(ref, grace_seconds))
+        except ProcessError as error:
+            return TreeStopFailed(
+                detail=f"process treeを停止できない: {error}", remaining=tuple(refs[index:])
+            )
+    return TreesStopped(results=tuple(stopped))
 
 
 @dataclass(frozen=True)
@@ -154,27 +190,20 @@ def halt(
     refs = read_active_trees(run.payload)
     if isinstance(refs, SectionUnavailable):
         return EngineStopped("processes_unavailable", refs.detail)
-    stopped: list[StopResult] = []
-    for index, ref in enumerate(refs):
-        try:
-            stopped.append(stop_port.stop(ref, grace_seconds))
-        except ProcessError as error:
-            failed = _accepted(run, ev.RunFailed())
-            if isinstance(failed, EngineStopped):  # pragma: no cover - 手続き中の`RunFailed`は
-                # C-01のX系列ruleが必ず受理する（停止commandの冪等再発行）
-                return failed
-            # 止められなかったtreeは台帳へ残す（次のresumeが同じrefで再試行する）
-            saved = _save(run, failed, paths=paths, run_id=run_id, refs=refs[index:])
-            if isinstance(saved, EngineStopped):  # pragma: no cover - 手続き中の状態は表現できる
-                return saved
-            return HaltFailed(
-                detail=f"process treeを停止できない: {error}",
-                machine_state=saved[0],
-                commands=saved[1],
-            )
+    outcome = stop_trees(refs, stop_port=stop_port, grace_seconds=grace_seconds)
+    if isinstance(outcome, TreeStopFailed):
+        failed = _accepted(run, ev.RunFailed())
+        if isinstance(failed, EngineStopped):  # pragma: no cover - 手続き中の`RunFailed`は
+            # C-01のX系列ruleが必ず受理する（停止commandの冪等再発行）
+            return failed
+        # 止められなかったtreeは台帳へ残す（次のresumeが同じrefで再試行する）
+        saved = _save(run, failed, paths=paths, run_id=run_id, refs=outcome.remaining)
+        if isinstance(saved, EngineStopped):  # pragma: no cover - 手続き中の状態は表現できる
+            return saved
+        return HaltFailed(detail=outcome.detail, machine_state=saved[0], commands=saved[1])
     applied = _save(run, completion, paths=paths, run_id=run_id, refs=())
     if isinstance(applied, EngineStopped):  # pragma: no cover - 停止完了後の状態は表現できる
         return applied
     return HaltCompleted(
-        machine_state=applied[0], commands=applied[1], stopped=tuple(stopped)
+        machine_state=applied[0], commands=applied[1], stopped=outcome.results
     )

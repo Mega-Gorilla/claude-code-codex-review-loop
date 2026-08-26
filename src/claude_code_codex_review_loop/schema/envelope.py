@@ -513,6 +513,23 @@ _SECTIONS: dict[str, Field] = {
         },
         required=False,
     ),
+    # stop_requestはPhase 8 PR-3b2のadditive追加: **緊急停止の意図**（ADR-0021）。
+    # `processes`は「treeが在る」ことしか言わず「止めるべき」とは言わない。C-01は緊急停止を
+    # `NormalProcedure`のまま完了させる（C-05 rule）ため、停止失敗時の`RunFailed`はF-01で
+    # `FAILED(recovery_to)`へ進み`HaltRun`を再発行しない。停止意図がここに無いと、
+    # 次のresumeが再停止しない。
+    #
+    # `evidence`は要求時に一度だけ導出して保存し、resumeは**そのまま再生する**
+    # （`CancellationCompleted.emergency_evidence`へ渡す値。再導出すると値がぶれる）。
+    "stop_request": obj(
+        {
+            "requested_at": _optional_text(),
+            "evidence": _optional_opaque(),
+            # 要求を受けた時点のstate（診断用。復元の判断には使わない）
+            "source_state": enum_field(_STATE_VALUES, required=False),
+        },
+        required=False,
+    ),
     # 17-18. merge gate intentとmerge実行の記録
     "merge": obj(
         {

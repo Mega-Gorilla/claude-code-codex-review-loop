@@ -28,6 +28,9 @@ from ..workflow import (
     AdvanceOutcome,
     AwaitUser,
     Blocked,
+    EmergencyStopCompleted,
+    EmergencyStopFailed,
+    EmergencyStopRequired,
     EngineStopped,
     HaltCompleted,
     HaltFailed,
@@ -40,12 +43,15 @@ from ..workflow import (
     SubmitOutcome,
     Terminal,
     advance,
+    emergency_stop,
     halt,
     persist,
+    request_emergency_stop,
     submit,
 )
 from .config import SessionConfig
 from .ports import ChainNotIntactError, PortSet, PortUnavailableError
+from .signals import StopSignal
 
 # 1 stepでこなすengine側の作業の上限。C-01が同じ作業を返し続けるのは不変条件の破れなので、
 # 上限へ達したら推測して回し続けずに停止する（record 1件の永続化 + 停止1回が現実的な最大）
@@ -63,6 +69,9 @@ class StepTrace:
 
     persisted: tuple[str, ...]
     halted: int
+    # 緊急停止: 要求を記録した回数と、実行して完了した回数
+    stop_requested: int = 0
+    stopped: int = 0
 
 
 @dataclass(frozen=True)
@@ -101,6 +110,7 @@ def step(
     ports: PortSet,
     id_source: Callable[[], str],
     issued_at: str,
+    stop: StopSignal | None = None,
 ) -> StepResult:
     """次にhostがすべきことまで進める（engine側の作業は途中でこなす）。
 
@@ -110,31 +120,67 @@ def step(
     """
     persisted: list[str] = []
     halted = 0
+    requested = 0
+    stopped_count = 0
+
+    def trace() -> StepTrace:
+        return StepTrace(tuple(persisted), halted, requested, stopped_count)
+
     work = 0
     while True:
+        # 安全点でsignalを見る。handlerはflagを立てるだけで、要求の記録はここで行う
+        # （signal contextでcheckpointを書かない。ADR-0021 決定4）。
+        # 変換は`pending`が消える1回だけで、以後は台帳が停止の持ち主になる
+        if stop is not None and stop.pending:
+            recorded = request_emergency_stop(
+                paths=paths,
+                run_id=config.run_id,
+                repository=config.repository,
+                number=config.number,
+                requested_at=issued_at,
+            )
+            if isinstance(recorded, EngineStopped):
+                return StepResult(recorded, trace())
+            stop.mark_recorded()
+            if not recorded.already_recorded:
+                requested += 1
         try:
             outcome = _advance(paths, config, ports, id_source, issued_at)
         except PortUnavailableError as error:
             return StepResult(
-                EngineStopped("port_unavailable", str(error)), StepTrace(tuple(persisted), halted)
+                EngineStopped("port_unavailable", str(error)), trace()
             )
         except ChainNotIntactError as error:
             # engineの`_chain_gate`と同じ分類にする（portが後から観測しても結果は同じ）
             return StepResult(
-                EngineStopped("chain_violation", str(error)), StepTrace(tuple(persisted), halted)
+                EngineStopped("chain_violation", str(error)), trace()
             )
-        if isinstance(outcome, (PersistRequired, HaltRequired)) and work >= MAX_ENGINE_WORK:
+        if isinstance(outcome, (PersistRequired, HaltRequired, EmergencyStopRequired)) and (
+            work >= MAX_ENGINE_WORK
+        ):
             # 上限**ちょうど**までは実行し、次の副作用を起こす前に止める
             return StepResult(
                 EngineStopped(
                     "engine_work_limit", f"1 stepのengine側作業が上限{MAX_ENGINE_WORK}回へ達した"
                 ),
-                StepTrace(tuple(persisted), halted),
+                trace(),
             )
+        if isinstance(outcome, EmergencyStopRequired):
+            halt_outcome = _emergency(paths, config, ports)
+            if isinstance(halt_outcome, EngineStopped):
+                return StepResult(halt_outcome, trace())
+            if isinstance(halt_outcome, EmergencyStopFailed):
+                # 要求は台帳に残る。同じ理由で失敗し続けるためここでは回さない
+                return StepResult(
+                    EngineStopped("emergency_stop_failed", halt_outcome.detail), trace()
+                )
+            stopped_count += 1
+            work += 1
+            continue
         if isinstance(outcome, PersistRequired):
             stored = _persist(paths, config, ports)
             if isinstance(stored, EngineStopped):
-                return StepResult(stored, StepTrace(tuple(persisted), halted))
+                return StepResult(stored, trace())
             # `IntegrityDetected` / `PersistFailed`もC-01が状態を決めている。次のadvanceが
             # その状態に応じた作業（停止手続き等）を返すので、ここでは分岐しない
             persisted.append(outcome.record.binding.value)
@@ -143,7 +189,7 @@ def step(
         if isinstance(outcome, HaltRequired):
             stopped = _halt(paths, config, ports)
             if isinstance(stopped, EngineStopped):
-                return StepResult(stopped, StepTrace(tuple(persisted), halted))
+                return StepResult(stopped, trace())
             halted += 1
             work += 1
             if isinstance(stopped, HaltFailed):
@@ -151,10 +197,23 @@ def step(
                 # ここでは回さず呼び出し側へ返す（次のresumeがやり直す）
                 return StepResult(
                     EngineStopped("halt_failed", stopped.detail),
-                    StepTrace(tuple(persisted), halted),
+                    trace(),
                 )
             continue
-        return StepResult(outcome, StepTrace(tuple(persisted), halted))
+        return StepResult(outcome, trace())
+
+
+def _emergency(
+    paths: StatePaths, config: SessionConfig, ports: PortSet
+) -> EmergencyStopCompleted | EmergencyStopFailed | EngineStopped:
+    return emergency_stop(
+        paths=paths,
+        run_id=config.run_id,
+        repository=config.repository,
+        number=config.number,
+        stop_port=ports.stop,
+        grace_seconds=config.halt_grace_seconds,
+    )
 
 
 def _persist(

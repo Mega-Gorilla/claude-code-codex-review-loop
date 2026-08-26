@@ -33,6 +33,7 @@ from ..state import prepare_state_root
 from ..workflow import (
     AwaitUser,
     Blocked,
+    EmergencyStopRequired,
     EngineStopped,
     HostActionIssued,
     SubmitAccepted,
@@ -45,6 +46,7 @@ from ..workflow import (
 from .config import ConfigUnavailable, read_session_config
 from .ports import default_ports
 from .session import step, submit_result
+from .signals import StopSignal, install_stop_handler
 
 EXIT_OK = 0
 EXIT_STOPPED = 3
@@ -100,6 +102,9 @@ def _advance_payload(outcome: object) -> dict[str, object]:
         return {"outcome": "TERMINAL", "state": outcome.state.value}
     if isinstance(outcome, Blocked):
         return {"outcome": "BLOCKED", "block": type(outcome.block).__name__}
+    if isinstance(outcome, EmergencyStopRequired):  # pragma: no cover - `step`が実行してから返す
+        # `step`はこれを自分でこなすので、表示へ届くのは上限に達した場合だけである
+        return {"outcome": "EMERGENCY_STOP", "requested_at": outcome.request.requested_at}
     stopped = outcome
     assert isinstance(stopped, EngineStopped)
     return {"outcome": "STOPPED", "code": stopped.code, "detail": stopped.detail}
@@ -158,16 +163,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_STOPPED
     ports = default_ports(paths, config)
     if args.command == "advance":
-        result = step(
-            paths=paths,
-            config=config,
-            ports=ports,
-            id_source=lambda: uuid.uuid4().hex,
-            issued_at=_now(),
-        )
+        # signal handlerの設置はentry pointの責務（process全体のdispositionを変えるため）。
+        # 受け取った後に何をするかは`step`が決める（ADR-0021 決定4）
+        with install_stop_handler(StopSignal()) as stop:
+            result = step(
+                paths=paths,
+                config=config,
+                ports=ports,
+                id_source=lambda: uuid.uuid4().hex,
+                issued_at=_now(),
+                stop=stop,
+            )
         payload = _advance_payload(result.outcome)
         payload["persisted"] = list(result.trace.persisted)
         payload["halted"] = result.trace.halted
+        payload["stop_requested"] = result.trace.stop_requested
+        payload["stopped"] = result.trace.stopped
         _render(payload)
         return EXIT_STOPPED if payload["outcome"] == "STOPPED" else EXIT_OK
     if args.result is None:

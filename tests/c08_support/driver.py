@@ -12,6 +12,9 @@ processとしては`__main__`と同じで、共有するのはstate rootとGitHu
 ```
 python tests/c08_support/driver.py <state-root> <command> [args...]
 ```
+
+`wait-for-signal`は実signalを受け取るためのmodeで、handlerを設置してから`READY`を1行
+出力する。呼び出し側はその行を待ってからsignalを送るので、timingに依存しない。
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
+import time
 from pathlib import Path
 
 _TESTS = Path(__file__).resolve().parents[1]
@@ -37,6 +41,10 @@ from claude_code_codex_review_loop.runtime import (  # noqa: E402
     read_session_config,
     step,
     submit_result,
+)
+from claude_code_codex_review_loop.runtime.signals import (  # noqa: E402
+    StopSignal,
+    install_stop_handler,
 )
 from claude_code_codex_review_loop.state import prepare_state_root  # noqa: E402
 from claude_code_codex_review_loop.workflow import (  # noqa: E402
@@ -89,6 +97,30 @@ def _describe(outcome: object) -> dict[str, object]:
     return {"outcome": type(outcome).__name__}
 
 
+def _wait_for_signal(paths, config, ports) -> int:
+    """handlerを設置し、実signalを受け取ってから1 stepだけ進める。
+
+    `READY`を出してから待つので、呼び出し側は「handler設置済み」を確かめてsignalを送れる。
+    """
+    with install_stop_handler(StopSignal()) as stop:
+        print("READY", flush=True)
+        while not stop.requested:
+            time.sleep(0.02)
+        result = step(
+            paths=paths,
+            config=config,
+            ports=ports,
+            id_source=FakeIds("sig"),
+            issued_at=ISSUED_AT,
+            stop=stop,
+        )
+    payload = _describe(result.outcome)
+    payload["stop_requested"] = result.trace.stop_requested
+    payload["stopped"] = result.trace.stopped
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str]) -> int:
     state_root, command = argv[1], argv[2]
     paths = prepare_state_root(Path(state_root).resolve())
@@ -106,6 +138,10 @@ def main(argv: list[str]) -> int:
         payload = _describe(result.outcome)
         payload["persisted"] = list(result.trace.persisted)
         payload["halted"] = result.trace.halted
+        payload["stop_requested"] = result.trace.stop_requested
+        payload["stopped"] = result.trace.stopped
+    elif command == "wait-for-signal":
+        return _wait_for_signal(paths, config, ports)
     elif command == "submit":
         raw = Path(argv[3]).read_bytes()
         outcome = submit_result(
