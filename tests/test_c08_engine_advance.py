@@ -509,8 +509,12 @@ class TestProcedureOutcomes:
         env = seed(tmp_path, state=state)
         assert _advance(env) == PersistRequired(record=record)
 
-    def test_an_incident_without_a_pending_record_is_not_ours(self, tmp_path) -> None:
-        """`RecordIntegrityIncident`の実行はC-08の制御経路ではない。"""
+    def test_an_incident_without_a_pending_record_stops(self, tmp_path) -> None:
+        """`RecordIntegrityIncident`の実行はC-08の責務だが、まだ実装が無い（PR-3d）。
+
+        この手続きへはMERGINGのoutcome確定だけでなく、**cancel中のintegrity検出**
+        （C-01のI-D2 -> C-04）からも入るため、MERGINGを持つC-13へは委ねられない。
+        """
         state = MachineState(
             state=State.APPLYING_FIXES,
             procedure=RecordingIncidentProcedure(target=IncidentTarget.CANCELLED, audit=None),
@@ -524,7 +528,7 @@ class TestProcedureOutcomes:
         )
         env = seed(tmp_path, state=state)
         outcome = _advance(env)
-        assert isinstance(outcome, EngineStopped) and outcome.code == "not_host_procedure"
+        assert isinstance(outcome, EngineStopped) and outcome.code == "incident_executor_missing"
 
 
 class TestBlocked:

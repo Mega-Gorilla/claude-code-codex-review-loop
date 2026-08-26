@@ -98,7 +98,12 @@ def _cancel(env, issued: AwaitUser):
 
 @pytest.mark.parametrize("awaiting", AWAITINGS, ids=lambda a: a.value)
 def test_cancel_runs_to_the_cancelled_terminal(tmp_path, awaiting: Awaiting) -> None:
-    """どのuser input待ちからでもcancelがterminalまで到達する。"""
+    """どのuser input待ちからでもcancelがterminalまで到達する。
+
+    前提: `deferred_integrity`が空であること。cancel中にintegrity violationが検出されると
+    （C-01のI-D2）、停止完了はC-04で`RecordingIncidentProcedure`へ入り、incident recordを
+    記録してからでないと`CANCELLED`へ進まない。その実行はPR-3dが追加する。
+    """
     env = user_env(tmp_path, awaiting=awaiting, seeded=SEEDED[awaiting])
     _register_tree(env)
 

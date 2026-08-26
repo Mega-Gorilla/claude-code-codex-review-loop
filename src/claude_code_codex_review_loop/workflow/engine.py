@@ -408,12 +408,15 @@ def _procedure_outcome(procedure: Procedure, machine_state: MachineState) -> Adv
     """
     if isinstance(procedure, (CancellingProcedure, HaltingForBlockProcedure)):
         return HaltRequired(procedure=procedure)
-    # RecordingIncidentProcedure: recordの投稿はC-08だが、payloadを構成する
-    # `RecordIntegrityIncident`の実行はC-06 / C-07で、駆動するのはMERGINGを持つC-13である
+    # RecordingIncidentProcedure: incident recordの投稿はC-08が駆動する（下のPersistRequired）。
+    # まだ実装が無いのは`RecordIntegrityIncident`（payloadの作成依頼）の実行で、これは
+    # **C-08の責務**である。この手続きへはMERGINGのoutcome確定だけでなく、cancel中の
+    # integrity検出（C-01のI-D2 -> C-04）からも入るため、C-13へは委ねられない
     if machine_state.pending_record is not None:
         return PersistRequired(record=machine_state.pending_record)
     return EngineStopped(
-        "not_host_procedure", "RecordIntegrityIncidentの実行はC-08の制御経路ではない"
+        "incident_executor_missing",
+        "RecordIntegrityIncidentの実行がまだ無い（C-08の責務。PR-3dが追加する）",
     )
 
 

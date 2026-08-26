@@ -33,7 +33,7 @@ USER_CANCEL を submit -> persist -> UserCancelVerified
 5. **procedure 4種・block 3種をすべて表現する**（additive追加。version bumpなし。ADR-0004 rule 10）。`state.procedure`へ`target` / `audit`を、`state.block`へ`binding` / `head` / `continuation` / `reason` / `budget` / `counter_snapshot` / `fingerprint` / `evidence`を足した。
 6. **kindごとの必須検査はreaderが行う**。必須fieldの組がkindごとに違うためschemaは`kind`以外をoptionalにしており、欠けていれば既定値で埋めず停止する。停止手続きの途中で中断したrunを「手続き中でない」と誤って復元すると、走り続けるprocessを誰も止めない。
 7. **到達可能な全非terminal `MachineState`のround-trip一致をtestで固定する**。到達可能性は`MachineState`を構築できるかどうかで判定する（C-01の組合せ不変条件が構築時に検証されるため、構築できない組合せは存在しない）。手で列挙すると不変条件が緩んだときに気づけない。
-8. `RecordingIncidentProcedure`は**表現するが駆動しない**。`RecordIntegrityIncident`のpayload構築はC-06 / C-07、駆動するのはMERGINGを持つC-13である。到達経路（MERGING outcome）もC-08の外にある。
+8. `RecordingIncidentProcedure`は**表現するが、まだ駆動しない**（`incident_executor_missing`で停止する）。`RecordIntegrityIncident`のpayload構築はC-06 / C-07へ委ねるが、**駆動はC-08の責務**である。この手続きへは2経路から入る: MERGINGのoutcome確定（I-46 / I-47）と、**cancel中のintegrity検出**（I-D2で`deferred_integrity`へunion -> C-04）。後者はMERGINGを含まない非terminal全stateで起き、C-08のcancel経路そのものにある。実行はPR-3dが追加する。
 
 ### process tree台帳
 
@@ -54,12 +54,13 @@ USER_CANCEL を submit -> persist -> UserCancelVerified
 
 18. **procedure分岐はpending recordより前**に置く。cancelの経路2はstale pendingを監査参照として保持するため（C-01のC-02 rule）、順序を逆にすると監査参照を永続化しようとする。
 19. `BLOCKED`は汎用の`no_awaiting`ではなく**block情報を添えた`Blocked`**を返す。解消はC-08の外から来る（limit引き上げ・ユーザー介入・integrity復旧）ため、runが壊れたのかblockで待っているのかをhostが区別できる必要がある。
-20. `RecordingIncidentProcedure`でpendingが無い場合は`not_host_procedure`で止める。`RecordIntegrityIncident`の実行はC-08の制御経路ではない（`not_host_action`と同じ形）。
+20. `RecordingIncidentProcedure`でpendingがあれば`PersistRequired`（incident recordの投稿はC-08が駆動する）。pendingが無い場合は`incident_executor_missing`で止める — 実行はC-08の責務だが、まだ実装が無い（PR-3d）。
 
 ## Consequences
 
 - PR-2cが開いた`USER_CANCEL`経路の行き止まりが解消し、Phase 8で`CANCELLED`まで到達できるようになった
 - `ProgressBlock` / `ExternalDependencyBlock`へ入る既存の経路（bounded progress、外部依存record）も`state_not_persistable`で止まらなくなった
 - **AC-C08-06（別processからのresume）の前提**が揃った。停止手続きの途中で中断したrunを復元できる
+- **`RecordIntegrityIncident`の実行は未割当のまま残る**。cancel中にintegrity violationが検出されると`RecordingIncidentProcedure`へ入り、そこで停止する（`USER_CANCEL`がPR-3a前に止まっていたのと同じ形）。**PR-3dが実行を追加する**まで、この経路は完走しない。代表cancelシナリオが完走するのは`deferred_integrity`が空の場合である
 - `BLOCK_INTERVENTION`の搬送路は**PR-3c**が扱う。この「待ち」は`Awaiting`ではなくblock自身であり、request identityが`awaiting` + `since_seq`ではなくblock bindingになるため、`USER_REQUEST` / `USER_SUBMIT`へ別のdiscriminatorを足すschema変更を伴う
 - adapterとprocess境界（AC-C08-01 / 02 / 03 / 04）は**PR-3b**が扱う
