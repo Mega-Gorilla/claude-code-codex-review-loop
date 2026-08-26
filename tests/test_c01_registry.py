@@ -24,12 +24,14 @@ from claude_code_codex_review_loop.domain import (
     transition,
 )
 from claude_code_codex_review_loop.domain import events as ev
+from claude_code_codex_review_loop.domain._rules_workflow import BLOCKED_CONTINUATIONS
 from claude_code_codex_review_loop.domain.machine import select_rule
 from claude_code_codex_review_loop.domain.states import ACTIVE_STATES, TERMINAL_STATES
 from claude_code_codex_review_loop.domain.values import (
     AWAITING_HOME,
     NORMAL,
     Awaiting,
+    BlockedContinuation,
     BlockResolutionEvidence,
     CancellingProcedure,
     ExternalDependencyBlock,
@@ -425,3 +427,62 @@ class TestRegistrySelfCheck:
 
     def test_current_registry_passes(self) -> None:
         check_registry(REGISTRY)
+
+
+class TestBlockedContinuations:
+    """`BlockedContinuation`はregistry由来の有限値である（ADR-0019 決定1）。
+
+    checkpointはcommand列ではなく**このtableのID**を保存するため、ruleが表に無い継続を
+    構築するとround-tripが成立しない。
+    """
+
+    def test_rules_build_no_continuation_outside_the_registry(self) -> None:
+        """ruleが構築し得る継続はすべてtableのentryである。
+
+        module globalを走査するのは、ruleのeffectがclosureで中身を覗けないためである。
+        inlineで組み立てた継続がここで検出できる。
+        """
+        from claude_code_codex_review_loop.domain import _rules_workflow
+
+        known = set(BLOCKED_CONTINUATIONS.values())
+        found = [
+            value
+            for value in vars(_rules_workflow).values()
+            if isinstance(value, BlockedContinuation)
+        ]
+        assert found, "継続が1つも見つからない（走査が壊れている）"
+        assert all(value in known for value in found)
+
+    def test_every_entry_is_used_by_a_rule(self) -> None:
+        """使われないentryを残さない（IDは永続値なので語彙を実態と一致させる）。"""
+        from claude_code_codex_review_loop.domain import _rules_workflow
+
+        used = {
+            value
+            for value in vars(_rules_workflow).values()
+            if isinstance(value, BlockedContinuation)
+        }
+        assert used == set(BLOCKED_CONTINUATIONS.values())
+
+    def test_ids_are_stable_and_unique(self) -> None:
+        """IDはcheckpointへ保存する永続値である（変更にはmigrationが要る）。"""
+        assert set(BLOCKED_CONTINUATIONS) == {
+            "REVIEW_BLOCKING",
+            "CLARIFICATION",
+            "FIX_RESULT",
+            "RESUBMIT",
+            "CI_CODE_FAILURE",
+            "EXTERNAL_DEPENDENCY",
+        }
+        values = list(BLOCKED_CONTINUATIONS.values())
+        assert len({id(value) for value in values}) == len(values)
+
+    def test_every_continuation_resumes_into_a_valid_state(self) -> None:
+        """継続のresume_stateとawaitingの組はC-01の不変条件を満たす。"""
+        for continuation in BLOCKED_CONTINUATIONS.values():
+            MachineState(state=continuation.resume_state, awaiting=continuation.awaiting)
+
+    def test_continuations_are_distinguishable(self) -> None:
+        """IDの逆引きが一意である（同値な2 entryがあるとwriterが選べない）。"""
+        values = list(BLOCKED_CONTINUATIONS.values())
+        assert len(values) == len(set(values))

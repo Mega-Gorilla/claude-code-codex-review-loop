@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from c08_support.helpers import (
     HEAD,
     ISSUED_AT,
@@ -20,16 +21,25 @@ from c08_support.helpers import (
     FakeIds,
     FakePayloadPort,
     FakeRecordSource,
+    cancelling,
+    external_block,
+    halting_for_block,
+    integrity_block,
     machine_state,
+    progress_block,
     review_records,
     seed,
 )
 
 from claude_code_codex_review_loop.domain.values import (
     Awaiting,
+    IncidentTarget,
+    IntegrityEvidenceRef,
     MachineState,
     OpaqueBinding,
+    OpaqueRef,
     PendingRecord,
+    RecordingIncidentProcedure,
     RecordKind,
     State,
 )
@@ -38,7 +48,9 @@ from claude_code_codex_review_loop.schema.projection import canonical_payload_ha
 from claude_code_codex_review_loop.state import CheckpointLoaded, load_checkpoint, save_checkpoint
 from claude_code_codex_review_loop.workflow import (
     AwaitUser,
+    Blocked,
     EngineStopped,
+    HaltRequired,
     HostActionIssued,
     PersistRequired,
     Terminal,
@@ -444,3 +456,86 @@ class TestRefusals:
         records = verified_chain([RecordKind.REVIEW_RESULT, RecordKind.CLARIFICATION_ANSWER]).records
         outcome = _advance(env, evidence=tuple(reversed(records)))
         assert isinstance(outcome, EngineStopped) and outcome.code == "evidence_order"
+
+
+class TestProcedureOutcomes:
+    """手続き中はpending recordより先にprocedureを見る（ADR-0019 決定4）。"""
+
+    def test_a_cancel_procedure_asks_for_a_halt(self, tmp_path) -> None:
+        state = cancelling()
+        env = seed(tmp_path, state=state)
+        outcome = _advance(env)
+        assert isinstance(outcome, HaltRequired) and outcome.procedure == state.procedure
+
+    def test_an_integrity_halt_asks_for_a_halt(self, tmp_path) -> None:
+        state = halting_for_block()
+        env = seed(tmp_path, state=state)
+        outcome = _advance(env)
+        assert isinstance(outcome, HaltRequired) and outcome.procedure == state.procedure
+
+    def test_a_stale_pending_is_not_persisted_during_cancel(self, tmp_path) -> None:
+        """cancel経路2のstale pendingは監査参照であり、永続化対象ではない。"""
+        state = MachineState(
+            state=State.APPLYING_FIXES,
+            procedure=cancelling().procedure,
+            pending_record=PendingRecord(
+                kind=RecordKind.FIX_RESULT,
+                binding=OpaqueBinding("cr:run-1:1:fix"),
+                source_state=State.APPLYING_FIXES,
+            ),
+        )
+        env = seed(tmp_path, state=state)
+        assert isinstance(_advance(env), HaltRequired)
+
+    def test_an_incident_with_a_pending_record_persists(self, tmp_path) -> None:
+        """incident recordの投稿はC-08が行う（作成依頼の実行は別componentである）。"""
+        record = PendingRecord(
+            kind=RecordKind.INTEGRITY_INCIDENT,
+            binding=OpaqueBinding("cr:run-1:2:incident"),
+            source_state=State.APPLYING_FIXES,
+        )
+        state = MachineState(
+            state=State.APPLYING_FIXES,
+            procedure=RecordingIncidentProcedure(target=IncidentTarget.CANCELLED, audit=None),
+            deferred_integrity=(
+                IntegrityEvidenceRef(
+                    binding=OpaqueBinding("iv:gap:run-1:2"),
+                    descriptor=OpaqueRef("gap"),
+                    head=OpaqueRef(HEAD),
+                ),
+            ),
+            pending_record=record,
+        )
+        env = seed(tmp_path, state=state)
+        assert _advance(env) == PersistRequired(record=record)
+
+    def test_an_incident_without_a_pending_record_is_not_ours(self, tmp_path) -> None:
+        """`RecordIntegrityIncident`の実行はC-08の制御経路ではない。"""
+        state = MachineState(
+            state=State.APPLYING_FIXES,
+            procedure=RecordingIncidentProcedure(target=IncidentTarget.CANCELLED, audit=None),
+            deferred_integrity=(
+                IntegrityEvidenceRef(
+                    binding=OpaqueBinding("iv:gap:run-1:2"),
+                    descriptor=OpaqueRef("gap"),
+                    head=OpaqueRef(HEAD),
+                ),
+            ),
+        )
+        env = seed(tmp_path, state=state)
+        outcome = _advance(env)
+        assert isinstance(outcome, EngineStopped) and outcome.code == "not_host_procedure"
+
+
+class TestBlocked:
+    """BLOCKEDは汎用の`no_awaiting`ではなく、block情報を添えて返す。"""
+
+    @pytest.mark.parametrize(
+        "block",
+        [progress_block(), external_block(), integrity_block()],
+        ids=["progress", "external", "integrity"],
+    )
+    def test_blocked_returns_the_block(self, tmp_path, block) -> None:
+        env = seed(tmp_path, state=MachineState(state=State.BLOCKED, block=block))
+        outcome = _advance(env)
+        assert isinstance(outcome, Blocked) and outcome.block == block

@@ -210,7 +210,9 @@ def _verify_and_advance(
     except (TransitionRejected, ev.IllegalEventError) as error:
         return EngineStopped("illegal_event", f"C-01が{type(event).__name__}を受理しない: {error}")
     payload = with_verified_machine_state(run.payload, machine_state)
-    if isinstance(payload, SectionUnavailable):
+    if isinstance(payload, SectionUnavailable):  # pragma: no cover - PR-3aで到達可能な
+        # 全非terminal stateが表現できるようになった（round-trip testが固定）。表現範囲を
+        # 広げるPhaseがここを踏むまで、`_apply`と同じ防御として残す
         return EngineStopped("state_not_persistable", payload.detail)
     payload.pop("transaction", None)
     save_checkpoint(checkpoint_path(paths, run_id), payload)

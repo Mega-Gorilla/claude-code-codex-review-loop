@@ -26,9 +26,14 @@ from c07_support.helpers import (
     verified_chain,
 )
 
+from claude_code_codex_review_loop.domain._rules_workflow import BLOCKED_CONTINUATIONS
 from claude_code_codex_review_loop.domain.events import Event
 from claude_code_codex_review_loop.domain.values import (
     Awaiting,
+    Budget,
+    CancellingProcedure,
+    ExternalDependencyBlock,
+    HaltingForBlockProcedure,
     IntegrityEvidenceRef,
     MachineState,
     OpaqueBinding,
@@ -37,14 +42,24 @@ from claude_code_codex_review_loop.domain.values import (
     OpaqueSnapshot,
     PendingRecord,
     Progress,
+    ProgressBlock,
     ProgressReport,
     RecordEvidence,
+    RecordIntegrityBlock,
     RecordKind,
     State,
 )
 from claude_code_codex_review_loop.identity import ProducerAllowlist, verify_record_chain
 from claude_code_codex_review_loop.identity.fs_permissions import replace_private_text
 from claude_code_codex_review_loop.identity.record_chain import ChainVerification, VerifiedRecord
+from claude_code_codex_review_loop.process import (
+    JobObjectRef,
+    ProcessGroupRef,
+    StopError,
+    StopMethod,
+    StopResult,
+    TreeRef,
+)
 from claude_code_codex_review_loop.schema import SchemaKind
 from claude_code_codex_review_loop.schema.projection import PROJECTION_SPECS
 from claude_code_codex_review_loop.schema.user_input import HOST_TRANSCRIPT_ROUTE
@@ -59,6 +74,7 @@ from claude_code_codex_review_loop.workflow import (
     issue_transaction,
     transaction_section,
     user_spec_for,
+    with_active_trees,
     with_machine_state,
 )
 from claude_code_codex_review_loop.workflow.ports import ActionContext
@@ -582,6 +598,132 @@ def user_env(
         records=verified_chain(list(seeded)).records,
     )
 
+
+# ---------------------------------------------------------------------------
+# 停止手続き（Phase 8 PR-3a）
+# ---------------------------------------------------------------------------
+
+GRACE_SECONDS = 1.5
+TREE_PID = 4242
+TREE_PGID = 4242
+JOB_NAME = "cc-review-tree-1"
+
+
+def process_group_ref(pid: int = TREE_PID, pgid: int = TREE_PGID) -> ProcessGroupRef:
+    return ProcessGroupRef(pid=pid, pgid=pgid)
+
+
+def job_object_ref(pid: int = TREE_PID, job_name: str = JOB_NAME) -> JobObjectRef:
+    return JobObjectRef(pid=pid, job_name=job_name)
+
+
+@dataclass
+class FakeStopPort:
+    """process tree停止のfake（実processを起動しない。実停止はC-03のtestが担保する）。
+
+    `fails`に入れたrefは`StopError`を投げる。`calls`で冪等性（同じrefへの再要求）を観測する。
+    """
+
+    method: StopMethod = StopMethod.GRACEFUL
+    fails: frozenset[TreeRef] = field(default_factory=frozenset)
+    calls: list[tuple[TreeRef, float]] = field(default_factory=list)
+
+    def stop(self, ref: TreeRef, grace_seconds: float) -> StopResult:
+        self.calls.append((ref, grace_seconds))
+        if ref in self.fails:
+            raise StopError("stop", f"treeを停止できない: {ref}")
+        return StopResult(method=self.method, graceful_requested=True)
+
+
+def halt_env(
+    tmp_path: Path,
+    *,
+    state: MachineState,
+    trees: Sequence[TreeRef] = (),
+    extra: Mapping[str, object] | None = None,
+) -> EngineEnv:
+    """停止手続き中のcheckpointを用意する（treeの台帳も置く）。"""
+    paths = state_paths(tmp_path)
+    payload = with_machine_state(checkpoint_payload(), state)
+    payload = with_active_trees(payload, list(trees))
+    if extra is not None:
+        payload.update(extra)
+    save_checkpoint(checkpoint_path(paths, RUN), payload)
+    return EngineEnv(
+        paths=paths, run_dir=run_directory(paths, RUN), checkpoint=checkpoint_path(paths, RUN)
+    )
+
+
+def halt_kwargs(env: EngineEnv, **overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "paths": env.paths,
+        "run_id": RUN,
+        "repository": REPOSITORY,
+        "number": NUMBER,
+        "stop_port": FakeStopPort(),
+        "grace_seconds": GRACE_SECONDS,
+    }
+    values.update(overrides)
+    return values
+
+
+def cancelling(state: State = State.APPLYING_FIXES, binding: str = "cr:run-1:1:cancel") -> MachineState:
+    """cancel停止手続き中のMachineState。"""
+    return MachineState(
+        state=state, procedure=CancellingProcedure(attempt_binding=OpaqueBinding(binding))
+    )
+
+
+def halting_for_block(
+    state: State = State.APPLYING_FIXES, binding: str = "iv:gap:run-1:2"
+) -> MachineState:
+    """integrity halt gate中のMachineState。"""
+    violation = IntegrityEvidenceRef(
+        binding=OpaqueBinding(binding), descriptor=OpaqueRef("gap"), head=OpaqueRef(HEAD)
+    )
+    return MachineState(
+        state=state,
+        procedure=HaltingForBlockProcedure(
+            block=RecordIntegrityBlock(violations=(violation,)),
+            attempt_binding=OpaqueBinding(binding),
+        ),
+    )
+
+
+def progress_block(continuation: str = "FIX_RESULT") -> ProgressBlock:
+    return ProgressBlock(
+        binding=OpaqueBinding("cr:run-1:1:progress"),
+        head=OpaqueRef(HEAD),
+        continuation=BLOCKED_CONTINUATIONS[continuation],
+        reason=Progress.NO_PROGRESS,
+        budget=Budget.REVIEW_ROUND,
+        counter_snapshot=OpaqueSnapshot("snap-1"),
+        fingerprint=OpaqueFingerprint("fp-1"),
+    )
+
+
+def external_block() -> ExternalDependencyBlock:
+    return ExternalDependencyBlock(
+        binding=OpaqueBinding("cr:run-1:1:external"),
+        head=OpaqueRef(HEAD),
+        continuation=BLOCKED_CONTINUATIONS["EXTERNAL_DEPENDENCY"],
+        evidence=RecordEvidence(
+            kind=RecordKind.EXTERNAL_DEPENDENCY,
+            binding=OpaqueBinding("cr:run-1:1:external"),
+            ref=OpaqueRef("c-1"),
+        ),
+    )
+
+
+def integrity_block(binding: str = "iv:gap:run-1:2") -> RecordIntegrityBlock:
+    return RecordIntegrityBlock(
+        violations=(
+            IntegrityEvidenceRef(
+                binding=OpaqueBinding(binding), descriptor=OpaqueRef("gap"), head=OpaqueRef(HEAD)
+            ),
+        )
+    )
+
 __all__ = [
     "ACCEPTED_AT",
     "EngineEnv",
@@ -591,9 +733,12 @@ __all__ = [
     "FakePayloadPort",
     "FakeRecordEvents",
     "FakeRecordSource",
+    "FakeStopPort",
+    "GRACE_SECONDS",
     "GithubBackedRecords",
     "HEAD",
     "ISSUED_AT",
+    "JOB_NAME",
     "MAX_RESULT_BYTES",
     "MODEL",
     "NEW_HEAD",
@@ -604,15 +749,26 @@ __all__ = [
     "RETRY_BUDGET",
     "RUN",
     "SPEAKER",
+    "TREE_PGID",
+    "TREE_PID",
     "USER_AWAITING_STATES",
     "USER_SPEAKER",
     "UserEnv",
+    "cancelling",
+    "external_block",
     "failure_payload",
     "fix_result_payload",
     "gate_answer_payload",
+    "halt_env",
+    "halt_kwargs",
+    "halting_for_block",
+    "integrity_block",
+    "job_object_ref",
     "machine_state",
     "permission_resume_payload",
     "persist_env",
+    "process_group_ref",
+    "progress_block",
     "raw",
     "review_records",
     "seed",

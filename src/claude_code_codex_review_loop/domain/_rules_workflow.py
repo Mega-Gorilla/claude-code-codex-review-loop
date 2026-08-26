@@ -8,8 +8,9 @@ report / merge gateの各行（旧遷移表#1〜#33・#43）、bounded progress�
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
-from typing import cast
+from typing import Final, cast
 
 from . import events as ev
 from ._ruledefs import BUDGET_EVENTS, DRIVE_TABLE, BlockKind, Effect, Match, PendingMatch, Rule
@@ -333,27 +334,46 @@ def _progress_block_rule(
 _HOST_APPLY = (RequestHostAction(HostAction.APPLY_FINDINGS),)
 _CODEX_REVIEW = (RequestCodexReview(CodexPurpose.CODE_REVIEW),)
 
-_CONT_REVIEW_BLOCKING = BlockedContinuation(
-    resume_state=_S.CHANGES_REQUESTED, commands=_HOST_APPLY, awaiting=_A.HOST_APPLY_FINDINGS
-)
-_CONT_CLARIFICATION = BlockedContinuation(
-    resume_state=_S.CLARIFYING_REVIEW,
-    commands=(RequestCodexReview(CodexPurpose.CLARIFICATION),),
-    awaiting=_A.CODEX_CLARIFICATION,
-)
-_CONT_FIX_RESULT = BlockedContinuation(
-    resume_state=_S.RUNNING_REVIEW, commands=_CODEX_REVIEW, awaiting=_A.CODEX_CODE_REVIEW
-)
-_CONT_RESUBMIT = BlockedContinuation(
-    resume_state=_S.REVIEWING_DECISION_REQUEST,
-    commands=(RequestHostAction(HostAction.REVISE_DECISION_REQUEST),),
-    awaiting=_A.HOST_REVISE_DECISION_REQUEST,
-)
-_CONT_CI_CODE_FAILURE = BlockedContinuation(
-    resume_state=_S.CHANGES_REQUESTED,
-    commands=(InvalidateApprovals(),) + _HOST_APPLY,
-    awaiting=_A.HOST_APPLY_FINDINGS,
-)
+# BLOCKEDへ入るときに保存する「本来の継続」の**全体**。`BlockedContinuation`は
+# registry由来の有限値であり、ruleはこの表以外の継続を構築しない（contract testで固定）。
+#
+# checkpointはcommand列ではなく**このtableのID**を保存する（ADR-0019 決定1）。commandは
+# payloadを持つ11種の直和で、直列化すると他で使わない大きなformatを新設することになる。
+# IDならreaderが同じobjectを引けてround-tripが一致し、表に無いIDはfail closedにできる。
+# IDは永続値なので、entryを消す・意味を変える場合はversion bumpとmigrationが要る。
+BLOCKED_CONTINUATIONS: Final[Mapping[str, BlockedContinuation]] = {
+    "REVIEW_BLOCKING": BlockedContinuation(
+        resume_state=_S.CHANGES_REQUESTED, commands=_HOST_APPLY, awaiting=_A.HOST_APPLY_FINDINGS
+    ),
+    "CLARIFICATION": BlockedContinuation(
+        resume_state=_S.CLARIFYING_REVIEW,
+        commands=(RequestCodexReview(CodexPurpose.CLARIFICATION),),
+        awaiting=_A.CODEX_CLARIFICATION,
+    ),
+    "FIX_RESULT": BlockedContinuation(
+        resume_state=_S.RUNNING_REVIEW, commands=_CODEX_REVIEW, awaiting=_A.CODEX_CODE_REVIEW
+    ),
+    "RESUBMIT": BlockedContinuation(
+        resume_state=_S.REVIEWING_DECISION_REQUEST,
+        commands=(RequestHostAction(HostAction.REVISE_DECISION_REQUEST),),
+        awaiting=_A.HOST_REVISE_DECISION_REQUEST,
+    ),
+    "CI_CODE_FAILURE": BlockedContinuation(
+        resume_state=_S.CHANGES_REQUESTED,
+        commands=(InvalidateApprovals(),) + _HOST_APPLY,
+        awaiting=_A.HOST_APPLY_FINDINGS,
+    ),
+    "EXTERNAL_DEPENDENCY": BlockedContinuation(
+        resume_state=_S.APPLYING_FIXES, commands=_HOST_APPLY, awaiting=_A.HOST_APPLY_FINDINGS
+    ),
+}
+
+_CONT_REVIEW_BLOCKING = BLOCKED_CONTINUATIONS["REVIEW_BLOCKING"]
+_CONT_CLARIFICATION = BLOCKED_CONTINUATIONS["CLARIFICATION"]
+_CONT_FIX_RESULT = BLOCKED_CONTINUATIONS["FIX_RESULT"]
+_CONT_RESUBMIT = BLOCKED_CONTINUATIONS["RESUBMIT"]
+_CONT_CI_CODE_FAILURE = BLOCKED_CONTINUATIONS["CI_CODE_FAILURE"]
+_CONT_EXTERNAL_DEPENDENCY = BLOCKED_CONTINUATIONS["EXTERNAL_DEPENDENCY"]
 
 
 def _permission_effect(return_to: State) -> Effect:
@@ -384,9 +404,7 @@ def _external_dependency_effect(ms: MachineState, event: ev.Event) -> tuple[Mach
     block = ExternalDependencyBlock(
         binding=e.evidence.binding,
         head=e.head,
-        continuation=BlockedContinuation(
-            resume_state=_S.APPLYING_FIXES, commands=_HOST_APPLY, awaiting=_A.HOST_APPLY_FINDINGS
-        ),
+        continuation=_CONT_EXTERNAL_DEPENDENCY,
         evidence=e.evidence,
     )
     return replace(ms, state=State.BLOCKED, awaiting=None, pending_record=None, block=block), ()

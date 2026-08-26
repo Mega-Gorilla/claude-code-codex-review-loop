@@ -25,8 +25,9 @@ from claude_code_codex_review_loop.domain.values import (
     State,
 )
 from claude_code_codex_review_loop.errors import ErrorCategory
+from claude_code_codex_review_loop.process import JobObjectRef, ProcessGroupRef
 from claude_code_codex_review_loop.schema import REGISTRY, SchemaKind, validate_object
-from claude_code_codex_review_loop.schema.envelope import MAX_SUBMIT_RECEIPTS
+from claude_code_codex_review_loop.schema.envelope import MAX_ACTIVE_TREES, MAX_SUBMIT_RECEIPTS
 from claude_code_codex_review_loop.workflow import (
     ConsumedIntent,
     PendingAction,
@@ -36,6 +37,7 @@ from claude_code_codex_review_loop.workflow import (
     UserRequestReceipt,
     find_receipt,
     next_attempt,
+    read_active_trees,
     read_consumed_intent,
     read_machine_state,
     read_pending_action,
@@ -43,6 +45,7 @@ from claude_code_codex_review_loop.workflow import (
     read_user_receipt,
     read_user_request,
     read_user_section,
+    with_active_trees,
     with_consumed_intent,
     with_machine_state,
     with_new_logical_action,
@@ -362,8 +365,8 @@ class TestVerifiedMachineState:
         assert not isinstance(payload, SectionUnavailable)
         assert read_machine_state(payload) == state
 
-    def test_unrepresentable_procedure_is_refused(self) -> None:
-        """checkpointがまだ表現しない付随値は、黙って落とさず保存を拒否する。"""
+    def test_a_cancelling_procedure_is_saved(self) -> None:
+        """PR-3aで表現できるようになった（それまでは保存を拒否していた）。"""
         from claude_code_codex_review_loop.domain.values import CancellingProcedure
 
         state = MachineState(
@@ -371,7 +374,8 @@ class TestVerifiedMachineState:
             procedure=CancellingProcedure(attempt_binding=OpaqueBinding("cancel-1")),
         )
         outcome = with_verified_machine_state(checkpoint_payload(), state)
-        assert isinstance(outcome, SectionUnavailable)
+        assert not isinstance(outcome, SectionUnavailable)
+        assert read_machine_state(outcome) == state
 
     def test_unknown_procedure_kind_is_reported(self) -> None:
         payload = checkpoint_payload(
@@ -493,11 +497,13 @@ class TestUnreadableStateSections:
         )
         assert read_machine_state(payload) == MachineState(state=State.APPLYING_FIXES)
 
-    def test_state_needing_an_unsupported_block_is_refused(self) -> None:
-        """まだ表現しないblock種別を持つ状態は、保存すると読めなくなるので拒否する。"""
+    def test_a_progress_block_is_saved(self) -> None:
+        """PR-3aで表現できるようになった（それまでは保存を拒否していた）。"""
+        from claude_code_codex_review_loop.domain._rules_workflow import BLOCKED_CONTINUATIONS
         from claude_code_codex_review_loop.domain.values import (
-            BlockedContinuation,
             Budget,
+            OpaqueFingerprint,
+            OpaqueSnapshot,
             Progress,
             ProgressBlock,
         )
@@ -507,14 +513,14 @@ class TestUnreadableStateSections:
             head=OpaqueRef("head-1"),
             reason=Progress.NO_PROGRESS,
             budget=Budget.REVIEW_ROUND,
-            counter_snapshot=None,
-            fingerprint=None,
-            continuation=BlockedContinuation(
-                resume_state=State.RUNNING_REVIEW, awaiting=Awaiting.CODEX_CODE_REVIEW, commands=()
-            ),
+            counter_snapshot=OpaqueSnapshot("snap-1"),
+            fingerprint=OpaqueFingerprint("fp-1"),
+            continuation=BLOCKED_CONTINUATIONS["FIX_RESULT"],
         )
         state = MachineState(state=State.BLOCKED, block=block)
-        assert isinstance(with_verified_machine_state(checkpoint_payload(), state), SectionUnavailable)
+        outcome = with_verified_machine_state(checkpoint_payload(), state)
+        assert not isinstance(outcome, SectionUnavailable)
+        assert read_machine_state(outcome) == state
 
 
 class TestNextAttempt:
@@ -705,3 +711,53 @@ class TestUserSectionRead:
         assert isinstance(section, dict)
         section[entry] = "not-an-object"
         assert isinstance(read_user_section(payload), SectionUnavailable)
+
+
+class TestActiveTrees:
+    """停止対象のprocess tree台帳（ADR-0019）。"""
+
+    def test_absent_section_reads_as_empty(self) -> None:
+        assert read_active_trees(checkpoint_payload()) == ()
+
+    def test_round_trips_both_kinds(self) -> None:
+        refs = (ProcessGroupRef(pid=10, pgid=10), JobObjectRef(pid=20, job_name="tree-2"))
+        payload = with_active_trees(checkpoint_payload(), refs)
+        assert _valid(payload)
+        assert read_active_trees(payload) == refs
+
+    def test_a_section_without_trees_reads_as_empty(self) -> None:
+        assert read_active_trees({**checkpoint_payload(), "processes": {}}) == ()
+
+    def test_an_empty_ledger_drops_the_section(self) -> None:
+        payload = with_active_trees(
+            with_active_trees(checkpoint_payload(), [ProcessGroupRef(pid=1, pgid=1)]), []
+        )
+        assert "processes" not in payload
+
+    def test_replacing_the_ledger_does_not_keep_the_old_entries(self) -> None:
+        """追加と削除が同じ経路を通る（消したつもりが残る形を作らない）。"""
+        first = with_active_trees(checkpoint_payload(), [ProcessGroupRef(pid=1, pgid=1)])
+        second = with_active_trees(first, [ProcessGroupRef(pid=2, pgid=2)])
+        assert read_active_trees(second) == (ProcessGroupRef(pid=2, pgid=2),)
+
+    def test_the_ledger_has_a_structural_upper_bound(self) -> None:
+        refs = [ProcessGroupRef(pid=index + 1, pgid=index + 1) for index in range(MAX_ACTIVE_TREES + 1)]
+        assert not _valid(with_active_trees(checkpoint_payload(), refs))
+
+    @pytest.mark.parametrize(
+        "section",
+        [
+            "text",
+            {"trees": "text"},
+            {"trees": ["text"]},
+            {"trees": [{"kind": "PROCESS_GROUP", "pid": 1}]},
+            {"trees": [{"kind": "JOB_OBJECT", "pid": 1}]},
+            {"trees": [{"kind": "OTHER", "pid": 1}]},
+            {"trees": [{"kind": "PROCESS_GROUP", "pid": True, "pgid": 1}]},
+        ],
+        ids=["section", "trees", "entry", "no_pgid", "no_job_name", "unknown_kind", "bool_pid"],
+    )
+    def test_unreadable_entries_are_reported(self, section: object) -> None:
+        """停止対象を「無い」へ丸めない（走り続けるtreeを見逃す）。"""
+        payload = {**checkpoint_payload(), "processes": section}
+        assert isinstance(read_active_trees(payload), SectionUnavailable)
