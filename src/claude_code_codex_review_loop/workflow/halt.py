@@ -152,4 +152,3 @@ def halt(
     return HaltCompleted(
         machine_state=applied[0], commands=applied[1], stopped=tuple(stopped)
     )
-
