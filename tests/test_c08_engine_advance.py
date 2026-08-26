@@ -19,6 +19,7 @@ from c08_support.helpers import (
     FakeEvidencePort,
     FakeIds,
     FakePayloadPort,
+    FakeRecordSource,
     machine_state,
     review_records,
     seed,
@@ -66,6 +67,7 @@ def _advance(env, *, ids=None, evidence=None, payload=None, head=HEAD, run_id=RU
         head_sha=head,
         payload_port=payload if payload is not None else FakePayloadPort(),
         evidence_port=FakeEvidencePort(review_records() if evidence is None else evidence),
+        records_port=FakeRecordSource(records=review_records()),
         id_source=ids if ids is not None else FakeIds(),
         issued_at=ISSUED_AT,
     )
@@ -326,11 +328,15 @@ class TestNonActionOutcomes:
         assert _advance(env) == PersistRequired(record=record)
 
     def test_user_input_awaiting_returns_await_user(self, tmp_path) -> None:
+        """ユーザー入力待ちはrequestを払い出す（往復の詳細はtest_c08_user_input）。"""
         env = seed(
             tmp_path,
             state=MachineState(state=State.READY_FOR_HUMAN_MERGE, awaiting=Awaiting.USER_INPUT_GATE),
         )
-        assert _advance(env) == AwaitUser(awaiting=Awaiting.USER_INPUT_GATE)
+        outcome = _advance(env, evidence=())
+        assert isinstance(outcome, AwaitUser)
+        assert outcome.awaiting is Awaiting.USER_INPUT_GATE
+        assert outcome.reissued is False
 
     def test_non_host_awaiting_stops(self, tmp_path) -> None:
         env = seed(

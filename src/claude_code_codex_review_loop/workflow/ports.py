@@ -21,7 +21,7 @@ from typing import Protocol
 
 from ..domain.commands import HostAction
 from ..domain.events import Event
-from ..domain.values import RecordEvidence, RecordKind
+from ..domain.values import Awaiting, RecordEvidence, RecordKind
 from ..identity.record_chain import ChainVerification, VerifiedRecord
 
 
@@ -34,6 +34,26 @@ class ActionContext:
     repository: str
     number: int
     head_sha: str
+
+
+@dataclass(frozen=True)
+class UserRequestContext:
+    """ユーザー入力待ちを組み立てる文脈（`ActionContext`のuser版。ADR-0018）。
+
+    host actionと違い、実行者はagentではなくユーザーである。したがって「どのactionか」
+    ではなく「C-01がどの入力を待っているか」（awaiting）が識別子になる。
+    """
+
+    awaiting: Awaiting
+    run_id: str
+    repository: str
+    number: int
+    head_sha: str
+
+
+# actionとuser requestは同じevidence選択規則（許可kind・対象head・seq昇順）を使うため、
+# portは両方の文脈を受け取る。片方だけのportを増やして規則を二重化しない
+RequestContext = ActionContext | UserRequestContext
 
 
 class ActionPayloadPort(Protocol):
@@ -49,7 +69,7 @@ class EvidencePort(Protocol):
     受け取った列をkind許可（`ActionSpec.evidence_kinds`）とseq昇順で検査する。
     """
 
-    def evidence_for(self, context: ActionContext) -> Sequence[VerifiedRecord]: ...
+    def evidence_for(self, context: RequestContext) -> Sequence[VerifiedRecord]: ...
 
 
 class RecordSourcePort(Protocol):

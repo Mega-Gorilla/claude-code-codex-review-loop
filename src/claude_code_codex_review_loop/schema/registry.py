@@ -32,7 +32,8 @@ class SchemaKind(Enum):
 
     C-01の`RecordKind` 21種（canonical record）に、record化されないprotocol message
     （merge intent / merge outcome / follow-up候補と評価 / HOST_ACTION envelope /
-    submit envelope / checkpoint envelope / PR lock file）を加えた集合。schemaをtransportや各workflowへ
+    submit envelope / AWAIT_USER request / user-input submit / permission resume /
+    checkpoint envelope / PR lock file）を加えた集合。schemaをtransportや各workflowへ
     分散させないため、canonical recordの全kindをここで所有する。
     """
 
@@ -68,6 +69,9 @@ class SchemaKind(Enum):
     HOST_ACTION = "HOST_ACTION"
     SUBMIT = "SUBMIT"
     HOST_FAILURE = "HOST_FAILURE"
+    USER_REQUEST = "USER_REQUEST"
+    USER_SUBMIT = "USER_SUBMIT"
+    PERMISSION_RESUME = "PERMISSION_RESUME"
     CHECKPOINT = "CHECKPOINT"
     RUN_LOCK = "RUN_LOCK"
 
@@ -90,12 +94,14 @@ class SchemaDefinition:
         return max(self.versions)
 
 
-def _pipeline(
-    definition: SchemaDefinition, raw: bytes, *, repair: bool
-) -> ValidationResult:
-    if repair:
-        raw = strip_bom(raw)
-    if len(raw) > definition.max_input_bytes:
+def parse_json_object(raw: bytes, *, max_input_bytes: int) -> dict[str, object] | ValidationResult:
+    """`size -> utf8 -> json -> root-object`だけを通す（**schema検証は行わない**）。
+
+    どの定義で検証するかがpayloadの構造で決まる場合（C-08のsubmit envelope判別）に、
+    guardを重複実装せず前段だけを共有するためのentry point。返すのはparse済みobjectか、
+    失敗stageを持つ`ValidationResult`である。
+    """
+    if len(raw) > max_input_bytes:
         return ValidationResult(False, "size", (PublicError("input_too_large", "$"),), None)
     try:
         text = raw.decode("utf-8")
@@ -108,7 +114,18 @@ def _pipeline(
         return ValidationResult(False, "json", (PublicError("invalid_json", "$"),), None)
     if not isinstance(data, dict):
         return ValidationResult(False, "schema", (PublicError("root_not_object", "$"),), None)
-    return _validate_parsed(definition, data, repair=repair)
+    return data
+
+
+def _pipeline(
+    definition: SchemaDefinition, raw: bytes, *, repair: bool
+) -> ValidationResult:
+    if repair:
+        raw = strip_bom(raw)
+    parsed = parse_json_object(raw, max_input_bytes=definition.max_input_bytes)
+    if isinstance(parsed, ValidationResult):
+        return parsed
+    return _validate_parsed(definition, parsed, repair=repair)
 
 
 def _validate_parsed(

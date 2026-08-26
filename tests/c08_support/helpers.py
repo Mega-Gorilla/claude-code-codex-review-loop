@@ -46,6 +46,8 @@ from claude_code_codex_review_loop.identity import ProducerAllowlist, verify_rec
 from claude_code_codex_review_loop.identity.fs_permissions import replace_private_text
 from claude_code_codex_review_loop.identity.record_chain import ChainVerification, VerifiedRecord
 from claude_code_codex_review_loop.schema import SchemaKind
+from claude_code_codex_review_loop.schema.projection import PROJECTION_SPECS
+from claude_code_codex_review_loop.schema.user_input import HOST_TRANSCRIPT_ROUTE
 from claude_code_codex_review_loop.state import StatePaths, checkpoint_path, run_directory, save_checkpoint
 from claude_code_codex_review_loop.transport import RepoRef
 from claude_code_codex_review_loop.transport.conversation import UnverifiedComment, fetch_comments_since
@@ -56,6 +58,7 @@ from claude_code_codex_review_loop.workflow import (
     build_event,
     issue_transaction,
     transaction_section,
+    user_spec_for,
     with_machine_state,
 )
 from claude_code_codex_review_loop.workflow.ports import ActionContext
@@ -63,6 +66,7 @@ from claude_code_codex_review_loop.workflow.ports import ActionContext
 ISSUED_AT = "2026-08-25T09:00:00Z"
 ACCEPTED_AT = "2026-08-25T09:05:00Z"
 SPEAKER = "Claude Code"
+USER_SPEAKER = "User"
 MODEL = "claude-opus-5"
 NEW_HEAD = "b" * 40
 MAX_RESULT_BYTES = 65_536
@@ -390,35 +394,232 @@ def raw(payload: Mapping[str, object]) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
+# ---------------------------------------------------------------------------
+# `AWAIT_USER`搬送路（Phase 8 PR-2c）
+# ---------------------------------------------------------------------------
+
+# awaitingごとの滞在state（C-01の`AWAITING_HOME`と一致させる）
+USER_AWAITING_STATES: Mapping[Awaiting, State] = {
+    Awaiting.USER_INPUT_DECISION: State.AWAITING_USER_DECISION,
+    Awaiting.USER_INPUT_GATE: State.READY_FOR_HUMAN_MERGE,
+    Awaiting.USER_INPUT_PERMISSION: State.AWAITING_TOOL_PERMISSION,
+}
+
+PERMISSION_SECTION: Mapping[str, object] = {
+    "permission_id": "perm-1",
+    "blocked_tool": "Bash(git push)",
+    "requested_scope": "push once",
+    "head_sha": HEAD,
+}
+
+
+def user_machine_state(awaiting: Awaiting) -> MachineState:
+    """当該awaitingで待機しているMachineState（不変条件を満たす最小形）。"""
+    state = USER_AWAITING_STATES[awaiting]
+    # AWAITING_TOOL_PERMISSIONはreturn_toを必ず持つ（C-01のRETURN_SCOPE不変条件）
+    return_to = State.RUNNING_REVIEW if state is State.AWAITING_TOOL_PERMISSION else None
+    return MachineState(state=state, awaiting=awaiting, return_to=return_to)
+
+
+def user_record_payload(
+    kind: RecordKind, *, head: str = HEAD, route: str = HOST_TRANSCRIPT_ROUTE
+) -> dict[str, object]:
+    """user-input recordの代表payload（対象headと入力経路だけ差し替える）。"""
+    payload = dict(REPRESENTATIVE[SchemaKind(kind.value)])
+    head_source = PROJECTION_SPECS[kind].head_source
+    assert head_source is not None
+    payload[head_source] = head
+    payload["input_route"] = route
+    return payload
+
+
+def permission_resume_payload(**overrides: object) -> dict[str, object]:
+    payload = dict(REPRESENTATIVE[SchemaKind.PERMISSION_RESUME])
+    payload["permission_id"] = PERMISSION_SECTION["permission_id"]
+    payload["tool"] = PERMISSION_SECTION["blocked_tool"]
+    payload["scope"] = PERMISSION_SECTION["requested_scope"]
+    payload["current_head_sha"] = PERMISSION_SECTION["head_sha"]
+    payload.update(overrides)
+    return payload
+
+
+def user_submit_payload(
+    *,
+    request_id: str,
+    nonce: str,
+    result_hash: str,
+    awaiting: Awaiting = Awaiting.USER_INPUT_GATE,
+    result_kind: str | None = "GATE_QUESTION",
+    run_id: str = RUN,
+    head: str = HEAD,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "request_id": request_id,
+        "awaiting": awaiting.value,
+        "expected_head_sha": head,
+        "nonce": nonce,
+        "result_hash": result_hash,
+    }
+    if result_kind is not None:
+        payload["result_kind"] = result_kind
+    return payload
+
+
+@dataclass(frozen=True)
+class UserEnv:
+    """`AWAIT_USER`の往復を通すための一式（GitHub側とcheckpointをseed済み）。"""
+
+    paths: StatePaths
+    run_dir: Path
+    directory: Path
+    context: GhContext
+    repo: RepoRef
+    policy: RetryPolicy
+    awaiting: Awaiting
+    records: tuple[VerifiedRecord, ...]
+
+    def advance_kwargs(self, **overrides: object) -> dict[str, object]:
+        values: dict[str, object] = {
+            "paths": self.paths,
+            "run_id": RUN,
+            "repository": REPOSITORY,
+            "number": NUMBER,
+            "head_sha": HEAD,
+            "payload_port": FakePayloadPort(),
+            "evidence_port": FakeEvidencePort(self.evidence()),
+            "records_port": FakeRecordSource(records=self.records),
+            "id_source": FakeIds("req"),
+            "issued_at": ISSUED_AT,
+        }
+        values.update(overrides)
+        return values
+
+    def submit_kwargs(self, **overrides: object) -> dict[str, object]:
+        values: dict[str, object] = {
+            "paths": self.paths,
+            "run_id": RUN,
+            "repository": REPOSITORY,
+            "number": NUMBER,
+            "records_port": FakeRecordSource(records=self.records),
+            "body_port": FakeBodyPort(text="ユーザー入力"),
+            "max_result_bytes": MAX_RESULT_BYTES,
+            "retry_budget": RETRY_BUDGET,
+            "accepted_at": ACCEPTED_AT,
+            "speaker": SPEAKER,
+            "model": MODEL,
+            "user_speaker": USER_SPEAKER,
+        }
+        values.update(overrides)
+        return values
+
+    def persist_kwargs(self, **overrides: object) -> dict[str, object]:
+        values: dict[str, object] = {
+            "paths": self.paths,
+            "run_id": RUN,
+            "repository": REPOSITORY,
+            "number": NUMBER,
+            "context": self.context,
+            "repo": self.repo,
+            "records_port": GithubBackedRecords(
+                context=self.context, repo=self.repo, number=NUMBER, policy=self.policy
+            ),
+            "event_port": FakeRecordEvents(),
+            "policy": self.policy,
+            "search_since": None,
+            "search_attempts": 1,
+            "search_backoff_seconds": 0.0,
+            "search_max_pages": 5,
+        }
+        values.update(overrides)
+        return values
+
+    def evidence(self) -> tuple[VerifiedRecord, ...]:
+        """当該awaitingの根拠として許可されるrecordだけを渡す（registryが値域を決める）。"""
+        spec = user_spec_for(self.awaiting)
+        assert spec is not None
+        return tuple(record for record in self.records if record.kind in spec.evidence_kinds)
+
+    def comments(self) -> list[object]:
+        entries = read_state(self.directory)["comments"]
+        assert isinstance(entries, list)
+        return entries
+
+
+def user_env(
+    tmp_path: Path,
+    *,
+    awaiting: Awaiting = Awaiting.USER_INPUT_GATE,
+    seeded: Sequence[RecordKind] = (RecordKind.FINAL_REPORT,),
+    state: MachineState | None = None,
+    extra: Mapping[str, object] | None = None,
+    scenario: str = "ok",
+    timeout_seconds: float = 30.0,
+) -> UserEnv:
+    """GitHubへseq=1..nを投稿済みにし、当該awaitingで待機するcheckpointを用意する。"""
+    directory = tmp_path / "gh"
+    directory.mkdir(parents=True, exist_ok=True)
+    posted = chain_comments_of(list(seeded))
+    seed_state(directory, comments=[seed_dict(comment, issue=NUMBER) for comment in posted])
+    paths = state_paths(tmp_path)
+    payload = with_machine_state(
+        checkpoint_payload(), state if state is not None else user_machine_state(awaiting)
+    )
+    if awaiting is Awaiting.USER_INPUT_PERMISSION:
+        payload["permission"] = dict(PERMISSION_SECTION)
+    if extra is not None:
+        payload.update(extra)
+    save_checkpoint(checkpoint_path(paths, RUN), payload)
+    return UserEnv(
+        paths=paths,
+        run_dir=run_directory(paths, RUN),
+        directory=directory,
+        context=make_context(directory, scenario=scenario, timeout_seconds=timeout_seconds),
+        repo=RepoRef(owner="owner", name="repo"),
+        policy=make_policy(),
+        awaiting=awaiting,
+        records=verified_chain(list(seeded)).records,
+    )
+
 __all__ = [
     "ACCEPTED_AT",
+    "EngineEnv",
+    "FakeBodyPort",
+    "FakeEvidencePort",
+    "FakeIds",
+    "FakePayloadPort",
+    "FakeRecordEvents",
+    "FakeRecordSource",
+    "GithubBackedRecords",
     "HEAD",
     "ISSUED_AT",
     "MAX_RESULT_BYTES",
     "MODEL",
     "NEW_HEAD",
     "NUMBER",
+    "PERMISSION_SECTION",
+    "PersistEnv",
     "REPOSITORY",
     "RETRY_BUDGET",
     "RUN",
     "SPEAKER",
-    "EngineEnv",
-    "PersistEnv",
-    "FakeBodyPort",
-    "FakeEvidencePort",
-    "FakeIds",
-    "FakePayloadPort",
-    "FakeRecordEvents",
-    "GithubBackedRecords",
-    "FakeRecordSource",
+    "USER_AWAITING_STATES",
+    "USER_SPEAKER",
+    "UserEnv",
     "failure_payload",
     "fix_result_payload",
     "gate_answer_payload",
     "machine_state",
+    "permission_resume_payload",
     "persist_env",
     "raw",
     "review_records",
     "seed",
     "submit_payload",
+    "user_env",
+    "user_machine_state",
+    "user_record_payload",
+    "user_submit_payload",
     "write_result",
 ]

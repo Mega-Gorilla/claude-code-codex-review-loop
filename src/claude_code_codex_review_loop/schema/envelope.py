@@ -40,6 +40,7 @@ from .registry import (
     sha,
     text,
 )
+from .user_input import INPUT_ROUTES, USER_INPUT_AWAITINGS
 from .validate import Field, VersionSpec
 
 # checkpointは複数sectionを持つため入力上限を広げる
@@ -49,6 +50,7 @@ CHECKPOINT_MAX_INPUT_BYTES = 262_144
 # checkpointが書けなくなる方向へは伸ばさない（C-08がこの値でretryを打ち切る）
 MAX_SUBMIT_RECEIPTS = 32
 
+_USER_AWAITING_VALUES = tuple(sorted(awaiting.value for awaiting in USER_INPUT_AWAITINGS))
 _PROCEDURE_KINDS: tuple[str, ...] = tuple(sorted(kind.value for kind in ProcedureKind))
 _BLOCK_KINDS: tuple[str, ...] = tuple(sorted(kind.value for kind in BlockKind))
 _STATE_VALUES = tuple(sorted(state.value for state in State))
@@ -456,6 +458,63 @@ _SECTIONS: dict[str, Field] = {
     ),
 }
 
+def _user_request_section() -> Field:
+    """未完了の`AWAIT_USER` requestと、その1回きりの応答（Phase 8 PR-2c。ADR-0018）。
+
+    `host_action`と別sectionにするのは、C-01がhost actionとユーザー入力を同時には待たない
+    一方で、両者のbinding（action ID / request ID）とreceiptの形が異なるためである。
+
+    `receipt`と`consumed`が単数なのは構造的な帰結で、上限を数字で決めているのではない:
+    engineはユーザー入力へretry attemptを発行せず（人間の入力にbudgetを課さない）、C-01は
+    1 awaiting instanceにつきuser-input recordを1件しか受理しない（PRODUCED時にawaitingを
+    消費する）。したがってinstanceあたり応答は1件、消費されるintentも1件である。
+    """
+    return obj(
+        {
+            "pending": obj(
+                {
+                    "request_id": opaque(),
+                    "awaiting": enum_field(_USER_AWAITING_VALUES),
+                    "nonce": opaque(),
+                    "expected_head_sha": sha(),
+                    "result_path": text(),
+                    "envelope_path": text(),
+                    "envelope_hash": opaque(),
+                    # awaiting instanceの識別子（request発行時点のchain最大seq）
+                    "since_seq": integer(),
+                    "issued_at": _optional_text(),
+                },
+                required=False,
+            ),
+            "receipt": obj(
+                {
+                    "request_id": opaque(),
+                    "nonce": opaque(),
+                    "submit_hash": opaque(),
+                    "result_hash": opaque(),
+                    # result_kind / intent_keyの不在はpermission resume（recordを作らず、
+                    # user intentの台帳にも載らない応答）を意味する
+                    "result_kind": enum_field(_RECORD_KIND_VALUES, required=False),
+                    "intent_key": _optional_opaque(),
+                    "accepted_at": _optional_text(),
+                },
+                required=False,
+            ),
+            # 当該instanceで消費済みのuser intent。2経路（転記 / GitHub直接comment）が
+            # 同じkeyを導出し、同一intentの二重recordを作らないための台帳（ADR-0018）
+            "consumed": obj(
+                {
+                    "intent_key": opaque(),
+                    "binding": opaque(),
+                    "route": enum_field(INPUT_ROUTES),
+                },
+                required=False,
+            ),
+        },
+        required=False,
+    )
+
+
 def _envelope_fields(host_action: Field) -> dict[str, Field]:
     return {
         # 必須の外枠: 1. run ID、repository、Issue / PR番号
@@ -465,6 +524,9 @@ def _envelope_fields(host_action: Field) -> dict[str, Field]:
         "number": integer(),
         **_SECTIONS,
         "host_action": host_action,
+        # user_requestはPhase 8 PR-2cのadditive追加（新しいoptional sectionのため
+        # version bumpなし。ADR-0004 rule 2 / 10）。v1 / v2の双方へ同じ形で入る
+        "user_request": _user_request_section(),
     }
 
 

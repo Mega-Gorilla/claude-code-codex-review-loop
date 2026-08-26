@@ -53,12 +53,22 @@ from .records import (
 from .registry import (
     SchemaDefinition,
     SchemaKind,
+    parse_json_object,
     repair_and_validate,
     validate,
     validate_object,
 )
 from .report import FINAL_REPORT
 from .review import CLARIFICATION_ANSWER, CLARIFICATION_QUESTION, FIX_RESULT, REVIEW_RESULT
+from .user_input import (
+    GITHUB_COMMENT_ROUTE,
+    HOST_TRANSCRIPT_ROUTE,
+    INPUT_ROUTES,
+    PERMISSION_RESUME,
+    USER_INPUT_AWAITINGS,
+    USER_REQUEST,
+    USER_SUBMIT,
+)
 from .validate import Field, PublicError, ValidationResult, VersionSpec
 
 _DEFINITIONS: tuple[SchemaDefinition, ...] = (
@@ -84,6 +94,9 @@ _DEFINITIONS: tuple[SchemaDefinition, ...] = (
     HOST_ACTION,
     SUBMIT,
     HOST_FAILURE,
+    USER_REQUEST,
+    USER_SUBMIT,
+    PERMISSION_RESUME,
     PERMISSION_BLOCK,
     CI_TIMEOUT,
     CI_CODE_FAILURE,
@@ -126,6 +139,13 @@ __all__ = [
     "schema_kind_of",
     "validate_run_id",
     "HOST_ACTION_KINDS",
+    "GITHUB_COMMENT_ROUTE",
+    "HOST_TRANSCRIPT_ROUTE",
+    "INPUT_ROUTES",
+    "PERMISSION_RESUME",
+    "USER_INPUT_AWAITINGS",
+    "USER_REQUEST",
+    "USER_SUBMIT",
     "REGISTRY",
     "Field",
     "PublicError",
@@ -134,6 +154,7 @@ __all__ = [
     "ValidationResult",
     "VersionSpec",
     "load_with_migration",
+    "parse_json_object",
     "repair_and_validate",
     "validate",
     "validate_object",

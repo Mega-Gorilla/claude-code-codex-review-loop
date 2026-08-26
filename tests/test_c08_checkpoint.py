@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from c07_support.helpers import checkpoint_payload
 
@@ -26,20 +28,31 @@ from claude_code_codex_review_loop.errors import ErrorCategory
 from claude_code_codex_review_loop.schema import REGISTRY, SchemaKind, validate_object
 from claude_code_codex_review_loop.schema.envelope import MAX_SUBMIT_RECEIPTS
 from claude_code_codex_review_loop.workflow import (
+    ConsumedIntent,
     PendingAction,
+    PendingUserRequest,
     SectionUnavailable,
     SubmitReceipt,
+    UserRequestReceipt,
     find_receipt,
     next_attempt,
+    read_consumed_intent,
     read_machine_state,
     read_pending_action,
     read_receipts,
+    read_user_receipt,
+    read_user_request,
+    read_user_section,
+    with_consumed_intent,
     with_machine_state,
     with_new_logical_action,
     with_receipt,
     with_retry_attempt,
+    with_user_receipt,
+    with_user_request,
     with_verified_machine_state,
     without_pending_action,
+    without_user_request,
 )
 
 ACTION = PendingAction(
@@ -519,3 +532,176 @@ class TestNextAttempt:
         assert following.attempt == ACTION.attempt + 1
         assert following.action_kind == ACTION.action_kind
         assert following.expected_head_sha == ACTION.expected_head_sha
+
+
+REQUEST = PendingUserRequest(
+    request_id="req-1",
+    awaiting=Awaiting.USER_INPUT_GATE,
+    nonce="nonce-1",
+    expected_head_sha="a" * 40,
+    result_path="requests/req-1/result.json",
+    envelope_path="requests/req-1/request.json",
+    envelope_hash="c" * 64,
+    since_seq=3,
+    issued_at="2026-08-26T09:00:00Z",
+)
+
+USER_RECEIPT = UserRequestReceipt(
+    request_id="req-1",
+    nonce="nonce-1",
+    submit_hash="d" * 64,
+    result_hash="e" * 64,
+    intent_key="ui:{}",
+    result_kind=RecordKind.GATE_QUESTION,
+    accepted_at="2026-08-26T09:05:00Z",
+)
+
+
+class TestUserRequestRoundTrip:
+    """`user_request` sectionのreader / writer（ADR-0018）。"""
+
+    def test_absent_section_reads_as_none(self) -> None:
+        payload = checkpoint_payload()
+        assert read_user_request(payload) is None
+        assert read_user_receipt(payload) is None
+        assert read_consumed_intent(payload) is None
+
+    def test_request_round_trips(self) -> None:
+        payload = with_user_request(checkpoint_payload(), REQUEST)
+        assert validate_object(REGISTRY[SchemaKind.CHECKPOINT], payload).ok
+        assert read_user_request(payload) == REQUEST
+
+    def test_receipt_round_trips(self) -> None:
+        payload = with_user_receipt(with_user_request(checkpoint_payload(), REQUEST), USER_RECEIPT)
+        assert validate_object(REGISTRY[SchemaKind.CHECKPOINT], payload).ok
+        assert read_user_receipt(payload) == USER_RECEIPT
+
+    def test_a_record_less_receipt_has_no_intent_key(self) -> None:
+        """permission resumeはrecordを作らず、intentの台帳にも載らない。"""
+        receipt = UserRequestReceipt(
+            request_id="req-1", nonce="nonce-1", submit_hash="d" * 64, result_hash="e" * 64
+        )
+        payload = with_user_receipt(checkpoint_payload(), receipt)
+        assert validate_object(REGISTRY[SchemaKind.CHECKPOINT], payload).ok
+        assert read_user_receipt(payload) == receipt
+
+    def test_consumed_intent_round_trips(self) -> None:
+        consumed = ConsumedIntent(
+            intent_key="ui:{}", binding="cr:run-1:00000002:x", route="github_comment"
+        )
+        payload = with_consumed_intent(checkpoint_payload(), consumed)
+        assert validate_object(REGISTRY[SchemaKind.CHECKPOINT], payload).ok
+        assert read_consumed_intent(payload) == consumed
+
+    def test_issuing_a_request_replaces_the_whole_section(self) -> None:
+        """新しいinstanceは前instanceのreceiptと消費済みintentを持ち越さない。"""
+        payload = with_consumed_intent(
+            with_user_receipt(with_user_request(checkpoint_payload(), REQUEST), USER_RECEIPT),
+            ConsumedIntent(intent_key="ui:{}", binding="cr:x", route="host_transcript"),
+        )
+        replaced = with_user_request(payload, REQUEST)
+        assert read_user_receipt(replaced) is None
+        assert read_consumed_intent(replaced) is None
+
+    def test_without_request_keeps_the_receipt(self) -> None:
+        payload = with_user_receipt(with_user_request(checkpoint_payload(), REQUEST), USER_RECEIPT)
+        cleared = without_user_request(payload)
+        assert read_user_request(cleared) is None
+        assert read_user_receipt(cleared) == USER_RECEIPT
+
+    def test_clearing_the_only_entry_drops_the_section(self) -> None:
+        payload = without_user_request(with_user_request(checkpoint_payload(), REQUEST))
+        assert "user_request" not in payload
+
+    def test_an_optional_issued_at_is_omitted(self) -> None:
+        payload = with_user_request(
+            checkpoint_payload(), dataclasses.replace(REQUEST, issued_at=None)
+        )
+        section = payload["user_request"]
+        assert isinstance(section, dict)
+        assert "issued_at" not in section["pending"]
+
+
+class TestUserSectionRefusals:
+    """解釈できない値を「無い」へ丸めない（silent repair禁止）。"""
+
+    @pytest.mark.parametrize(
+        "section",
+        ["not-an-object", {"pending": "x"}, {"receipt": "x"}, {"consumed": "x"}],
+        ids=["section", "pending", "receipt", "consumed"],
+    )
+    def test_non_object_entries_are_unavailable(self, section: object) -> None:
+        payload = {**checkpoint_payload(), "user_request": section}
+        readers = (read_user_request, read_user_receipt, read_consumed_intent)
+        assert any(isinstance(reader(payload), SectionUnavailable) for reader in readers)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "request_id",
+            "awaiting",
+            "nonce",
+            "expected_head_sha",
+            "result_path",
+            "envelope_path",
+            "envelope_hash",
+        ],
+    )
+    def test_a_missing_pending_field_is_unavailable(self, name: str) -> None:
+        payload = with_user_request(checkpoint_payload(), REQUEST)
+        section = payload["user_request"]
+        assert isinstance(section, dict)
+        del section["pending"][name]
+        assert isinstance(read_user_request(payload), SectionUnavailable)
+
+    @pytest.mark.parametrize("value", [-1, True, "3"], ids=["negative", "bool", "text"])
+    def test_a_non_sequence_since_seq_is_unavailable(self, value: object) -> None:
+        payload = with_user_request(checkpoint_payload(), REQUEST)
+        section = payload["user_request"]
+        assert isinstance(section, dict)
+        section["pending"]["since_seq"] = value
+        assert isinstance(read_user_request(payload), SectionUnavailable)
+
+    @pytest.mark.parametrize("name", ["request_id", "nonce", "submit_hash", "result_hash"])
+    def test_a_missing_receipt_field_is_unavailable(self, name: str) -> None:
+        payload = with_user_receipt(checkpoint_payload(), USER_RECEIPT)
+        section = payload["user_request"]
+        assert isinstance(section, dict)
+        del section["receipt"][name]
+        assert isinstance(read_user_receipt(payload), SectionUnavailable)
+
+    @pytest.mark.parametrize("name", ["intent_key", "binding", "route"])
+    def test_a_missing_consumed_field_is_unavailable(self, name: str) -> None:
+        payload = with_consumed_intent(
+            checkpoint_payload(),
+            ConsumedIntent(intent_key="ui:{}", binding="cr:x", route="host_transcript"),
+        )
+        section = payload["user_request"]
+        assert isinstance(section, dict)
+        del section["consumed"][name]
+        assert isinstance(read_consumed_intent(payload), SectionUnavailable)
+
+
+class TestUserSectionRead:
+    """3 entryを1回で読み、1つでも解釈できなければ停止させる。"""
+
+    def test_reads_every_entry(self) -> None:
+        consumed = ConsumedIntent(intent_key="ui:{}", binding="cr:x", route="host_transcript")
+        payload = with_consumed_intent(
+            with_user_receipt(with_user_request(checkpoint_payload(), REQUEST), USER_RECEIPT),
+            consumed,
+        )
+        state = read_user_section(payload)
+        assert not isinstance(state, SectionUnavailable)
+        assert (state.pending, state.receipt, state.consumed) == (REQUEST, USER_RECEIPT, consumed)
+
+    @pytest.mark.parametrize("entry", ["pending", "receipt", "consumed"])
+    def test_an_unreadable_entry_stops_the_read(self, entry: str) -> None:
+        payload = with_consumed_intent(
+            with_user_receipt(with_user_request(checkpoint_payload(), REQUEST), USER_RECEIPT),
+            ConsumedIntent(intent_key="ui:{}", binding="cr:x", route="host_transcript"),
+        )
+        section = payload["user_request"]
+        assert isinstance(section, dict)
+        section[entry] = "not-an-object"
+        assert isinstance(read_user_section(payload), SectionUnavailable)

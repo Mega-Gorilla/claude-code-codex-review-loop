@@ -2,20 +2,25 @@
 """step engine: `advance`と`submit`（Phase 8。implementation plan Section 2 / ADR-0015）。
 
 Controller CLIはClaude Code sessionの子processであり、親のLLM turnを呼び戻せない。engineは
-Claudeを起動せず、`advance`で次の`HOST_ACTION`を返し、active hostが自分のcontextで実行して
+Claudeを起動せず、`advance`で次にすべきことを返し、active hostが自分のcontextで実行して
 `submit`で結果を返す。**同一runに対する制御経路はこの2つだけ**である（AC-C08-03）。
+
+`advance`が返すのは`HOST_ACTION`（agentへの依頼）か`AWAIT_USER`（ユーザーへの依頼）で、
+どちらも同じ形（envelopeの払い出し -> 未完了なら再提示）で扱う。`submit`は両者の応答を
+**同一のentry point**で受け、envelopeの構造（`action_id` / `request_id`の排他）で判別する
+（ADR-0018）。ユーザー入力側の実装は`user_input`にある。
 
 「pure」はprocess / CLIに依存しないという意味で、I/Oが無いという意味ではない。値の供給元は
 port（`ports`）、path・ID・時刻・上限値は引数で受け取り、engine自身は既定値を持たない。
 
 順序（ADR-0015。crash windowで重複を作らないための不変条件）:
 
-- `advance`: action envelopeの保存 -> checkpointの保存 -> hostへ返却
-- `submit`: 受理 -> **submit receiptとrecord transactionを同じcheckpoint更新で保存** ->
-  （投稿以降はPR-2bのPersistRecord実行）
+- `advance`: envelopeの保存 -> checkpointの保存 -> hostへ返却
+- `submit`: 受理 -> **receiptとrecord transactionを同じcheckpoint更新で保存** ->
+  （投稿以降は`persistence`のPersistRecord実行）
 
-本PRは`RecordProduced`までを扱う。GitHubへの投稿・検証と`*Verified` eventの組み立ては
-C-01の`PersistRecord`実行として後続PRが行うため、`advance`はpending recordがある間
+`submit`は`RecordProduced`までを扱う。GitHubへの投稿・検証と`*Verified` eventの組み立ては
+C-01の`PersistRecord`実行（`persistence`）が行うため、`advance`はpending recordがある間
 `PersistRequired`を返す。
 """
 
@@ -29,7 +34,7 @@ from ..domain import events as ev
 from ..domain.commands import Command
 from ..domain.machine import transition
 from ..domain.states import TERMINAL_STATES, State
-from ..domain.values import Awaiting, MachineState, OpaqueBinding, PendingRecord, RecordKind, TransitionRejected
+from ..domain.values import Awaiting, MachineState, PendingRecord, RecordKind, TransitionRejected
 from ..errors import ErrorCategory
 from ..identity.errors import IdentityError
 from ..identity.fs_permissions import create_private_dir, verify_private_dir, write_private_text
@@ -38,14 +43,16 @@ from ..schema.action import HOST_ACTION, HOST_FAILURE, SUBMIT
 from ..schema.envelope import MAX_SUBMIT_RECEIPTS
 from ..schema.migrate import load_with_migration
 from ..schema.projection import PROJECTION_SPECS, canonical_json, canonical_payload_hash
-from ..schema.registry import validate_object
+from ..schema.registry import SchemaDefinition, parse_json_object, validate_object
+from ..schema.user_input import USER_SUBMIT
+from ..schema.validate import ValidationResult
 from ..state import (
     StatePaths,
     checkpoint_path,
     save_checkpoint,
 )
 from ..transport.render import prepare_public_body
-from .actions import ActionSpec, spec_for_awaiting, spec_for_kind
+from .actions import ActionSpec, spec_for_awaiting, spec_for_kind, user_spec_for
 from .checkpoint_view import (
     PendingAction,
     SectionUnavailable,
@@ -54,16 +61,34 @@ from .checkpoint_view import (
     next_attempt,
     read_pending_action,
     read_receipts,
+    read_user_section,
     with_machine_state,
     with_new_logical_action,
     with_receipt,
     with_retry_attempt,
     without_pending_action,
 )
-from .ports import ActionContext, ActionPayloadPort, EvidencePort, RecordBodyPort, RecordSourcePort
+from .ports import (
+    ActionContext,
+    ActionPayloadPort,
+    EvidencePort,
+    RecordBodyPort,
+    RecordSourcePort,
+    RequestContext,
+    UserRequestContext,
+)
 from .results import ResultRejected, read_result
 from .run_context import EngineStopped, RunContext, load_run
-from .transaction import IssuedTransaction, TransactionUnavailable, issue_transaction, transaction_section
+from .transaction import IssuedTransaction, ProduceRejected, produce_record, transaction_section
+from .user_input import (
+    AwaitUser,
+    UserInputAccepted,
+    UserInputReplayed,
+    UserIntentAlreadyRecorded,
+    accept_user_submit,
+    issue_user_request,
+    reissue_user_request,
+)
 
 ACTIONS_DIR = "actions"
 ENVELOPE_FILE = "action.json"
@@ -85,13 +110,6 @@ class HostActionIssued:
     envelope_path: Path
     result_path: Path
     reissued: bool
-
-
-@dataclass(frozen=True)
-class AwaitUser:
-    """ユーザー入力待ち。搬送路（envelopeとuser-input submit）は後続PRが実装する。"""
-
-    awaiting: Awaiting
 
 
 @dataclass(frozen=True)
@@ -130,7 +148,37 @@ class SubmitReplayed:
     receipt: SubmitReceipt
 
 
-SubmitOutcome = SubmitAccepted | SubmitReplayed | EngineStopped
+SubmitOutcome = (
+    SubmitAccepted
+    | SubmitReplayed
+    | UserInputAccepted
+    | UserInputReplayed
+    | UserIntentAlreadyRecorded
+    | EngineStopped
+)
+
+# submit envelopeの判別key。`HOST_ACTION`への応答は`action_id`を、`AWAIT_USER`への応答は
+# `request_id`を必須で持ち、**両者は互いに素**である（contract testで固定する）。片方の
+# 定義で試して失敗したらもう片方、という推測経路は作らない（ADR-0018 決定5）
+_HOST_SUBMIT_KEY = "action_id"
+_USER_SUBMIT_KEY = "request_id"
+_MAX_SUBMIT_BYTES = max(SUBMIT.max_input_bytes, USER_SUBMIT.max_input_bytes)
+
+
+def _classify_submit(raw: bytes) -> tuple[SchemaDefinition, dict[str, object]] | EngineStopped:
+    """submit envelopeを構造で判別する（曖昧ならfail closed）。"""
+    parsed = parse_json_object(raw, max_input_bytes=_MAX_SUBMIT_BYTES)
+    if isinstance(parsed, ValidationResult):
+        codes = ",".join(sorted(error.code for error in parsed.errors))
+        return EngineStopped("submit_invalid", f"submitを読めない（stage={parsed.stage}, {codes}）")
+    host = _HOST_SUBMIT_KEY in parsed
+    user = _USER_SUBMIT_KEY in parsed
+    if host == user:
+        return EngineStopped(
+            "submit_unclassified",
+            f"submitが{_HOST_SUBMIT_KEY} / {_USER_SUBMIT_KEY}のちょうど一方を持たない",
+        )
+    return (SUBMIT if host else USER_SUBMIT), parsed
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -181,7 +229,10 @@ def _build_envelope(
 
 
 def _evidence_of(
-    spec: ActionSpec, port: EvidencePort, context: ActionContext
+    evidence_kinds: tuple[RecordKind, ...],
+    label: str,
+    port: EvidencePort,
+    context: RequestContext,
 ) -> tuple[tuple[str, str], ...] | EngineStopped:
     """同梱する検証済みrecord（AC-C08-07）。許可kind・**対象head**・seq昇順を検査する。
 
@@ -193,9 +244,9 @@ def _evidence_of(
     """
     records = tuple(port.evidence_for(context))
     for record in records:
-        if record.kind not in spec.evidence_kinds:
+        if record.kind not in evidence_kinds:
             return EngineStopped(
-                "evidence_kind", f"{spec.kind}の根拠に使えないrecord種別: {record.kind.value}"
+                "evidence_kind", f"{label}の根拠に使えないrecord種別: {record.kind.value}"
             )
         if record.head_sha != context.head_sha:
             return EngineStopped(
@@ -225,7 +276,7 @@ def _issue_action(
     context = ActionContext(
         action=spec.action, run_id=run_id, repository=repository, number=number, head_sha=head_sha
     )
-    evidence = _evidence_of(spec, evidence_port, context)
+    evidence = _evidence_of(spec.evidence_kinds, spec.kind, evidence_port, context)
     if isinstance(evidence, EngineStopped):
         return evidence
     action_id = id_source()
@@ -315,6 +366,60 @@ def _reissue(loaded: RunContext, action: PendingAction) -> HostActionIssued | En
     )
 
 
+def _await_user(
+    loaded: RunContext,
+    awaiting: Awaiting,
+    *,
+    paths: StatePaths,
+    run_id: str,
+    repository: str,
+    number: int,
+    head_sha: str,
+    records_port: RecordSourcePort,
+    evidence_port: EvidencePort,
+    id_source: Callable[[], str],
+    issued_at: str,
+) -> AdvanceOutcome:
+    """ユーザー入力待ちのrequestを返す（未応答があればそのまま再提示する）。"""
+    spec = user_spec_for(awaiting)
+    if spec is None:  # pragma: no cover - 呼び出し元が3値のawaitingでのみ入る
+        return EngineStopped("not_user_input", f"{awaiting.value}はユーザー入力待ちではない")
+    section = read_user_section(loaded.payload)
+    if isinstance(section, SectionUnavailable):
+        return EngineStopped("user_request_unavailable", section.detail)
+    pending = section.pending
+    if pending is not None:
+        if pending.awaiting is not awaiting:
+            # C-01が別の入力を待っている状態で古いrequestを再提示すると、hostは終わった
+            # 待機へ答えてしまう。新しいrequestを黙って上書きもしない（fail closed）
+            return EngineStopped("user_request_stale", "保存済みrequestが現在の待機と一致しない")
+        return reissue_user_request(loaded, pending)
+    chain = records_port.chain(run_id)
+    if not chain.is_intact:
+        # 壊れたchainの上でユーザーへ判断を求めない。提示する根拠recordの正当性が
+        # 確かめられておらず、承認をそこへbindできない（integrityの解消が先）
+        return EngineStopped("chain_violation", f"chainにviolationがある（{len(chain.violations)}件）")
+    context = UserRequestContext(
+        awaiting=awaiting, run_id=run_id, repository=repository, number=number, head_sha=head_sha
+    )
+    evidence = _evidence_of(spec.evidence_kinds, spec.kind, evidence_port, context)
+    if isinstance(evidence, EngineStopped):
+        return evidence
+    return issue_user_request(
+        loaded,
+        spec,
+        paths=paths,
+        run_id=run_id,
+        repository=repository,
+        number=number,
+        head_sha=head_sha,
+        since_seq=chain.max_seq,
+        evidence=evidence,
+        id_source=id_source,
+        issued_at=issued_at,
+    )
+
+
 def advance(
     *,
     paths: StatePaths,
@@ -324,6 +429,7 @@ def advance(
     head_sha: str,
     payload_port: ActionPayloadPort,
     evidence_port: EvidencePort,
+    records_port: RecordSourcePort,
     id_source: Callable[[], str],
     issued_at: str,
 ) -> AdvanceOutcome:
@@ -380,7 +486,19 @@ def advance(
     if awaiting is None:
         return EngineStopped("no_awaiting", f"{machine_state.state.value}は応答待ちの状態でない")
     if awaiting in _USER_INPUT_AWAITINGS:
-        return AwaitUser(awaiting=awaiting)
+        return _await_user(
+            loaded,
+            awaiting,
+            paths=paths,
+            run_id=run_id,
+            repository=repository,
+            number=number,
+            head_sha=head_sha,
+            records_port=records_port,
+            evidence_port=evidence_port,
+            id_source=id_source,
+            issued_at=issued_at,
+        )
     spec = spec_for_awaiting(awaiting)
     if spec is None:
         return EngineStopped("not_host_action", f"{awaiting.value}はhost actionではない")
@@ -491,33 +609,26 @@ def _completed(
     prepared = prepare_public_body(
         body_port.body_for(receipt.result_kind, result.payload), speaker=speaker, model=model
     )
-    chain = records_port.chain(run_id)
-    if not chain.is_intact:
-        # 壊れたchainの上でseqとprevを決めない（integrityの解消はC-01のblockが扱う）
-        return EngineStopped("chain_violation", f"chainにviolationがある（{len(chain.violations)}件）")
-    issued = issue_transaction(
+    produced = produce_record(
+        loaded.machine_state,
         kind=receipt.result_kind,
         payload=result.payload,
         run_id=run_id,
         head_sha=head_sha,
         body=prepared.text,
-        records=chain.records,
+        chain=records_port.chain(run_id),
     )
-    if isinstance(issued, TransactionUnavailable):
-        return EngineStopped("transaction_unavailable", issued.detail)
-    try:
-        machine_state, commands = transition(
-            loaded.machine_state,
-            ev.RecordProduced(kind=receipt.result_kind, binding=OpaqueBinding(issued.binding)),
-        )
-    except (TransitionRejected, ev.IllegalEventError) as error:
-        return EngineStopped("illegal_event", f"C-01が結果を受理しない: {error}")
-    payload = with_machine_state(loaded.payload, machine_state)
-    payload["transaction"] = transaction_section(issued)
+    if isinstance(produced, ProduceRejected):
+        return EngineStopped(produced.code, produced.detail)
+    payload = with_machine_state(loaded.payload, produced.machine_state)
+    payload["transaction"] = transaction_section(produced.transaction)
     payload = without_pending_action(with_receipt(payload, receipt))
     save_checkpoint(checkpoint_path(paths, run_id), payload)
     return SubmitAccepted(
-        receipt=receipt, machine_state=machine_state, commands=commands, transaction=issued
+        receipt=receipt,
+        machine_state=produced.machine_state,
+        commands=produced.commands,
+        transaction=produced.transaction,
     )
 
 
@@ -591,13 +702,18 @@ def submit(
     accepted_at: str,
     speaker: str,
     model: str,
+    user_speaker: str,
 ) -> SubmitOutcome:
     """hostのsubmitを一度だけconsumeする（AC-C08-05）。
 
     受理済みattemptの**同一内容**の再送は以前と同じ結果を返し（冪等）、内容の異なる
     再送は停止する。判定はsubmit envelope全体のcanonical hash（`submit_hash`）で行う。
     """
-    parsed = load_with_migration(SUBMIT, raw)
+    classified = _classify_submit(raw)
+    if isinstance(classified, EngineStopped):
+        return classified
+    definition, _ = classified
+    parsed = load_with_migration(definition, raw)
     if not parsed.ok or parsed.payload is None:
         codes = ",".join(sorted(error.code for error in parsed.errors))
         return EngineStopped("submit_invalid", f"submitが検証を通らない（stage={parsed.stage}, {codes}）")
@@ -607,6 +723,19 @@ def submit(
     loaded = load_run(paths, run_id=run_id, repository=repository, number=number)
     if isinstance(loaded, EngineStopped):
         return loaded
+    if definition is USER_SUBMIT:
+        return accept_user_submit(
+            envelope,
+            submit_hash=canonical_payload_hash(envelope),
+            run=loaded,
+            paths=paths,
+            run_id=run_id,
+            records_port=records_port,
+            body_port=body_port,
+            max_result_bytes=max_result_bytes,
+            accepted_at=accepted_at,
+            speaker=user_speaker,
+        )
     receipts = read_receipts(loaded.payload)
     if isinstance(receipts, SectionUnavailable):  # pragma: no cover - schema検証がreceiptの形を保証する
         return EngineStopped("host_action_unavailable", receipts.detail)

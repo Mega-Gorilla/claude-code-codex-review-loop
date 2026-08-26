@@ -54,6 +54,9 @@
 | state root | 同一マシンの全worktreeから同じ場所を指すper-user領域。`runs/<run ID>/checkpoint.json`と`locks/<repository digest>/<番号>.lock`を持つ。既定pathの解決はC-12（ADR-0011） |
 | PR lock | 同一PRへの同時runを検出するためのfile。回収はpid非生存・host一致・run一致の3条件が揃った場合のみで、拒否のworkflow動作はAC-C10-03（C-10） |
 | checkpoint transaction | 投稿前 / 投稿成否不明で中断したrecordを**同一key**で再発行するためにcheckpointへ保存する値（binding・payload hash・render済み本文・seq・head） |
+| AWAIT_USER request | ユーザー入力待ちをhostへ提示するenvelope。対象awaiting・head・受理可能なrecord種別・根拠record・one-time nonce・awaiting instance（`since_seq`）を持ち、応答は`USER_SUBMIT`で戻る（ADR-0018） |
+| user intent key | ユーザー入力の正規化intentを表す決定論的key（run / awaiting / awaiting instance / 対象head / record種別）。転記とGitHub直接commentの2経路が同じ値を導出でき、同一intentの二重recordを防ぐ（ADR-0018） |
+| input route | user-input recordがどの経路で入ったかの語彙。`host_transcript`（対話型sessionの入力をControllerが転記）と`github_comment`（ユーザーの直接comment。C-06がexternal evidenceとして受理）の2値 |
 | resume context | resumeがGitHubとlocal cacheの照合から組み立てる再開の判断材料（run選択・turn同一性・pending record・head binding・承認の有無・直接回答候補）。`MachineState`の完全replayではない |
 | advertised head | PRが現在advertiseしているhead SHA。C-05のPR metadata primitiveで観測し、承認のbind先と一致するかがAC-C07-03の判定になる。隔離checkout側の照合はC-09 |
 | pending reissue directive | 中断したrecordを**同一key・同一本文**で再発行するための指示（binding・完成形本文・body hash）。C-07は投稿せず、実行はC-01のR-P経由でC-08が行う |
