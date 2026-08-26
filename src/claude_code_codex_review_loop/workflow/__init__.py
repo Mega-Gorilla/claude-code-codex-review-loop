@@ -17,6 +17,7 @@ entry pointで受ける。
 
 from .actions import (
     ACTION_SPECS,
+    BODY_VALUE_FIELDS,
     INTENT_VALUE_FIELDS,
     RESULT_VARIANTS,
     USER_REQUEST_SPECS,
@@ -122,6 +123,7 @@ from .user_input import (
 
 __all__ = [
     "ACTION_SPECS",
+    "BODY_VALUE_FIELDS",
     "ActionContext",
     "ActionPayloadPort",
     "ActionRegistryError",

@@ -340,6 +340,20 @@ INTENT_VALUE_FIELDS: Final[Mapping[RecordKind, str]] = {
 }
 
 
+# **転記recordの公開本文が入っているpayload field**。本文はユーザーが書いた文そのもので、
+# C-08は選ぶだけで文面を作らない（ADR-0020）。
+#
+# 宣言が無いkindは本文を**構成**する必要がある: agent recordはkindごとの表現（C-10 / C-11）、
+# `MERGE_APPROVAL`は自由記述を持たずgate semanticsの表現になる（C-13）。
+BODY_VALUE_FIELDS: Final[Mapping[RecordKind, str]] = {
+    RecordKind.USER_DECISION: "answer",
+    RecordKind.GATE_QUESTION: "body",
+    RecordKind.GATE_CHANGES: "body",
+    RecordKind.USER_CANCEL: "reason",
+    RecordKind.BLOCK_INTERVENTION: "body",
+}
+
+
 def intent_digest(value: str) -> str:
     """正規化intent値のcanonical hash（両経路が同じ値から同じdigestを導く）。
 

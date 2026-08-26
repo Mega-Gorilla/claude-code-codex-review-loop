@@ -47,7 +47,12 @@ jobs:
       - name: Run tests with coverage
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-        run: python -m coverage run -m pytest -q
+        # tmp directoryを固定位置へ置き、失敗時に成果物を収集できるようにする。
+        #
+        # **workspace内へは置けない**。`tests/test_c06_isolation.py`はreviewer用のgit呼び出しが
+        # 隔離home外のconfigを読まないことを検証しており、tmp directoryがこのrepository配下に
+        # あると、cwdから発見されるrepository localの`.git/config`がoriginへ混ざる。
+        run: python -m coverage run -m pytest -q --basetemp="${{ runner.temp }}/pytest-tmp"
 
       - name: Combine coverage data
         run: python -m coverage combine
@@ -89,3 +94,32 @@ jobs:
           fi
           echo "Checking ${base}..${AFTER_SHA}"
           git diff --check "${base}" "${AFTER_SHA}"
+
+      # 失敗したjobのcheckpointとenvelopeだけを収集する。何が起きたかはC-08のstateに
+      # 現れるが、CIのlogには残らないためである。
+      #
+      # **収集対象はfile名まで指定して限定する**（Issue #13: 未redact入力を含めない）。
+      #
+      # - `checkpoint.json`: `transaction.body`は**redact済み**のrender出力（ADR-0015）
+      # - `action.json` / `request.json`: envelope。binding・hash・comment ID・action payloadで、
+      #   自由記述を持たない
+      # - `result.json`は**含めない**。hostが返した実行結果とユーザーの入力そのものが入り、
+      #   redactを通っていない。session config（`gh_env`を持つ）とfake GitHubのstateも同様に外す
+      #
+      # 実行するのはfake ghだけなので実credentialは存在しないが、収集範囲を「絞る」ことを
+      # 既定にしておかないと、実transportを使うPhaseで漏れる。file名の対応は
+      # `tests/test_c08_artifact_contract.py`が製品定数と突き合わせて固定する。
+      #
+      # directory名を`.`で始めない。upload-artifactは`include-hidden-files`が既定false
+      # であり、hidden pathは黙って収集対象から外れる。
+      - name: Collect run state on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-state-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/checkpoint.json
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/actions/*/action.json
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/requests/*/request.json
+          if-no-files-found: ignore
+          retention-days: 7

@@ -59,6 +59,9 @@
 | input route | user-input recordがどの経路で入ったかの語彙。`host_transcript`（対話型sessionの入力をControllerが転記）と`github_comment`（ユーザーの直接comment。C-06がexternal evidenceとして受理）の2値 |
 | blocked continuation | `BLOCKED`へ入るときに保存する「本来の継続」（再開state・command列・awaiting）。rule registry由来の有限値で、checkpointは**IDだけ**を保存し、readerがregistryを引いて復元する（ADR-0019） |
 | process tree台帳 | 停止対象の`TreeRef`をcheckpointへ持つsection。中断後に**別process**から`HaltRun`を実行するために要る。書き手はtreeを起動するcomponentで、停止できたものは台帳から外す（ADR-0019） |
+| session config | run directory内の`session.json`。engineが既定値を持たないため、entry pointへ全設定を明示で渡す。checkpointと同じdirectoryにあるので**別processが同じportを再構成できる**（ADR-0020） |
+| step driver | `advance`が返したengine側の作業（永続化・停止）をその場でこなし、次のhost作業か終端まで進める駆動。P-002によりactive経路とheadless経路で共通の1つだけを持つ（ADR-0020） |
+| host port | engineから見たhostの単一interface（1つの作業を実行してsubmit envelopeを返す）。active sessionでもheadless subprocessでも同じ形であることが、両者の同値性を構造で担保する（ADR-0020） |
 | resume context | resumeがGitHubとlocal cacheの照合から組み立てる再開の判断材料（run選択・turn同一性・pending record・head binding・承認の有無・直接回答候補）。`MachineState`の完全replayではない |
 | advertised head | PRが現在advertiseしているhead SHA。C-05のPR metadata primitiveで観測し、承認のbind先と一致するかがAC-C07-03の判定になる。隔離checkout側の照合はC-09 |
 | pending reissue directive | 中断したrecordを**同一key・同一本文**で再発行するための指示（binding・完成形本文・body hash）。C-07は投稿せず、実行はC-01のR-P経由でC-08が行う |

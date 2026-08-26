@@ -60,6 +60,7 @@ from .registry import (
 )
 from .report import FINAL_REPORT
 from .review import CLARIFICATION_ANSWER, CLARIFICATION_QUESTION, FIX_RESULT, REVIEW_RESULT
+from .session import SESSION_CONFIG
 from .user_input import (
     GITHUB_COMMENT_ROUTE,
     HOST_TRANSCRIPT_ROUTE,
@@ -97,6 +98,7 @@ _DEFINITIONS: tuple[SchemaDefinition, ...] = (
     USER_REQUEST,
     USER_SUBMIT,
     PERMISSION_RESUME,
+    SESSION_CONFIG,
     PERMISSION_BLOCK,
     CI_TIMEOUT,
     CI_CODE_FAILURE,
@@ -143,6 +145,7 @@ __all__ = [
     "HOST_TRANSCRIPT_ROUTE",
     "INPUT_ROUTES",
     "PERMISSION_RESUME",
+    "SESSION_CONFIG",
     "USER_INPUT_AWAITINGS",
     "USER_REQUEST",
     "USER_SUBMIT",
