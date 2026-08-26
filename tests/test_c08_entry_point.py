@@ -155,6 +155,22 @@ class TestSubmit:
         assert code == entry.EXIT_USAGE
         assert payload["code"] == "usage"
 
+    def test_an_unreadable_result_stops_instead_of_raising(self, tmp_path: Path) -> None:
+        """読込失敗でtracebackにしない（進退は終了codeと構造化結果だけで決まる）。"""
+        env = _gate_env(tmp_path)
+        code, payload = _run(env, "submit", "--result", str(tmp_path / "missing.json"))
+        assert code == entry.EXIT_STOPPED
+        assert payload["code"] == "submit_unreadable"
+
+    def test_an_oversized_result_is_refused_before_reading(self, tmp_path: Path) -> None:
+        """envelopeはbinding echoとhashだけで、巨大fileを読む理由が無い。"""
+        env = _gate_env(tmp_path)
+        oversized = tmp_path / "big.json"
+        oversized.write_bytes(b"{" + b" " * (entry.MAX_SUBMIT_BYTES + 1) + b"}")
+        code, payload = _run(env, "submit", "--result", str(oversized))
+        assert code == entry.EXIT_STOPPED
+        assert payload["code"] == "submit_too_large"
+
     def test_an_unknown_command_is_rejected_by_the_parser(self, tmp_path: Path) -> None:
         env = _gate_env(tmp_path)
         completed = subprocess.run(  # noqa: S603 - 起動するのは自分自身のmodule

@@ -49,6 +49,7 @@ from ..domain.values import (
 from ..errors import ErrorCategory
 from ..identity.errors import IdentityError
 from ..identity.fs_permissions import create_private_dir, verify_private_dir, write_private_text
+from ..identity.record_chain import ChainVerification
 from ..policy.redaction import redact
 from ..schema.action import HOST_ACTION, HOST_FAILURE, SUBMIT
 from ..schema.envelope import MAX_SUBMIT_RECEIPTS
@@ -291,6 +292,23 @@ def _evidence_of(
     return tuple((record.comment_id, record.head_sha) for record in records)
 
 
+def _chain_gate(records_port: RecordSourcePort, run_id: str) -> ChainVerification | EngineStopped:
+    """chainを検証し、violationがあれば次のturnを起こさない。
+
+    `verify_record_chain`はviolationがあってもrecordsを返す契約なので（差分表示のため）、
+    **consumerが`is_intact`を確かめる**必要がある。壊れたchainの上でactionを発行したり
+    ユーザーへ判断を求めたりすると、根拠recordの正当性が確かめられていないまま次の状態へ
+    進み、承認をそこへbindできない（integrityの解消が先）。
+
+    `advance`はhost action・user inputのどちらへ進む場合もここを通る。`persist`は自分で
+    同じ検査を行い、`PersistRequired` / `Blocked` / terminalはchainを読まずに返す。
+    """
+    chain = records_port.chain(run_id)
+    if not chain.is_intact:
+        return EngineStopped("chain_violation", f"chainにviolationがある（{len(chain.violations)}件）")
+    return chain
+
+
 def _issue_action(
     loaded: RunContext,
     spec: ActionSpec,
@@ -452,25 +470,20 @@ def _await_user(
     repository: str,
     number: int,
     head_sha: str,
-    records_port: RecordSourcePort,
+    chain: ChainVerification,
     evidence_port: EvidencePort,
     id_source: Callable[[], str],
     issued_at: str,
 ) -> AdvanceOutcome:
     """ユーザー入力待ちのrequestを返す（**現在のinstanceの**未応答があれば再提示する）。
 
-    chain検証は再提示にも先立って行う。requestを発行した後にchainが壊れることがあり、
-    pendingがあるからと素通しすると、壊れたchainの上で判断を求めることになる
-    （ADR-0018 決定13）。
+    chainは`advance`が検証済みのものを受け取る（`_chain_gate`）。再提示にも先立って
+    検証するのは、requestを発行した後にchainが壊れることがあり、pendingがあるからと
+    素通しすると壊れたchainの上で判断を求めることになるためである（ADR-0018 決定13）。
     """
     spec = user_spec_for(awaiting)
     if spec is None:  # pragma: no cover - 呼び出し元が3値のawaitingでのみ入る
         return EngineStopped("not_user_input", f"{awaiting.value}はユーザー入力待ちではない")
-    chain = records_port.chain(run_id)
-    if not chain.is_intact:
-        # 壊れたchainの上でユーザーへ判断を求めない。提示する根拠recordの正当性が
-        # 確かめられておらず、承認をそこへbindできない（integrityの解消が先）
-        return EngineStopped("chain_violation", f"chainにviolationがある（{len(chain.violations)}件）")
     section = read_user_section(loaded.payload)
     if isinstance(section, SectionUnavailable):
         return EngineStopped("user_request_unavailable", section.detail)
@@ -531,6 +544,13 @@ def advance(
         return PersistRequired(record=machine_state.pending_record)
     if machine_state.block is not None:
         return Blocked(block=machine_state.block)
+    # ここから先はhostまたはユーザーへ次のturnを起こす経路である。**その前にchainを検証する**
+    # （`verify_record_chain`はviolationがあってもrecordsを返すため、consumerが確かめる）。
+    # 上の早期returnはchainを読まない: `persist`は自分で同じ検査を行い、`Blocked`と終端は
+    # 現在の状態を報告するだけで新しいturnを起こさない
+    chain = _chain_gate(records_port, run_id)
+    if isinstance(chain, EngineStopped):
+        return chain
     receipts = read_receipts(loaded.payload)
     if isinstance(receipts, SectionUnavailable):  # pragma: no cover - schema検証がreceiptの形を保証する
         return EngineStopped("host_action_unavailable", receipts.detail)
@@ -579,7 +599,7 @@ def advance(
             repository=repository,
             number=number,
             head_sha=head_sha,
-            records_port=records_port,
+            chain=chain,
             evidence_port=evidence_port,
             id_source=id_source,
             issued_at=issued_at,
@@ -821,6 +841,13 @@ def submit(
             accepted_at=accepted_at,
             speaker=user_speaker,
         )
+    # ここから先はhostまたはユーザーへ次のturnを起こす経路である。**その前にchainを検証する**
+    # （`verify_record_chain`はviolationがあってもrecordsを返すため、consumerが確かめる）。
+    # 上の早期returnはchainを読まない: `persist`は自分で同じ検査を行い、`Blocked`と終端は
+    # 現在の状態を報告するだけで新しいturnを起こさない
+    chain = _chain_gate(records_port, run_id)
+    if isinstance(chain, EngineStopped):
+        return chain
     receipts = read_receipts(loaded.payload)
     if isinstance(receipts, SectionUnavailable):  # pragma: no cover - schema検証がreceiptの形を保証する
         return EngineStopped("host_action_unavailable", receipts.detail)

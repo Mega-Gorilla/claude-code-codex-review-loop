@@ -28,7 +28,7 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 4. **step driverは`runtime/session.py`の`step`1つ**である。P-002は「entry pointごとにround orchestrationを実装すること」を禁じるため、active経路もheadless経路も同じ`step`を通す。
 5. `step`は`advance`を呼び、**engine側の作業（`PersistRequired` -> `persist` / `HaltRequired` -> `halt`）をその場でこなして再度`advance`**し、host側の作業（`HostActionIssued` / `AwaitUser`）か終端（`Terminal` / `Blocked` / `EngineStopped`）に達したら返す。`persist` / `halt`は「`advance`が返した作業の実行」であって独立した制御経路ではない（ADR-0017 / ADR-0019）という位置づけが、これでcodeの形になる。
 6. その結果、**entry pointが呼ぶengine経路は`step`と`submit`の2つだけ**になる（AC-C08-03）。ASTのcontract testで固定する。
-7. **1 stepあたりのengine側作業に回数上限を置く**（`MAX_ENGINE_WORK`）。C-01が同じ作業を返し続けるのは不変条件の破れであり、推測して回し続けずに停止する。
+7. **1 stepあたりのengine側作業に回数上限を置く**（`MAX_ENGINE_WORK`）。C-01が同じ作業を返し続けるのは不変条件の破れであり、推測して回し続けずに停止する。上限は**ちょうどその回数まで**を許し、次の副作用を起こす**前に**停止する（超過して1回多く実行しない）。
 8. **停止に失敗したら同じstepで回さない**。`HaltFailed`はC-01が停止commandを再発行することを意味するが、同じ理由で失敗し続けるため、呼び出し側へ返して次のresumeへ委ねる。
 9. **portの例外を呼び出し側へ飛ばさない**。`PortUnavailableError`は担当componentを名指しした`EngineStopped`へ写す。例外が飛び越えると「進退は構造化outcomeで決まる」という前提が壊れる。
 
@@ -53,7 +53,7 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 
 | port | 導出元 | 実装 |
 | --- | --- | --- |
-| `RecordSourcePort` | C-05の取得 + C-06の`verify_record_chain` | `ChainRecords` |
+| `RecordSourcePort` | C-05の取得 + C-06の`read_chain_checkpoint` -> `probe_known_records` -> `verify_record_chain` | `ChainRecords` |
 | `ProcessStopPort` | C-03の`stop_tree_by_ref` | `TreeStopper` |
 | `EvidencePort` | registryの`evidence_kinds` × 検証済みchain（DOD-02の選択規則そのもの） | `ChainEvidence` |
 | `RecordEventPort` | registryの`build_event`（record kindとeventの1対1対応） | `RegistryRecordEvents` |
@@ -61,6 +61,9 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 | `ActionPayloadPort` | — | 未実装（fail closed） |
 
 20. `EvidencePort`は**対象headかつregistryが宣言したkind**をseq昇順で返す。engineの`_evidence_of`が同じ条件を検査するため、この選択がそのまま契約になる。
+20-a. **chainのviolationは`advance`が`_chain_gate`で止める**。`verify_record_chain`はviolationがあってもrecordsを返す契約（差分表示のため）なので、**consumerが`is_intact`を確かめる**必要がある。PR-3b1以前は`_await_user`と`persist`だけが確かめており、`HOST_ACTION`の発行経路が素通しだった。gateは`advance`が1箇所で行い、検証済みchainを`_await_user`へ渡す（従来の二重fetchも解消する）。
+20-b. **`ChainEvidence`も`is_intact`を確かめる**。gateからportまでの間にchainが壊れる窓があり、両方がfail closedなら**どちらかが観測した時点で次のturnは起きない**。`ChainNotIntactError`は`step`がengineのgateと同じ`chain_violation`へ写す。gateとportで別々にchainを読むためfetchは2回になるが、**正当性を優先する**（request scopedなcacheはC-12の設定解決と併せて別途検討する）。
+20-c. **checkpointのchain部分とprobe結果を渡す**。渡さないと、取得窓に現れなかった既知recordを「元から無かった」と区別できず、削除と巻き戻しを検出できない（AC-C06-09）。なお`conversation` sectionの**書き手はまだ存在しない**（C-06 / C-07の領域）ため、この検出は書き手が入った時点で自動的に有効になる配線であり、現時点では常にfresh扱いになる。regression testはcheckpointを直接seedして検出を確かめている。
 21. `RecordEventPort`は`extra_event_inputs`が空のkindだけを扱う。`ProgressReport`（progress判定）や`head`はC-10 / C-11が決める値で、ここで作ると**判定を偽装する**ことになる。
 22. `RecordBodyPort`は**user-input recordに限る**。転記recordの本文はユーザーが書いた文そのもので、C-08は選ぶだけで文面を作らない（`BODY_VALUE_FIELDS`がkindごとのfieldを宣言する）。宣言の無いkind——agent recordと、自由記述を持たない`MERGE_APPROVAL`——は表現を**構成**する必要があり、C-10 / C-11 / C-13の領域である。
 23. `ActionPayloadPort`（`round` / `finding_ids`等）はfinding ledger（C-10）とdecision（C-11）由来なので**名指しでfail closed**にする。「無いものを既定値で埋める」経路を作らない。
@@ -70,18 +73,21 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 
 25. `python -m claude_code_codex_review_loop.runtime <advance|submit>`。持つのは**P-002の3責務だけ**である: 引数解析、session boundaryの受け渡し、表示。
 26. **終了codeは構造化outcomeから決める**（P-003。出力文字列の部分一致で分類しない）。`0` = 進んだ、`2` = 引数の誤り、`3` = 停止。
+26-a. **submit envelopeの読込失敗も構造化結果にする**。`OSError`でtracebackになると、呼び出し側が終了codeと標準出力だけで進退を決められなくなり、process境界の契約が崩れる。読む前にsizeも検査する（envelopeはbinding echoとhashだけで、結果本体は`result_hash`が指すfileにあり、その上限は`max_result_bytes`がsubmit側で検査する）。
 27. **出力の非ASCIIはJSONのescapeで閉じる**。この出力は人向けの表示ではなく呼び出し側が解釈する構造化結果であり、stdoutのencodingはhostのlocale（Windowsのconsole code page等）で決まる。日本語のdetailをそのまま書くとlocale次第で読めなくなる。
 28. **entry pointはloopを持たない**（contract testで固定）。round orchestrationは`drive`に1つだけである。
 
 ### CI artifact
 
-29. **失敗したjobのrun stateだけを収集する**。何が起きたかはC-08のcheckpointとenvelope / resultに現れるが、CIのlogには残らない。
-30. **収集対象はpath patternで限定する**。run directory配下のcheckpointとenvelope / resultに絞り、session config（`gh_env`を持つ）とfake GitHubのstateは含めない。実行するのはfake ghだけなので実credentialは存在しないが、**収集範囲を絞ることを既定にしておかないと実transportを使うPhaseで漏れる**。
-31. artifact名へOSを含め、Ubuntu / Windowsの失敗を区別する。
+29. **失敗したjobのcheckpointとenvelopeだけを収集する**。何が起きたかはC-08のstateに現れるが、CIのlogには残らない。
+30. **収集対象はfile名まで指定して限定する**（Issue #13: 未redact入力を含めない）。`checkpoint.json`の`transaction.body`はredact済みのrender出力（ADR-0015）、`action.json` / `request.json`はbinding・hash・comment ID・action payloadで自由記述を持たない。**`result.json`は含めない**——hostが返した実行結果とユーザーの入力そのものが入り、redactを通っていない。session config（`gh_env`を持つ）とfake GitHubのstateも外す。
+30-a. **file名の対応をcontract testで固定する**（`tests/test_c08_artifact_contract.py`）。収集file名を製品定数（`CHECKPOINT_FILE_NAME` / 両`ENVELOPE_FILE`）と突き合わせ、`*.json`のようなwildcardへ広がった瞬間にfailさせる。実行するのはfake ghだけなので実credentialは存在しないが、**収集範囲を絞ることを既定にしておかないと実transportを使うPhaseで漏れる**。
+31. artifact名へOSを含め、Ubuntu / Windowsの失敗を区別する。tmp directoryは**workspace外**へ置く（`tests/test_c06_isolation.py`がreviewer用git呼び出しのconfig originを検査しており、repository配下だとrepository localの`.git/config`が混ざる）。`.`始まりの名前も使わない（`include-hidden-files`が既定falseで、hidden pathは黙って外れる）。
 
 ## Consequences
 
-- **AC-C08-01 / 02 / 03 / 06が充足した**。1つのrunを4つの別processが順に進めて`CANCELLED`まで完走することをtestで固定した
+- **AC-C08-01 / 02 / 03 / 06が充足した**。AC-C08-06はIssue #13が挙げる3つの中断点——pending user request / pending `HOST_ACTION` / 停止procedureの途中——すべてを別processからresumeして固定した
+- **`HOST_ACTION`と停止procedureのcross-process testはtest所有のdriver processを使う**。`python -m ...runtime`は`default_ports`を使うため、まだ実装の無い2 port（action payloadとagent recordの本文）を要する経路を通せない。driverはその2つと停止portだけをfakeにして**同じ製品関数**（`step` / `submit_result`）を呼ぶ。resume機構そのものは製品codeである
 - AC-C08-02は「fakeのcounterが0」だけでなく、`runtime` packageがprocess起動もキー入力注入も**構造的に持たない**ことをAST contractで固定した。PR-3b2がspawnerを足すときはこの契約を明示的に更新することになる
 - **AC-C08-04（active / headlessの同値性）は未充足**である。`HostPort`と`drive`という構造は用意したが、headless側の実装はPR-3b2が入れる
 - **緊急停止のdurableな表現とsignal handlerも未着手**である（ADR-0019 決定17がPR-3bへ送った項目のうち、PR-3b1は扱わない）

@@ -95,13 +95,20 @@ jobs:
           echo "Checking ${base}..${AFTER_SHA}"
           git diff --check "${base}" "${AFTER_SHA}"
 
-      # 失敗したjobのstate（checkpointとenvelope / result）だけを収集する。何が起きたかは
-      # C-08のstateに現れるが、CIのlogには残らないためである。
+      # 失敗したjobのcheckpointとenvelopeだけを収集する。何が起きたかはC-08のstateに
+      # 現れるが、CIのlogには残らないためである。
       #
-      # **収集対象はpath patternで限定する**。run directory配下のcheckpointとenvelope /
-      # resultに絞り、session config（`gh_env`を持つ）とfake GitHubのstateは含めない。
+      # **収集対象はfile名まで指定して限定する**（Issue #13: 未redact入力を含めない）。
+      #
+      # - `checkpoint.json`: `transaction.body`は**redact済み**のrender出力（ADR-0015）
+      # - `action.json` / `request.json`: envelope。binding・hash・comment ID・action payloadで、
+      #   自由記述を持たない
+      # - `result.json`は**含めない**。hostが返した実行結果とユーザーの入力そのものが入り、
+      #   redactを通っていない。session config（`gh_env`を持つ）とfake GitHubのstateも同様に外す
+      #
       # 実行するのはfake ghだけなので実credentialは存在しないが、収集範囲を「絞る」ことを
-      # 既定にしておかないと、実transportを使うPhaseで漏れる。
+      # 既定にしておかないと、実transportを使うPhaseで漏れる。file名の対応は
+      # `tests/test_c08_artifact_contract.py`が製品定数と突き合わせて固定する。
       #
       # directory名を`.`で始めない。upload-artifactは`include-hidden-files`が既定false
       # であり、hidden pathは黙って収集対象から外れる。
@@ -112,7 +119,7 @@ jobs:
           name: run-state-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/pytest-tmp/**/runs/*/checkpoint.json
-            ${{ runner.temp }}/pytest-tmp/**/runs/*/actions/*/*.json
-            ${{ runner.temp }}/pytest-tmp/**/runs/*/requests/*/*.json
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/actions/*/action.json
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/requests/*/request.json
           if-no-files-found: ignore
           retention-days: 7

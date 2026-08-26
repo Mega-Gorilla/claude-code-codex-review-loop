@@ -203,7 +203,8 @@ class TestStep:
         result = _step(env)
         assert isinstance(result.outcome, EngineStopped)
         assert result.outcome.code == "engine_work_limit"
-        assert len(result.trace.persisted) == MAX_ENGINE_WORK + 1
+        # 上限**ちょうど**まで実行し、次の副作用を起こす前に止める（超過しない）
+        assert len(result.trace.persisted) == MAX_ENGINE_WORK
 
 
 class TestSubmitResult:

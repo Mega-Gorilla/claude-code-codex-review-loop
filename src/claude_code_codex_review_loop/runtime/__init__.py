@@ -24,6 +24,7 @@ from .config import (
 from .host import DriveClock, DriveResult, HostPort, drive
 from .ports import (
     ChainEvidence,
+    ChainNotIntactError,
     ChainRecords,
     PortSet,
     PortUnavailableError,
@@ -48,6 +49,7 @@ __all__ = [
     "MAX_ENGINE_WORK",
     "SESSION_CONFIG_VERSION",
     "ChainEvidence",
+    "ChainNotIntactError",
     "ChainRecords",
     "ConfigUnavailable",
     "DriveClock",

@@ -25,8 +25,15 @@ from dataclasses import dataclass
 
 from ..domain.events import Event
 from ..domain.values import RecordEvidence, RecordKind
-from ..identity.record_chain import ChainVerification, VerifiedRecord, verify_record_chain
+from ..identity.record_chain import (
+    ChainCheckpoint,
+    ChainVerification,
+    VerifiedRecord,
+    probe_known_records,
+    verify_record_chain,
+)
 from ..process import StopResult, TreeRef, stop_tree_by_ref
+from ..state import CheckpointLoaded, StatePaths, checkpoint_path, load_checkpoint, read_chain_checkpoint
 from ..transport.conversation import fetch_comments_since
 from ..workflow import (
     BODY_VALUE_FIELDS,
@@ -51,14 +58,23 @@ class PortUnavailableError(Exception):
     """まだ実装が無いportを引いた。detailは担当componentを名指しする。"""
 
 
+class ChainNotIntactError(Exception):
+    """chainにviolationがある。壊れたchainのrecordを根拠として渡さない。"""
+
+
 @dataclass(frozen=True)
 class ChainRecords:
     """当該runの検証済みchain（C-05の取得 -> C-06の7条件検証）。
 
-    fixtureへ検証結果を直書きせず、**製品関数だけ**でchainを作る。checkpointを渡さないため
-    high-water markに基づくprobeは行わない（AC-C06-09の残存riskはC-06のdocstringが正本）。
+    fixtureへ検証結果を直書きせず、**製品関数だけ**でchainを作る。
+
+    **checkpointのchain部分とprobe結果を渡す**。これが無いと、取得窓に現れなかった既知
+    recordが「元から無かった」と区別できず、削除と巻き戻しを検出できない（AC-C06-09）。
+    `state.resume`の観測経路と同じ組み立て（`read_chain_checkpoint` -> `probe_known_records`
+    -> `verify_record_chain`）を通す。
     """
 
+    paths: StatePaths
     config: SessionConfig
 
     def chain(self, run_id: str) -> ChainVerification:
@@ -70,14 +86,38 @@ class ChainRecords:
             policy=self.config.policy(),
             max_pages=self.config.search_max_pages,
         )
+        checkpoint = self._chain_checkpoint(run_id)
+        present = frozenset(comment.comment_id for comment in fetched.comments)
+        probes = (
+            probe_known_records(
+                self.config.context(),
+                self.config.repo,
+                checkpoint,
+                present_comment_ids=present,
+                policy=self.config.policy(),
+            )
+            if checkpoint is not None
+            else {}
+        )
         return verify_record_chain(
             fetched.comments,
             run_id=run_id,
             detection_head=self.config.detection_head,
             producers=self.config.producers,
-            checkpoint=None,
-            probes={},
+            checkpoint=checkpoint,
+            probes=probes,
         )
+
+    def _chain_checkpoint(self, run_id: str) -> ChainCheckpoint | None:
+        """checkpointの`conversation`から既知recordを読む（無ければfresh扱い）。
+
+        checkpointを読めない場合もfresh扱いにはせず、そのまま`None`にする——`load_run`が
+        同じcheckpointを読んで進退を決めており、ここで別の判断を下さない。
+        """
+        loaded = load_checkpoint(checkpoint_path(self.paths, run_id))
+        if not isinstance(loaded, CheckpointLoaded):
+            return None
+        return read_chain_checkpoint(loaded.payload)
 
 
 @dataclass(frozen=True)
@@ -112,6 +152,10 @@ class ChainEvidence:
     def evidence_for(self, context: RequestContext) -> Sequence[VerifiedRecord]:
         allowed = _evidence_kinds(context)
         chain = self.records.chain(context.run_id)
+        if not chain.is_intact:
+            # engineも`_chain_gate`で同じ検査をするが、そこからここまでの間にchainが壊れ得る。
+            # 両方がfail closedなので、どちらかが観測した時点で次のturnは起きない
+            raise ChainNotIntactError(f"chainにviolationがある（{len(chain.violations)}件）")
         return tuple(
             record
             for record in sorted(chain.records, key=lambda item: item.seq)
@@ -187,9 +231,9 @@ class PortSet:
     stop: ProcessStopPort
 
 
-def default_ports(config: SessionConfig) -> PortSet:
+def default_ports(paths: StatePaths, config: SessionConfig) -> PortSet:
     """今日導出できるportで束を作る（未実装のものはfail closedの実装が入る）。"""
-    records = ChainRecords(config=config)
+    records = ChainRecords(paths=paths, config=config)
     return PortSet(
         payload=UnavailableActionPayload(),
         evidence=ChainEvidence(records=records),
@@ -202,6 +246,7 @@ def default_ports(config: SessionConfig) -> PortSet:
 
 __all__ = [
     "ChainEvidence",
+    "ChainNotIntactError",
     "ChainRecords",
     "PortSet",
     "PortUnavailableError",

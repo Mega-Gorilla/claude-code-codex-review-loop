@@ -50,6 +50,9 @@ EXIT_OK = 0
 EXIT_STOPPED = 3
 EXIT_USAGE = 2
 
+# submit envelopeの読込上限。envelopeはbinding echoとhashだけで、結果本体はresult fileにある
+MAX_SUBMIT_BYTES = 64 * 1024
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -118,6 +121,33 @@ def _submit_payload(outcome: object) -> dict[str, object]:
     return {"outcome": "STOPPED", "code": stopped.code, "detail": stopped.detail}
 
 
+def _read_submit(path: Path) -> bytes | dict[str, object]:
+    """submit envelopeを読む（読めなければ構造化結果へ写す）。
+
+    tracebackで落ちるとprocess境界の契約が崩れる。呼び出し側は終了codeと標準出力の
+    構造化結果だけで進退を決められなければならない。
+
+    **読む前にsizeを検査する**。envelopeはbinding echoとhashだけの小さなJSONで、
+    巨大fileを丸ごとmemoryへ載せる理由が無い（結果本体は`result_hash`で参照され、その
+    上限は`max_result_bytes`がsubmit側で検査する）。
+    """
+    try:
+        size = path.stat().st_size
+        if size > MAX_SUBMIT_BYTES:
+            return {
+                "outcome": "STOPPED",
+                "code": "submit_too_large",
+                "detail": f"submit envelopeが上限{MAX_SUBMIT_BYTES}byteを超える: {size}",
+            }
+        return path.read_bytes()
+    except OSError as error:
+        return {
+            "outcome": "STOPPED",
+            "code": "submit_unreadable",
+            "detail": f"submit envelopeを読めない: {error.strerror or type(error).__name__}",
+        }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """1回のadvanceまたはsubmitを実行して結果を出す（loopを持たない）。"""
     args = _parser().parse_args(argv)
@@ -126,7 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if isinstance(config, ConfigUnavailable):
         _render({"outcome": "STOPPED", "code": "config_unavailable", "detail": config.detail})
         return EXIT_STOPPED
-    ports = default_ports(config)
+    ports = default_ports(paths, config)
     if args.command == "advance":
         result = step(
             paths=paths,
@@ -143,7 +173,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.result is None:
         _render({"outcome": "STOPPED", "code": "usage", "detail": "submitは--resultを要する"})
         return EXIT_USAGE
-    raw = Path(args.result).read_bytes()
+    raw = _read_submit(Path(args.result))
+    if isinstance(raw, dict):
+        _render(raw)
+        return EXIT_STOPPED
     payload = _submit_payload(
         submit_result(raw, paths=paths, config=config, ports=ports, accepted_at=_now())
     )

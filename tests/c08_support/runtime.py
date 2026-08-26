@@ -93,6 +93,11 @@ def session_payload(directory: Path, **overrides: object) -> dict[str, object]:
     return payload
 
 
+def seed_comments(directory: Path, comments: Sequence[object]) -> None:
+    """fake GitHubのcomment列を丸ごと置き換える（削除・改竄の再現に使う）。"""
+    seed_state(directory, comments=list(comments))
+
+
 @dataclass(frozen=True)
 class RuntimeEnv:
     """runtimeを動かす一式（state root、run directory、fake ghのstate）。"""
@@ -103,12 +108,16 @@ class RuntimeEnv:
     config: SessionConfig
 
     def ports(self) -> PortSet:
-        return default_ports(self.config)
+        return default_ports(self.paths, self.config)
 
     def comments(self) -> list[object]:
         entries = read_state(self.directory)["comments"]
         assert isinstance(entries, list)
         return entries
+
+    def seed(self, comments: Sequence[object]) -> None:
+        """fake GitHub側のcomment列を差し替える。"""
+        seed_comments(self.directory, comments)
 
     def records_for(self, binding: str) -> int:
         return sum(1 for item in self.comments() if binding in str(item.get("body", "")))  # type: ignore[union-attr]
@@ -259,7 +268,7 @@ def round_ports(env: RuntimeEnv, **overrides: object) -> PortSet:
     agent recordの本文——だけをfakeで補う。fakeの範囲がそのまま「まだ実装が無い範囲」である。
     """
     ports = replace(
-        default_ports(env.config),
+        default_ports(env.paths, env.config),
         payload=FakeActionPayloads({"ANSWER_GATE_QUESTION": {"question_comment_id": QUESTION_COMMENT_ID}}),
         body=AgentRecordBody(),
     )
@@ -319,6 +328,7 @@ __all__ = [
     "gate_host",
     "round_ports",
     "runtime_env",
+    "seed_comments",
     "session_payload",
     "user_submit_for",
 ]

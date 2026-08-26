@@ -45,7 +45,7 @@ from ..workflow import (
     submit,
 )
 from .config import SessionConfig
-from .ports import PortSet, PortUnavailableError
+from .ports import ChainNotIntactError, PortSet, PortUnavailableError
 
 # 1 stepでこなすengine側の作業の上限。C-01が同じ作業を返し続けるのは不変条件の破れなので、
 # 上限へ達したら推測して回し続けずに停止する（record 1件の永続化 + 停止1回が現実的な最大）
@@ -111,12 +111,25 @@ def step(
     persisted: list[str] = []
     halted = 0
     work = 0
-    while work <= MAX_ENGINE_WORK:
+    while True:
         try:
             outcome = _advance(paths, config, ports, id_source, issued_at)
         except PortUnavailableError as error:
             return StepResult(
                 EngineStopped("port_unavailable", str(error)), StepTrace(tuple(persisted), halted)
+            )
+        except ChainNotIntactError as error:
+            # engineの`_chain_gate`と同じ分類にする（portが後から観測しても結果は同じ）
+            return StepResult(
+                EngineStopped("chain_violation", str(error)), StepTrace(tuple(persisted), halted)
+            )
+        if isinstance(outcome, (PersistRequired, HaltRequired)) and work >= MAX_ENGINE_WORK:
+            # 上限**ちょうど**までは実行し、次の副作用を起こす前に止める
+            return StepResult(
+                EngineStopped(
+                    "engine_work_limit", f"1 stepのengine側作業が上限{MAX_ENGINE_WORK}回へ達した"
+                ),
+                StepTrace(tuple(persisted), halted),
             )
         if isinstance(outcome, PersistRequired):
             stored = _persist(paths, config, ports)
@@ -142,10 +155,6 @@ def step(
                 )
             continue
         return StepResult(outcome, StepTrace(tuple(persisted), halted))
-    return StepResult(
-        EngineStopped("engine_work_limit", f"1 stepのengine側作業が{MAX_ENGINE_WORK}回を超えた"),
-        StepTrace(tuple(persisted), halted),
-    )
 
 
 def _persist(
