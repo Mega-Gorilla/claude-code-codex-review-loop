@@ -233,32 +233,34 @@ class _CancelEvents:
         return ev.UserCancelVerified(evidence=evidence)
 
 
-class TestStateThatCannotBePersisted:
-    def test_event_leading_to_an_unrepresentable_state_stops(self, tmp_path) -> None:
-        """C-01が返す状態をcheckpointが表現できない場合、保存せず停止する。
+class TestCancelRecord:
+    def test_a_cancel_record_enters_the_stop_procedure(self, tmp_path) -> None:
+        """`USER_CANCEL`の永続化はcancel手続きへ入り、`HaltRun`を返す。
 
-        `UserCancelVerified`はcancel手続きへ入るが、その付随値（`CancellingProcedure`）は
-        まだcheckpointが表現しない。落として保存すると復元できないcheckpointになるため、
-        表現できるようになるまでは停止する（ADR-0017）。
+        PR-3aまでは`CancellingProcedure`をcheckpointが表現できず、ここで
+        `state_not_persistable`になっていた（PR-2cが開いた経路の行き止まり）。
         """
         from c02_support.helpers import REPRESENTATIVE
 
+        from claude_code_codex_review_loop.domain.commands import HaltRun
+        from claude_code_codex_review_loop.domain.values import CancellingProcedure
         from claude_code_codex_review_loop.schema import SchemaKind
 
         payload = dict(REPRESENTATIVE[SchemaKind.USER_CANCEL])
         payload["target_head_sha"] = HEAD
         env = persist_env(tmp_path, kind=RecordKind.USER_CANCEL, payload=payload)
+        binding = OpaqueBinding(env.issued.binding)
         state = MachineState(
             state=State.APPLYING_FIXES,
             pending_record=PendingRecord(
-                kind=RecordKind.USER_CANCEL,
-                binding=OpaqueBinding(env.issued.binding),
-                source_state=State.APPLYING_FIXES,
+                kind=RecordKind.USER_CANCEL, binding=binding, source_state=State.APPLYING_FIXES
             ),
         )
         save_checkpoint(checkpoint_path(env.paths, RUN), with_machine_state(_payload(env), state))
         outcome = persist(**env.kwargs(event_port=_CancelEvents()))
-        assert isinstance(outcome, EngineStopped) and outcome.code == "state_not_persistable"
+        assert isinstance(outcome, RecordPersisted)
+        assert outcome.machine_state.procedure == CancellingProcedure(attempt_binding=binding)
+        assert outcome.commands == (HaltRun(binding),)
 
 
 class TestUnreachableCheckpoint:

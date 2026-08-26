@@ -13,8 +13,9 @@ additive変更とし、非互換な変更のみversionをbumpしてmigrationを�
 from __future__ import annotations
 
 from ..domain._ruledefs import BlockKind, ProcedureKind
+from ..domain._rules_workflow import BLOCKED_CONTINUATIONS
 from ..domain.states import State
-from ..domain.values import Awaiting, RecordKind
+from ..domain.values import Awaiting, Budget, IncidentTarget, Progress, RecordKind
 from .action import HOST_ACTION_KINDS, SUBMIT_ERROR_CATEGORIES, SUBMIT_OUTCOMES
 from .projection import (
     COUNT_KEY,
@@ -52,6 +53,17 @@ MAX_SUBMIT_RECEIPTS = 32
 
 _USER_AWAITING_VALUES = tuple(sorted(awaiting.value for awaiting in USER_INPUT_AWAITINGS))
 _PROCEDURE_KINDS: tuple[str, ...] = tuple(sorted(kind.value for kind in ProcedureKind))
+_INCIDENT_TARGETS: tuple[str, ...] = tuple(sorted(target.value for target in IncidentTarget))
+_PROGRESS_VALUES: tuple[str, ...] = tuple(sorted(value.value for value in Progress))
+_BUDGET_VALUES: tuple[str, ...] = tuple(sorted(value.value for value in Budget))
+_CONTINUATION_IDS: tuple[str, ...] = tuple(sorted(BLOCKED_CONTINUATIONS))
+# 同時に生存し得るprocess treeはrole（reviewer / coder / reporter）で有界で、停止のたびに
+# 台帳から消える。checkpointが常に書ける大きさへ構造的に固定する
+MAX_ACTIVE_TREES = 8
+# process treeの再停止identifier（C-03の`JobObjectRef` / `ProcessGroupRef`）
+JOB_OBJECT_TREE = "JOB_OBJECT"
+PROCESS_GROUP_TREE = "PROCESS_GROUP"
+_TREE_KINDS: tuple[str, ...] = (JOB_OBJECT_TREE, PROCESS_GROUP_TREE)
 _BLOCK_KINDS: tuple[str, ...] = tuple(sorted(kind.value for kind in BlockKind))
 _STATE_VALUES = tuple(sorted(state.value for state in State))
 _AWAITING_VALUES = tuple(sorted(awaiting.value for awaiting in Awaiting))
@@ -90,6 +102,22 @@ def _optional_opaque() -> Field:
 def _violation_field() -> Field:
     """integrity violationの参照（`IntegrityEvidenceRef`と同じ3値）。"""
     return obj({"binding": opaque(), "descriptor": opaque(), "head": opaque()})
+
+
+def _pending_record_field() -> Field:
+    """永続化待ちrecordの識別子（`PendingRecord`と同じ3値）。
+
+    `state.pending_record`と`state.procedure.audit`が同じ形を使う（後者はcancelで
+    未完了になったturnの監査参照で、永続化待ちではない）。
+    """
+    return obj(
+        {
+            "kind": enum_field(_RECORD_KIND_VALUES),
+            "binding": opaque(),
+            "source_state": enum_field(_STATE_VALUES),
+        },
+        required=False,
+    )
 
 
 def _pending_action_fields() -> dict[str, Field]:
@@ -186,14 +214,7 @@ _SECTIONS: dict[str, Field] = {
             "awaiting": enum_field(_AWAITING_VALUES, required=False),
             "return_to": enum_field(_STATE_VALUES, required=False),
             "recovery_to": enum_field(_STATE_VALUES, required=False),
-            "pending_record": obj(
-                {
-                    "kind": enum_field(_RECORD_KIND_VALUES),
-                    "binding": opaque(),
-                    "source_state": enum_field(_STATE_VALUES),
-                },
-                required=False,
-            ),
+            "pending_record": _pending_record_field(),
             # procedure / block / deferred_integrityはPhase 8 PR-2bのadditive追加。
             # C-01がintegrity検出で返す状態（halt gateとRECORD_INTEGRITY block）を
             # **そのまま読み戻せる**ようにする。読み戻せない状態を書くと、次のresumeが
@@ -203,18 +224,49 @@ _SECTIONS: dict[str, Field] = {
             # readerは純粋関数でありGitHubへ問い合わせられない。ここに保存するのは
             # **状態復元のためのcache**であり、検出の正本は常にchain検証である
             # （保存値が古くても、再検証が違反を再び検出する）
+            #
+            # Phase 8 PR-3aでprocedure / blockの残りvariantを足した（ADR-0019）。
+            # kind以外をoptionalに保つのは、必須fieldの組がkindごとに違うためである。
+            # **kindごとの必須検査はreaderが行い**、欠けていれば`NORMAL`へ丸めず停止する
+            # （PR-2bで置いたhalt gateと同じ扱い）
             "procedure": obj(
                 {
                     "kind": enum_field(_PROCEDURE_KINDS),
+                    # CANCELLING / HALTING_FOR_BLOCK: 停止attemptのidentity（ADR-0016）
                     "attempt_binding": _optional_opaque(),
+                    # HALTING_FOR_BLOCK: 停止gate中のviolation集合
                     "violations": array(_violation_field(), required=False),
+                    # RECORDING_INCIDENT: 記録完了後に進むterminalと、cancelで未完了に
+                    # なったturnの監査参照
+                    "target": enum_field(_INCIDENT_TARGETS, required=False),
+                    "audit": _pending_record_field(),
                 },
                 required=False,
             ),
             "block": obj(
                 {
                     "kind": enum_field(_BLOCK_KINDS),
+                    # RECORD_INTEGRITY
                     "violations": array(_violation_field(), required=False),
+                    # PROGRESS / EXTERNAL_DEPENDENCY
+                    "binding": _optional_opaque(),
+                    "head": _optional_opaque(),
+                    # 保存するのは**継続のID**であってcommand列ではない（ADR-0019 決定1）
+                    "continuation": enum_field(_CONTINUATION_IDS, required=False),
+                    # PROGRESS
+                    "reason": enum_field(_PROGRESS_VALUES, required=False),
+                    "budget": enum_field(_BUDGET_VALUES, required=False),
+                    "counter_snapshot": _optional_opaque(),
+                    "fingerprint": _optional_opaque(),
+                    # EXTERNAL_DEPENDENCY: 検出recordのevidence
+                    "evidence": obj(
+                        {
+                            "kind": enum_field(_RECORD_KIND_VALUES),
+                            "binding": opaque(),
+                            "ref": opaque(),
+                        },
+                        required=False,
+                    ),
                 },
                 required=False,
             ),
@@ -433,6 +485,31 @@ _SECTIONS: dict[str, Field] = {
             "dirty_before": boolean(required=False),
             "dirty_after": boolean(required=False),
             "discard_result": _optional_text(),
+        },
+        required=False,
+    ),
+    # processesはPhase 8 PR-3aのadditive追加: 停止対象のprocess tree台帳（ADR-0019）。
+    # C-03の`TreeRef`は「元のhandleを持たない**別process**がtreeへ到達するためのidentifier」
+    # として設計されており、その永続化を後続Phaseへ委ねていた。`HaltRun`の実行は中断後に
+    # 別processから再開されるため、ここに無いと停止対象へ到達できない。
+    # 書き手はtreeを起動するcomponent（C-09、PR-3bのheadless adapter）で、C-08は読んで停止し、
+    # 停止できたものを台帳から外す
+    "processes": obj(
+        {
+            "trees": array(
+                obj(
+                    {
+                        "kind": enum_field(_TREE_KINDS),
+                        "pid": integer(),
+                        # JOB_OBJECTはjob_name、PROCESS_GROUPはpgidを持つ。kindごとの
+                        # 必須検査はreaderが行う（欠けていれば停止対象を推測しない）
+                        "job_name": _optional_text(),
+                        "pgid": integer(required=False),
+                    }
+                ),
+                required=False,
+                max_items=MAX_ACTIVE_TREES,
+            ),
         },
         required=False,
     ),

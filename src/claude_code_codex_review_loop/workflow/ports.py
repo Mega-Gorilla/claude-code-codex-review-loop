@@ -23,6 +23,7 @@ from ..domain.commands import HostAction
 from ..domain.events import Event
 from ..domain.values import Awaiting, RecordEvidence, RecordKind
 from ..identity.record_chain import ChainVerification, VerifiedRecord
+from ..process import StopResult, TreeRef
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,17 @@ class RecordEventPort(Protocol):
     """
 
     def event_for(self, evidence: RecordEvidence, record: VerifiedRecord) -> Event: ...
+
+
+class ProcessStopPort(Protocol):
+    """走っているprocess treeを停止する（C-03の`stop_tree_by_ref`）。
+
+    `TreeRef`は元のhandleを持たない**別process**からtreeへ到達するためのidentifierで、
+    停止は冪等である（既に終了しているtreeも正常結果を返す）。engineは既定値を持たないため
+    grace periodは引数で受け取る（解決はC-12）。
+    """
+
+    def stop(self, ref: TreeRef, grace_seconds: float) -> StopResult: ...
 
 
 class RecordBodyPort(Protocol):

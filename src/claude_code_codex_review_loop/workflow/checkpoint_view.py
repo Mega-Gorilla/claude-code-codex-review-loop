@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""checkpointの`state` / `host_action` / `user_request` sectionのreaderとwriter。
+"""checkpointのreaderとwriter（`state` / `host_action` / `user_request` / `processes`）。
 
-Phase 8。ADR-0015（host action）とADR-0018（`AWAIT_USER`）。
+Phase 8。ADR-0015（host action）、ADR-0018（`AWAIT_USER`）、ADR-0019（procedure / block / 停止台帳）。
 
 schema検証を通ったcheckpointでは解釈できない形にならないが、解釈できない場合に「無い」へ
 丸めると、未完了actionの取りこぼしと重複発行の余地を作る。C-07の`read_transaction`と同じく
@@ -17,23 +17,37 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from ..domain._ruledefs import BlockKind, ProcedureKind
+from ..domain._rules_workflow import BLOCKED_CONTINUATIONS
 from ..domain.states import State
 from ..domain.values import (
     NORMAL,
     Awaiting,
     BlockContext,
+    BlockedContinuation,
+    Budget,
+    CancellingProcedure,
+    ExternalDependencyBlock,
     HaltingForBlockProcedure,
     IllegalMachineStateError,
+    IncidentTarget,
     IntegrityEvidenceRef,
     MachineState,
     OpaqueBinding,
+    OpaqueFingerprint,
     OpaqueRef,
+    OpaqueSnapshot,
     PendingRecord,
     Procedure,
+    Progress,
+    ProgressBlock,
+    RecordEvidence,
+    RecordingIncidentProcedure,
     RecordIntegrityBlock,
     RecordKind,
 )
 from ..errors import ErrorCategory
+from ..process import JobObjectRef, ProcessGroupRef, TreeRef
+from ..schema.envelope import JOB_OBJECT_TREE, PROCESS_GROUP_TREE
 
 _SECTION = "host_action"
 _USER_SECTION = "user_request"
@@ -261,8 +275,24 @@ def _violations_of(section: object) -> tuple[IntegrityEvidenceRef, ...]:
     return tuple(_violation_of(entry) for entry in section)
 
 
+def _required_text(section: Mapping[str, object], name: str, where: str) -> str:
+    value = _text(section, name)
+    if value is None:
+        raise ValueError(f"{where}の{name}が欠如または不正")
+    return value
+
+
+def _attempt_binding_of(section: Mapping[str, object], where: str) -> OpaqueBinding:
+    return OpaqueBinding(_required_text(section, "attempt_binding", where))
+
+
 def _procedure_of(section: object) -> Procedure:
-    """`procedure`を復元する（未対応の種別はerrorにして`NORMAL`へ丸めない）。"""
+    """`procedure`を復元する（未対応の種別はerrorにして`NORMAL`へ丸めない）。
+
+    kindごとに必須fieldが違うためschemaは`kind`以外をoptionalにしており、**必須検査は
+    ここで行う**。欠けていれば停止手続きの途中で中断したrunを「手続き中でない」と誤って
+    復元してしまうため、既定値で埋めずerrorにする。
+    """
     if section is None:
         return NORMAL
     if not isinstance(section, dict):
@@ -270,20 +300,47 @@ def _procedure_of(section: object) -> Procedure:
     kind = _text(section, "kind")
     if kind == ProcedureKind.NORMAL.value:
         return NORMAL
+    if kind == ProcedureKind.CANCELLING.value:
+        return CancellingProcedure(attempt_binding=_attempt_binding_of(section, "state.procedure（cancel）"))
     if kind == ProcedureKind.HALTING_FOR_BLOCK.value:
-        attempt = _text(section, "attempt_binding")
-        if attempt is None:
-            raise ValueError("halt gateのattempt_bindingが欠如している")
         return HaltingForBlockProcedure(
             block=RecordIntegrityBlock(violations=_violations_of(section.get("violations"))),
-            attempt_binding=OpaqueBinding(attempt),
+            attempt_binding=_attempt_binding_of(section, "state.procedure（halt gate）"),
         )
-    # CANCELLING / RECORDING_INCIDENTの保存はこれらを発行するPhaseが追加する（fail closed）
-    raise ValueError(f"未対応のprocedure種別: {kind}")
+    if kind == ProcedureKind.RECORDING_INCIDENT.value:
+        audit = section.get("audit")
+        if audit is not None and not isinstance(audit, dict):
+            raise TypeError("state.procedure.auditがobjectでない")
+        return RecordingIncidentProcedure(
+            target=IncidentTarget(_required_text(section, "target", "state.procedure（incident記録）")),
+            audit=_pending_record_of(audit) if audit is not None else None,
+        )
+    # schemaのenumが`ProcedureKind`の4値へ限定し、すべて実装済みである。C-01へprocedureが
+    # 追加された時点でここが働く（`NORMAL`へ丸めない）
+    raise ValueError(f"未対応のprocedure種別: {kind}")  # pragma: no cover
+
+
+def _continuation_of(section: Mapping[str, object]) -> BlockedContinuation:
+    """`continuation` IDからC-01のregistryを引く（表に無いIDはfail closed。ADR-0019 決定1）。"""
+    key = _required_text(section, "continuation", "state.block")
+    continuation = BLOCKED_CONTINUATIONS.get(key)
+    if continuation is None:
+        raise ValueError(f"未対応のcontinuation ID: {key}")
+    return continuation
+
+
+def _evidence_of(section: object) -> RecordEvidence:
+    if not isinstance(section, dict):
+        raise TypeError("state.block.evidenceがobjectでない")
+    return RecordEvidence(
+        kind=RecordKind(_required_text(section, "kind", "state.block.evidence")),
+        binding=OpaqueBinding(_required_text(section, "binding", "state.block.evidence")),
+        ref=OpaqueRef(_required_text(section, "ref", "state.block.evidence")),
+    )
 
 
 def _block_of(section: object) -> BlockContext | None:
-    """`block`を復元する（RECORD_INTEGRITY以外はそれを発行するPhaseが追加する）。"""
+    """`block`を復元する（未対応の種別はerrorにする。`procedure`と同じ規則）。"""
     if section is None:
         return None
     if not isinstance(section, dict):
@@ -291,7 +348,28 @@ def _block_of(section: object) -> BlockContext | None:
     kind = _text(section, "kind")
     if kind == BlockKind.RECORD_INTEGRITY.value:
         return RecordIntegrityBlock(violations=_violations_of(section.get("violations")))
-    raise ValueError(f"未対応のblock種別: {kind}")
+    if kind == BlockKind.PROGRESS.value:
+        return ProgressBlock(
+            binding=OpaqueBinding(_required_text(section, "binding", "state.block（progress）")),
+            head=OpaqueRef(_required_text(section, "head", "state.block（progress）")),
+            continuation=_continuation_of(section),
+            reason=Progress(_required_text(section, "reason", "state.block（progress）")),
+            budget=Budget(_required_text(section, "budget", "state.block（progress）")),
+            counter_snapshot=OpaqueSnapshot(
+                _required_text(section, "counter_snapshot", "state.block（progress）")
+            ),
+            fingerprint=OpaqueFingerprint(_required_text(section, "fingerprint", "state.block（progress）")),
+        )
+    if kind == BlockKind.EXTERNAL_DEPENDENCY.value:
+        return ExternalDependencyBlock(
+            binding=OpaqueBinding(_required_text(section, "binding", "state.block（external dependency）")),
+            head=OpaqueRef(_required_text(section, "head", "state.block（external dependency）")),
+            continuation=_continuation_of(section),
+            evidence=_evidence_of(section.get("evidence")),
+        )
+    # schemaのenumが`BlockKind`の3値へ限定し、すべて実装済みである。C-01へblockが
+    # 追加された時点でここが働く
+    raise ValueError(f"未対応のblock種別: {kind}")  # pragma: no cover
 
 
 def _pending_record_of(section: Mapping[str, object]) -> PendingRecord:
@@ -333,27 +411,103 @@ def with_machine_state(
     if machine_state.recovery_to is not None:
         values["recovery_to"] = machine_state.recovery_to.value
     if machine_state.pending_record is not None:
-        record = machine_state.pending_record
-        values["pending_record"] = {
-            "kind": record.kind.value,
-            "binding": record.binding.value,
-            "source_state": record.source_state.value,
-        }
-    if isinstance(machine_state.procedure, HaltingForBlockProcedure):
-        values["procedure"] = {
-            "kind": ProcedureKind.HALTING_FOR_BLOCK.value,
-            "attempt_binding": machine_state.procedure.attempt_binding.value,
-            "violations": _violation_entries(machine_state.procedure.block.violations),
-        }
-    if isinstance(machine_state.block, RecordIntegrityBlock):
-        values["block"] = {
-            "kind": BlockKind.RECORD_INTEGRITY.value,
-            "violations": _violation_entries(machine_state.block.violations),
-        }
+        values["pending_record"] = _pending_record_entry(machine_state.pending_record)
+    procedure = _procedure_entry(machine_state.procedure)
+    if procedure is not None:
+        values["procedure"] = procedure
+    block = _block_entry(machine_state.block)
+    if block is not None:
+        values["block"] = block
     if machine_state.deferred_integrity:
         values["deferred_integrity"] = _violation_entries(machine_state.deferred_integrity)
     updated["state"] = values
     return updated
+
+
+def _pending_record_entry(record: PendingRecord) -> dict[str, object]:
+    return {
+        "kind": record.kind.value,
+        "binding": record.binding.value,
+        "source_state": record.source_state.value,
+    }
+
+
+def _continuation_id(continuation: BlockedContinuation) -> str | None:
+    """継続のID（registryの逆引き）。表に無い継続は保存できない。
+
+    例外にせず`None`を返すのは、writerが**保存できないことを検出する経路**（round-trip検証）
+    へ合流させるためである。ruleがregistry外の継続を作らないことはC-01のcontract testが
+    固定しており、ここは書き手が壊れたときの最後のgateになる。
+    """
+    for key, known in BLOCKED_CONTINUATIONS.items():
+        if known == continuation:
+            return key
+    return None
+
+
+def _procedure_entry(procedure: Procedure) -> dict[str, object] | None:
+    """`procedure`を書き出す（`NORMAL`はfieldを置かない）。"""
+    if isinstance(procedure, CancellingProcedure):
+        return {
+            "kind": ProcedureKind.CANCELLING.value,
+            "attempt_binding": procedure.attempt_binding.value,
+        }
+    if isinstance(procedure, HaltingForBlockProcedure):
+        return {
+            "kind": ProcedureKind.HALTING_FOR_BLOCK.value,
+            "attempt_binding": procedure.attempt_binding.value,
+            "violations": _violation_entries(procedure.block.violations),
+        }
+    if isinstance(procedure, RecordingIncidentProcedure):
+        entry: dict[str, object] = {
+            "kind": ProcedureKind.RECORDING_INCIDENT.value,
+            "target": procedure.target.value,
+        }
+        if procedure.audit is not None:
+            entry["audit"] = _pending_record_entry(procedure.audit)
+        return entry
+    return None
+
+
+def _block_entry(block: BlockContext | None) -> dict[str, object] | None:
+    """`block`を書き出す（保存するのは継続のIDであってcommand列ではない）。"""
+    if isinstance(block, RecordIntegrityBlock):
+        return {
+            "kind": BlockKind.RECORD_INTEGRITY.value,
+            "violations": _violation_entries(block.violations),
+        }
+    if isinstance(block, (ProgressBlock, ExternalDependencyBlock)):
+        continuation = _continuation_id(block.continuation)
+        if continuation is None:
+            return None
+        entry: dict[str, object] = {
+            "binding": block.binding.value,
+            "head": block.head.value,
+            "continuation": continuation,
+        }
+        if isinstance(block, ProgressBlock):
+            entry.update(
+                {
+                    "kind": BlockKind.PROGRESS.value,
+                    "reason": block.reason.value,
+                    "budget": block.budget.value,
+                    "counter_snapshot": block.counter_snapshot.value,
+                    "fingerprint": block.fingerprint.value,
+                }
+            )
+            return entry
+        entry.update(
+            {
+                "kind": BlockKind.EXTERNAL_DEPENDENCY.value,
+                "evidence": {
+                    "kind": block.evidence.kind.value,
+                    "binding": block.evidence.binding.value,
+                    "ref": block.evidence.ref.value,
+                },
+            }
+        )
+        return entry
+    return None
 
 
 def _violation_entries(
@@ -383,7 +537,9 @@ def with_verified_machine_state(
     restored = read_machine_state(updated)
     if isinstance(restored, SectionUnavailable):
         return restored
-    if restored != machine_state:
+    if restored != machine_state:  # pragma: no cover - 読み戻せない状態は上の分岐で捕まる。
+        # ここが働くのはwriterとreaderが「読めるが**別の値**」を作った場合で、その差は
+        # 列挙できない。表現範囲を広げるPhaseへの網として残す
         return SectionUnavailable(
             detail="MachineStateをそのまま読み戻せない（checkpointが表現しない付随値がある）"
         )
@@ -767,3 +923,88 @@ def with_consumed_intent(
         "route": consumed.route,
     }
     return _with_user_section(payload, section)
+
+
+# ---------------------------------------------------------------------------
+# `processes` section（Phase 8 PR-3a。ADR-0019）
+# ---------------------------------------------------------------------------
+
+_PROCESS_SECTION = "processes"
+
+
+def read_active_trees(
+    payload: Mapping[str, object],
+) -> tuple[TreeRef, ...] | SectionUnavailable:
+    """停止対象のprocess tree台帳を読む（無ければ空）。
+
+    kindごとに必須fieldが違うためschemaは`job_name` / `pgid`をoptionalにしており、
+    **必須検査はここで行う**。欠けている場合に片方で代用すると、停止対象を推測して
+    別のtreeへ到達し得る。
+    """
+    section = payload.get(_PROCESS_SECTION)
+    if section is None:
+        return ()
+    if not isinstance(section, dict):
+        return SectionUnavailable(detail="processesがobjectでない")
+    entries = section.get("trees")
+    if entries is None:
+        return ()
+    if not isinstance(entries, list):
+        return SectionUnavailable(detail="processes.treesがlistでない")
+    refs: list[TreeRef] = []
+    for entry in entries:
+        ref = _tree_ref_of(entry)
+        if isinstance(ref, SectionUnavailable):
+            return ref
+        refs.append(ref)
+    return tuple(refs)
+
+
+def _tree_pid(entry: Mapping[str, object]) -> int | None:
+    value = entry.get("pid")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _tree_ref_of(entry: object) -> TreeRef | SectionUnavailable:
+    if not isinstance(entry, dict):
+        return SectionUnavailable(detail="processes.treesの要素がobjectでない")
+    pid = _tree_pid(entry)
+    if pid is None:
+        return SectionUnavailable(detail="processes.treesのpidが1以上の整数でない")
+    kind = _text(entry, "kind")
+    if kind == JOB_OBJECT_TREE:
+        job_name = _text(entry, "job_name")
+        if job_name is None:
+            return SectionUnavailable(detail="processes.treesのjob_nameが欠如または不正")
+        return JobObjectRef(pid=pid, job_name=job_name)
+    if kind == PROCESS_GROUP_TREE:
+        pgid = entry.get("pgid")
+        if isinstance(pgid, bool) or not isinstance(pgid, int) or pgid < 1:
+            return SectionUnavailable(detail="processes.treesのpgidが1以上の整数でない")
+        return ProcessGroupRef(pid=pid, pgid=pgid)
+    return SectionUnavailable(detail=f"processes.treesに未対応のtree種別: {kind}")
+
+
+def _tree_entry(ref: TreeRef) -> dict[str, object]:
+    if isinstance(ref, JobObjectRef):
+        return {"kind": JOB_OBJECT_TREE, "pid": ref.pid, "job_name": ref.job_name}
+    return {"kind": PROCESS_GROUP_TREE, "pid": ref.pid, "pgid": ref.pgid}
+
+
+def with_active_trees(
+    payload: Mapping[str, object], refs: Sequence[TreeRef]
+) -> dict[str, object]:
+    """停止対象の台帳を置き換える（空にするとsectionごと消える）。
+
+    書き手はtreeを起動するcomponent（C-09、headless adapter）で、`halt`は停止できたものを
+    ここから外す。listを部分更新せず**全体で置き換える**のは、追加と削除が同じ経路を通り、
+    「消したつもりが残る」形を作らないためである。
+    """
+    updated = dict(payload)
+    if refs:
+        updated[_PROCESS_SECTION] = {"trees": [_tree_entry(ref) for ref in refs]}
+    else:
+        updated.pop(_PROCESS_SECTION, None)
+    return updated

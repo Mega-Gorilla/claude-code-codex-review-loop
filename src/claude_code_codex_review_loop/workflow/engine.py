@@ -34,7 +34,18 @@ from ..domain import events as ev
 from ..domain.commands import Command
 from ..domain.machine import transition
 from ..domain.states import TERMINAL_STATES, State
-from ..domain.values import Awaiting, MachineState, PendingRecord, RecordKind, TransitionRejected
+from ..domain.values import (
+    Awaiting,
+    BlockContext,
+    CancellingProcedure,
+    HaltingForBlockProcedure,
+    MachineState,
+    NormalProcedure,
+    PendingRecord,
+    Procedure,
+    RecordKind,
+    TransitionRejected,
+)
 from ..errors import ErrorCategory
 from ..identity.errors import IdentityError
 from ..identity.fs_permissions import create_private_dir, verify_private_dir, write_private_text
@@ -115,9 +126,29 @@ class HostActionIssued:
 
 @dataclass(frozen=True)
 class PersistRequired:
-    """受理済み結果の永続化待ち（C-01の`PersistRecord`。実行は後続PR）。"""
+    """受理済み結果の永続化待ち（C-01の`PersistRecord`。実行は`persistence`）。"""
 
     record: PendingRecord
+
+
+@dataclass(frozen=True)
+class HaltRequired:
+    """進行中の停止手続き（C-01の`HaltRun`。実行は`halt`）。
+
+    cancelとintegrity haltの両方がここへ来る。どちらかは`procedure`が表す。
+    """
+
+    procedure: Procedure
+
+
+@dataclass(frozen=True)
+class Blocked:
+    """`BLOCKED`。解消はC-08の外から来る（limit引き上げ・ユーザー介入・integrity復旧）。
+
+    汎用の`no_awaiting`で止めると、runが壊れたのかblockで待っているのかをhostが区別できない。
+    """
+
+    block: BlockContext
 
 
 @dataclass(frozen=True)
@@ -127,7 +158,9 @@ class Terminal:
     state: State
 
 
-AdvanceOutcome = HostActionIssued | AwaitUser | PersistRequired | Terminal | EngineStopped
+AdvanceOutcome = (
+    HostActionIssued | AwaitUser | PersistRequired | HaltRequired | Blocked | Terminal | EngineStopped
+)
 
 
 @dataclass(frozen=True)
@@ -367,6 +400,26 @@ def _reissue(loaded: RunContext, action: PendingAction) -> HostActionIssued | En
     )
 
 
+def _procedure_outcome(procedure: Procedure, machine_state: MachineState) -> AdvanceOutcome:
+    """手続き中に次へ進める作業（procedureが期待値を表すのでawaitingは無い）。
+
+    **pending recordより先に見る**。cancelの経路2はstale pendingを監査参照として保持する
+    ため（C-01のC-02 rule）、順序を逆にすると監査参照を永続化しようとする。
+    """
+    if isinstance(procedure, (CancellingProcedure, HaltingForBlockProcedure)):
+        return HaltRequired(procedure=procedure)
+    # RecordingIncidentProcedure: incident recordの投稿はC-08が駆動する（下のPersistRequired）。
+    # まだ実装が無いのは`RecordIntegrityIncident`（payloadの作成依頼）の実行で、これは
+    # **C-08の責務**である。この手続きへはMERGINGのoutcome確定だけでなく、cancel中の
+    # integrity検出（C-01のI-D2 -> C-04）からも入るため、C-13へは委ねられない
+    if machine_state.pending_record is not None:
+        return PersistRequired(record=machine_state.pending_record)
+    return EngineStopped(
+        "incident_executor_missing",
+        "RecordIntegrityIncidentの実行がまだ無い（C-08の責務。PR-3dが追加する）",
+    )
+
+
 def _describes_current_instance(
     request: PendingUserRequest, *, awaiting: Awaiting, head_sha: str, since_seq: int
 ) -> bool:
@@ -471,8 +524,13 @@ def advance(
     machine_state = loaded.machine_state
     if machine_state.state in TERMINAL_STATES:
         return Terminal(state=machine_state.state)
+    procedure = machine_state.procedure
+    if not isinstance(procedure, NormalProcedure):
+        return _procedure_outcome(procedure, machine_state)
     if machine_state.pending_record is not None:
         return PersistRequired(record=machine_state.pending_record)
+    if machine_state.block is not None:
+        return Blocked(block=machine_state.block)
     receipts = read_receipts(loaded.payload)
     if isinstance(receipts, SectionUnavailable):  # pragma: no cover - schema検証がreceiptの形を保証する
         return EngineStopped("host_action_unavailable", receipts.detail)
