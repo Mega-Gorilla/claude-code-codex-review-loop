@@ -111,6 +111,18 @@ class ProcessStopPort(Protocol):
     def stop(self, ref: TreeRef, grace_seconds: float) -> StopResult: ...
 
 
+class StopEscalation(Protocol):
+    """2回目のCtrl+Cを受けたかどうか（AC-C03-02の昇格判定）。
+
+    C-03は「1回目 = graceful -> grace -> force、2回目 = 即時force」のうち**停止primitive
+    だけ**を提供し、両者の競合の最終確定はC-08が行う（ADR-0005 決定6）。engineはsignalの
+    受け取り方を知らないので、必要な事実（force要求の有無）だけをこのportで受け取る。
+    """
+
+    @property
+    def force_requested(self) -> bool: ...
+
+
 class RecordBodyPort(Protocol):
     """検証済みpayloadから公開本文（agent発言）を作る。
 

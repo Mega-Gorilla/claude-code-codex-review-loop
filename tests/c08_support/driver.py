@@ -57,19 +57,25 @@ from claude_code_codex_review_loop.workflow import (  # noqa: E402
 RUN = "run-1"
 
 
-def _ports(paths, config, *, stop_fails: bool):
-    """まだ実装の無い2 portだけをfakeで補う（残りは製品実装）。"""
+def _ports(paths, config, *, stop_fails: bool, real_stop: bool = False):
+    """まだ実装の無い2 portだけをfakeで補う（残りは製品実装）。
+
+    `real_stop`は製品の`TreeStopper`をそのまま使う（AC-C03-02のE2E）。台帳へ実在する
+    treeのrefが入っている場合だけ使ってよい。
+    """
     from c08_support.runtime import QUESTION_COMMENT_ID, AgentRecordBody
 
-    stop = FakeStopPort(fails=frozenset({job_object_ref()}) if stop_fails else frozenset())
-    return dataclasses.replace(
+    ports = dataclasses.replace(
         default_ports(paths, config),
         payload=FakeActionPayloads(
             {"ANSWER_GATE_QUESTION": {"question_comment_id": QUESTION_COMMENT_ID}}
         ),
         body=AgentRecordBody(),
-        stop=stop,
     )
+    if real_stop:
+        return ports
+    stop = FakeStopPort(fails=frozenset({job_object_ref()}) if stop_fails else frozenset())
+    return dataclasses.replace(ports, stop=stop)
 
 
 def _describe(outcome: object) -> dict[str, object]:
@@ -106,14 +112,20 @@ def _wait_for_signal(paths, config, ports) -> int:
         print("READY", flush=True)
         while not stop.requested:
             time.sleep(0.02)
-        result = step(
-            paths=paths,
-            config=config,
-            ports=ports,
-            id_source=FakeIds("sig"),
-            issued_at=ISSUED_AT,
-            stop=stop,
-        )
+        try:
+            result = step(
+                paths=paths,
+                config=config,
+                ports=ports,
+                id_source=FakeIds("sig"),
+                issued_at=ISSUED_AT,
+                stop=stop,
+            )
+        except KeyboardInterrupt:
+            # 2回目のsignalが停止の外側へ届いた場合。要求は台帳へ残っており、次のresumeが
+            # 停止をやり直す（`__main__`と同じ最後の網）
+            print(json.dumps({"outcome": "STOPPED", "code": "forced_stop"}, sort_keys=True))
+            return 0
     payload = _describe(result.outcome)
     payload["stop_requested"] = result.trace.stop_requested
     payload["stopped"] = result.trace.stopped
@@ -142,6 +154,8 @@ def main(argv: list[str]) -> int:
         payload["stopped"] = result.trace.stopped
     elif command == "wait-for-signal":
         return _wait_for_signal(paths, config, ports)
+    elif command == "wait-for-signal-real-stop":
+        return _wait_for_signal(paths, config, _ports(paths, config, stop_fails=False, real_stop=True))
     elif command == "submit":
         raw = Path(argv[3]).read_bytes()
         outcome = submit_result(

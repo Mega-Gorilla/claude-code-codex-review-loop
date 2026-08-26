@@ -154,7 +154,26 @@ def _read_submit(path: Path) -> bytes | dict[str, object]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """1回のadvanceまたはsubmitを実行して結果を出す（loopを持たない）。"""
+    """1回のadvanceまたはsubmitを実行して結果を出す（loopを持たない）。
+
+    2回目のCtrl+Cは`KeyboardInterrupt`として届く（AC-C03-02の即時force要求）。停止の
+    昇格は`stop_trees`が引き受けるが、それ以外の位置で届いた場合の**最後の網**をここへ置く。
+    tracebackで落ちるとprocess境界の契約が崩れる。
+    """
+    try:
+        return _run(argv)
+    except KeyboardInterrupt:
+        _render(
+            {
+                "outcome": "STOPPED",
+                "code": "forced_stop",
+                "detail": "2回目の停止signalで中断した",
+            }
+        )
+        return EXIT_STOPPED
+
+
+def _run(argv: Sequence[str] | None) -> int:
     args = _parser().parse_args(argv)
     paths = prepare_state_root(Path(args.state_root).resolve())
     config = read_session_config(paths, args.run)

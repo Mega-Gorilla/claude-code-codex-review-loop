@@ -18,11 +18,17 @@ import json
 import signal
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 from c07_support.helpers import NUMBER, REPOSITORY, RUN
-from c08_support.helpers import job_object_ref, machine_state, user_machine_state
+from c08_support.helpers import (
+    FakeStopPort,
+    job_object_ref,
+    machine_state,
+    user_machine_state,
+)
 from c08_support.runtime import (
     ISSUED_AT,
     FakeIds,
@@ -35,6 +41,7 @@ from c08_support.runtime import (
 )
 
 from claude_code_codex_review_loop.domain.values import Awaiting, RecordKind, State
+from claude_code_codex_review_loop.process import StopMethod, StopResult, TreeRef
 from claude_code_codex_review_loop.runtime import drive, step
 from claude_code_codex_review_loop.runtime.signals import (
     StopSignal,
@@ -46,9 +53,11 @@ from claude_code_codex_review_loop.workflow import (
     EngineStopped,
     StopRequest,
     Terminal,
+    TreesStopped,
     read_machine_state,
     read_stop_request,
     stop_evidence,
+    stop_trees,
     with_active_trees,
     with_stop_request,
 )
@@ -111,6 +120,97 @@ class TestHandlerInstallation:
         expected = "SIGBREAK" if sys.platform == "win32" else "SIGTERM"
         assert signal_names() == ("SIGINT", expected)
         assert all(hasattr(signal, name) for name in signal_names())
+
+
+class TestForceEscalation:
+    """AC-C03-02: 1回目でgraceful、**grace待機中の2回目で即時force**。
+
+    grace待機はC-03の停止primitiveの中にありflagでは中断できないため、2回目は
+    `KeyboardInterrupt`として届く（ADR-0005 Consequencesが前提にしている中断手段）。
+    昇格のwiringはC-08の責務である（同 決定6）。
+    """
+
+    def test_the_second_signal_is_recorded_as_force(self) -> None:
+        stop = StopSignal()
+        stop.record(signal.SIGINT)
+        assert stop.force_requested is False
+        stop.record_force(signal.SIGINT)
+        assert stop.force_requested is True
+
+    def test_only_the_first_force_is_kept(self) -> None:
+        stop = StopSignal()
+        stop.record_force(signal.SIGINT)
+        stop.record_force(99)
+        assert stop.force_received == signal.SIGINT
+
+    def test_the_handler_raises_only_on_the_second_signal(self) -> None:
+        """1回目は例外にしない（安全点での停止経路を使う）。"""
+        stop = StopSignal()
+        with install_stop_handler(stop):
+            handler = signal.getsignal(signal.SIGINT)
+            assert callable(handler)
+            handler(signal.SIGINT, None)  # type: ignore[operator]
+            assert stop.requested and not stop.force_requested
+            with pytest.raises(KeyboardInterrupt):
+                handler(signal.SIGINT, None)  # type: ignore[operator]
+        assert stop.force_requested is True
+
+    def test_a_pending_force_skips_the_grace_wait(self) -> None:
+        """停止を始める前にforce要求が在れば、最初からgrace 0で呼ぶ。"""
+        stop = StopSignal()
+        stop.record(signal.SIGINT)
+        stop.record_force(signal.SIGINT)
+        port = FakeStopPort()
+        outcome = stop_trees(
+            [job_object_ref()], stop_port=port, grace_seconds=30.0, escalation=stop
+        )
+        assert isinstance(outcome, TreesStopped)
+        assert [grace for _, grace in port.calls] == [0.0]
+
+    def test_an_interrupted_grace_wait_is_retried_as_force(self) -> None:
+        """grace待機中の2回目: `KeyboardInterrupt`を捕まえて即時forceでやり直す。"""
+        stop = StopSignal()
+        stop.record(signal.SIGINT)
+        port = _InterruptingStopPort(stop)
+        outcome = stop_trees(
+            [job_object_ref()], stop_port=port, grace_seconds=30.0, escalation=stop
+        )
+        assert isinstance(outcome, TreesStopped)
+        # 1回目は設定されたgrace、2回目は即時force
+        assert port.graces == [30.0, 0.0]
+
+    def test_an_unrelated_interrupt_is_not_swallowed(self) -> None:
+        """force要求を伴わない中断は握り潰さない（別の理由の中断を停止へ読み替えない）。"""
+
+        class Interrupting:
+            def stop(self, ref: TreeRef, grace_seconds: float) -> StopResult:
+                raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            stop_trees([job_object_ref()], stop_port=Interrupting(), grace_seconds=30.0)
+
+    def test_the_escalation_is_optional(self) -> None:
+        """signalを持たない呼び出し（resume経路）は従来どおり動く。"""
+        port = FakeStopPort()
+        outcome = stop_trees([job_object_ref()], stop_port=port, grace_seconds=1.5)
+        assert isinstance(outcome, TreesStopped)
+        assert [grace for _, grace in port.calls] == [1.5]
+
+
+@dataclass
+class _InterruptingStopPort:
+    """1回目の呼び出しでgrace待機中の2回目signalを再現するport。"""
+
+    stop_signal: StopSignal
+    graces: list[float] = field(default_factory=list)
+
+    def stop(self, ref: TreeRef, grace_seconds: float) -> StopResult:
+        self.graces.append(grace_seconds)
+        if len(self.graces) == 1:
+            # grace待機中に2回目が届いた（handlerと同じ順序でflagを立ててから送出する）
+            self.stop_signal.record_force(signal.SIGINT)
+            raise KeyboardInterrupt
+        return StopResult(method=StopMethod.FORCED, graceful_requested=True)
 
 
 class TestSafePoints:

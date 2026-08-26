@@ -58,6 +58,16 @@ PR-3b1で入れた`processes`台帳（停止対象の`TreeRef`）は1を解決�
 18. 受け取るsignalはPOSIXが`SIGINT` / `SIGTERM`、Windowsが`SIGINT` / `SIGBREAK`。Windowsは`SIGTERM`をconsoleから配送できず、C-03の`job_object`が停止要求に`CTRL_BREAK_EVENT`を使うのと対の関係になる。
 19. 設置できないsignal（platformに無い、main thread以外）は**黙って飛ばす**。signalを受け取れないことは停止機構の不在ではなく、台帳経由の停止経路は動く。
 
+### 2回目のCtrl+Cは即時forceへ昇格する（AC-C03-02）
+
+19-a. **2回目のsignalは`KeyboardInterrupt`として送出する**。1回目をflagだけにしたのは安全のためだが、それを2回目にも適用すると**AC-C03-02（1回目でgraceful、grace待機中の2回目で即時force）が成立しなくなる**。grace待機はC-03の停止primitiveの中にあり、flagでは中断できない。ADR-0005はこの中断を`KeyboardInterrupt`で行うことを前提に設計されており（Consequences:「grace待機はKeyboardInterruptで中断可能であり、その後の`force_stop`呼び出し（C-08が行う）は安全である」）、昇格のwiringはC-08の責務と定めている（同 決定6）。
+19-b. **2回目で例外にするのは新しいriskではない**。本PR以前はすべてのCtrl+Cが`KeyboardInterrupt`だった。1回目が構造化経路になったぶん安全側へ動いており、2回目は「待たずに殺せ」という要求そのものである。checkpointの書き込みはatomic replaceなので、中断されても既存のcheckpointは壊れない。
+19-c. **昇格はC-03のAPIを増やさずに行う**。`stop_tree_by_ref(ref, 0.0)`は「graceful要求 -> 待たずにforce」になる（両backendの`_drain_*`がgrace 0で即座にfalseを返す）。force専用のby-ref APIを足す必要は無い。
+19-d. 捕捉と再実行は`workflow.halt`の`stop_trees`が引き受ける。**停止を始める前にforce要求が在れば最初からgrace 0**で呼び、**grace待機中に届いた場合は`KeyboardInterrupt`を捕まえてgrace 0でやり直す**（`stop_tree_by_ref`は冪等）。どちらの順序で届いても同じ結果になる。
+19-e. **force要求を伴わない中断は握り潰さない**。別の理由の`KeyboardInterrupt`を停止要求へ読み替えると、中断の意味を偽装することになる。
+19-f. engineはsignalの受け取り方を知らないので、必要な事実だけを`StopEscalation` port（`force_requested`のみ）で受け取る。`ProcessStopPort`と同じ層の定義である。
+19-g. entry pointは`KeyboardInterrupt`を**最後の網**として構造化結果（`forced_stop`）へ写す。停止の外側で2回目が届いた場合、要求は台帳へ残っているので次のresumeが停止をやり直す。
+
 ### signal経路とresume経路を台帳で合流させる
 
 20. **signalは要求を作るだけ**で、実行は必ず`advance` -> `EmergencyStopRequired` -> `emergency_stop`の1経路を通る。signal経路とcross-process resume経路が同じcodeを通り、片方だけ壊れる形を作らない。
@@ -80,3 +90,5 @@ PR-3b1で入れた`processes`台帳（停止対象の`TreeRef`）は1を解決�
 - `stop_request`の書き手は現時点でC-08だけである。将来ユーザー起点の停止要求が増えても、同じsectionを使うかどうかはその時点で決める（今は緊急停止の1種類しか無く、`kind`のような値域を先取りしない）
 - **AC-C08-04（active / headlessの同値性）は未充足**のままで、PR-3b3が扱う。`HostPort`と`drive`という構造はPR-3b1で用意済みである
 - **`processes`台帳の書き手はまだ存在しない**。本PRは読んで停止するだけで、testが台帳をseedする。書き手はtreeを起動するcomponent（PR-3b3のheadless adapter、C-09）である
+- **AC-C03-02のwiringが初めて成立した**。ADR-0005はC-03に停止primitiveだけを置き、2段階Ctrl+Cのwiringを「C-08が実装すればよい」として保留していた。signal handlerを設置する本PRがその実装地点である
+- AC-C03-02のE2E testは**実際に終了しないtreeへ実signalを2回送る**。treeを起動するのはtestで（C-03の公開API）、**製品codeはprocessを起動しない**という本PRの範囲は変わらない

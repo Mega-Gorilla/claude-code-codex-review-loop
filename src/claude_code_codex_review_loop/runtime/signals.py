@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """緊急停止signalの受け取り（Phase 8 PR-3b2。ADR-0021）。
 
-**handlerの中ではflagを立てるだけ**にする。signal handlerは任意のbytecode境界で走るため、
+**1回目のhandlerではflagを立てるだけ**にする。signal handlerは任意のbytecode境界で走るため、
 checkpointの書き込みやprocessの停止をそこで行うと、書きかけのfileやhandleを残し得る。
 実際の停止はmain loopが安全点（`step`のengine作業の境目、`drive`のround境界）で行う。
+
+**2回目は`KeyboardInterrupt`を送出する**（AC-C03-02: 1回目でgraceful、2回目で即時force）。
+grace待機はC-03の停止primitiveの中にあり、flagでは中断できない。ADR-0005はこの中断を
+`KeyboardInterrupt`で行うことを前提に設計されており（「grace待機はKeyboardInterruptで
+中断可能であり、その後のforce_stop呼び出し（C-08が行う）は安全である」）、昇格のwiringは
+C-08の責務と定めている（同 決定6）。捕捉して即時forceへ昇格するのは`workflow.halt`の
+`stop_trees`で、entry pointは最後の網として構造化結果へ写す。
 
 **設置するのはentry pointだけ**である。signal dispositionはprocess全体の状態で、library
 codeが勝手に変えてよいものではない。設置は文脈managerにして、退出時に必ず元へ戻す。
@@ -34,16 +41,27 @@ class StopSignal:
     """
 
     received: int | None = field(default=None)
+    force_received: int | None = field(default=None)
     recorded: bool = field(default=False)
 
     @property
     def requested(self) -> bool:
         return self.received is not None
 
+    @property
+    def force_requested(self) -> bool:
+        """2回目のsignalを受けたか（grace待機を打ち切って即時forceへ昇格する）。"""
+        return self.force_received is not None
+
     def record(self, signum: int) -> None:
         """最初のsignalだけを保持する（2回目以降で理由が書き換わらない）。"""
         if self.received is None:
             self.received = signum
+
+    def record_force(self, signum: int) -> None:
+        """2回目以降のsignalをforce要求として保持する（最初のものだけ）。"""
+        if self.force_received is None:
+            self.force_received = signum
 
     def mark_recorded(self) -> None:
         """signalを停止要求へ変換し終えたことを記録する。
@@ -75,6 +93,13 @@ def install_stop_handler(stop: StopSignal) -> Iterator[StopSignal]:
     previous: list[tuple[int, object]] = []
 
     def _handler(signum: int, frame: FrameType | None) -> None:
+        if stop.requested:
+            # **2回目は例外にする**。grace待機はC-03の中にあり、flagでは中断できない
+            # （ADR-0005 Consequences: 「grace待機はKeyboardInterruptで中断可能であり、
+            # その後のforce_stop呼び出しは安全である」）。1回目のflagだけの扱いと違い、
+            # 2回目は「待たずに殺せ」という要求そのものである
+            stop.record_force(signum)
+            raise KeyboardInterrupt
         stop.record(signum)
 
     for name in signal_names():

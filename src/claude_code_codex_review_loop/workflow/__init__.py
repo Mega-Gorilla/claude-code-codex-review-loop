@@ -117,6 +117,7 @@ from .ports import (
     RecordEventPort,
     RecordSourcePort,
     RequestContext,
+    StopEscalation,
     UserRequestContext,
 )
 from .results import ResultAccepted, ResultOutcome, ResultRejected, read_result
@@ -190,6 +191,7 @@ __all__ = [
     "ResultVariant",
     "RunContext",
     "SectionUnavailable",
+    "StopEscalation",
     "StopOutcome",
     "StopRequest",
     "SubmitAccepted",

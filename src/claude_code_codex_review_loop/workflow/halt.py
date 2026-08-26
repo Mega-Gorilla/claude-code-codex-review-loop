@@ -52,7 +52,7 @@ from .checkpoint_view import (
     with_active_trees,
     with_verified_machine_state,
 )
-from .ports import ProcessStopPort
+from .ports import ProcessStopPort, StopEscalation
 from .run_context import EngineStopped, RunContext, load_run
 
 
@@ -71,19 +71,52 @@ class TreeStopFailed:
     remaining: tuple[TreeRef, ...]
 
 
+# 即時force（2回目のCtrl+C）。C-03の停止primitiveはgrace 0で「graceful要求 -> 待たずにforce」
+# になるため、別のAPIを足さずに昇格できる
+_FORCE_GRACE_SECONDS = 0.0
+
+
+def _stop_one(
+    stop_port: ProcessStopPort,
+    ref: TreeRef,
+    grace_seconds: float,
+    escalation: StopEscalation | None,
+) -> StopResult:
+    """1つのtreeを停止する（force要求があれば待たない）。
+
+    2回目のCtrl+Cは`KeyboardInterrupt`としてgrace待機を破る（ADR-0005 Consequences）。
+    捕捉して**即時force**でやり直す。`stop_tree_by_ref`は冪等なので再呼び出しは安全である。
+    """
+    forced = escalation is not None and escalation.force_requested
+    try:
+        return stop_port.stop(ref, _FORCE_GRACE_SECONDS if forced else grace_seconds)
+    except KeyboardInterrupt:
+        if escalation is None or not escalation.force_requested:
+            # 停止の昇格要求ではない中断は握り潰さない
+            raise
+        return stop_port.stop(ref, _FORCE_GRACE_SECONDS)
+
+
 def stop_trees(
-    refs: Sequence[TreeRef], *, stop_port: ProcessStopPort, grace_seconds: float
+    refs: Sequence[TreeRef],
+    *,
+    stop_port: ProcessStopPort,
+    grace_seconds: float,
+    escalation: StopEscalation | None = None,
 ) -> TreesStopped | TreeStopFailed:
     """台帳のtreeを順に停止する（停止の共通機構）。
 
     `HaltRun`の実行（`halt`）と緊急停止（`emergency`）が同じ機構を使う。**1つでも
     止められなければそこで打ち切る**。止まっていないrefを呼び出し側が台帳へ残せるよう、
     失敗位置以降を`remaining`で返す（`stop_tree_by_ref`は冪等なので再試行してよい）。
+
+    `escalation`は2回目のCtrl+Cの昇格判定（AC-C03-02）。C-03は停止primitiveだけを持ち、
+    graceful要求とforce要求の競合の最終確定はC-08が行う（ADR-0005 決定6）。
     """
     stopped: list[StopResult] = []
     for index, ref in enumerate(refs):
         try:
-            stopped.append(stop_port.stop(ref, grace_seconds))
+            stopped.append(_stop_one(stop_port, ref, grace_seconds, escalation))
         except ProcessError as error:
             return TreeStopFailed(
                 detail=f"process treeを停止できない: {error}", remaining=tuple(refs[index:])
@@ -164,6 +197,7 @@ def halt(
     number: int,
     stop_port: ProcessStopPort,
     grace_seconds: float,
+    escalation: StopEscalation | None = None,
 ) -> HaltOutcome:
     """進行中の停止手続きを1回だけ完了させる。
 
@@ -190,7 +224,9 @@ def halt(
     refs = read_active_trees(run.payload)
     if isinstance(refs, SectionUnavailable):
         return EngineStopped("processes_unavailable", refs.detail)
-    outcome = stop_trees(refs, stop_port=stop_port, grace_seconds=grace_seconds)
+    outcome = stop_trees(
+        refs, stop_port=stop_port, grace_seconds=grace_seconds, escalation=escalation
+    )
     if isinstance(outcome, TreeStopFailed):
         failed = _accepted(run, ev.RunFailed())
         if isinstance(failed, EngineStopped):  # pragma: no cover - 手続き中の`RunFailed`は

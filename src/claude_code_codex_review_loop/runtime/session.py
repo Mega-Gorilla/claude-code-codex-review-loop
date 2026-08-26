@@ -166,7 +166,7 @@ def step(
                 trace(),
             )
         if isinstance(outcome, EmergencyStopRequired):
-            halt_outcome = _emergency(paths, config, ports)
+            halt_outcome = _emergency(paths, config, ports, stop)
             if isinstance(halt_outcome, EngineStopped):
                 return StepResult(halt_outcome, trace())
             if isinstance(halt_outcome, EmergencyStopFailed):
@@ -187,7 +187,7 @@ def step(
             work += 1
             continue
         if isinstance(outcome, HaltRequired):
-            stopped = _halt(paths, config, ports)
+            stopped = _halt(paths, config, ports, stop)
             if isinstance(stopped, EngineStopped):
                 return StepResult(stopped, trace())
             halted += 1
@@ -204,7 +204,7 @@ def step(
 
 
 def _emergency(
-    paths: StatePaths, config: SessionConfig, ports: PortSet
+    paths: StatePaths, config: SessionConfig, ports: PortSet, stop: StopSignal | None
 ) -> EmergencyStopCompleted | EmergencyStopFailed | EngineStopped:
     return emergency_stop(
         paths=paths,
@@ -213,6 +213,7 @@ def _emergency(
         number=config.number,
         stop_port=ports.stop,
         grace_seconds=config.halt_grace_seconds,
+        escalation=stop,
     )
 
 
@@ -240,7 +241,7 @@ def _persist(
 
 
 def _halt(
-    paths: StatePaths, config: SessionConfig, ports: PortSet
+    paths: StatePaths, config: SessionConfig, ports: PortSet, stop: StopSignal | None
 ) -> HaltCompleted | HaltFailed | EngineStopped:
     return halt(
         paths=paths,
@@ -249,6 +250,7 @@ def _halt(
         number=config.number,
         stop_port=ports.stop,
         grace_seconds=config.halt_grace_seconds,
+        escalation=stop,
     )
 
 

@@ -173,6 +173,26 @@ class TestSubmit:
         assert code == entry.EXIT_STOPPED
         assert payload["code"] == "submit_too_large"
 
+    def test_a_forced_stop_is_reported_instead_of_a_traceback(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """2回目のsignalが停止の**外側**で届いた場合の最後の網（ADR-0021 決定19-g）。
+
+        停止中に届いた場合は`stop_trees`が即時forceへ昇格させる（`test_c08_force_stop.py`）。
+        それ以外の位置で届いても、要求は台帳に残るので次のresumeが停止をやり直す。
+        """
+        env = _gate_env(tmp_path)
+
+        def _interrupted(**kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(entry, "step", _interrupted)
+        code = entry.main(["advance", "--state-root", str(env.paths.root), "--run", RUN])
+        assert code == entry.EXIT_STOPPED
+        payload = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert payload["outcome"] == "STOPPED"
+        assert payload["code"] == "forced_stop"
+
     def test_an_unknown_command_is_rejected_by_the_parser(self, tmp_path: Path) -> None:
         env = _gate_env(tmp_path)
         completed = subprocess.run(  # noqa: S603 - 起動するのは自分自身のmodule

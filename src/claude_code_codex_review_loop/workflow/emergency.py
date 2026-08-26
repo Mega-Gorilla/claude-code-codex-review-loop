@@ -53,7 +53,7 @@ from .checkpoint_view import (
     with_verified_machine_state,
 )
 from .halt import TreeStopFailed, stop_trees
-from .ports import ProcessStopPort
+from .ports import ProcessStopPort, StopEscalation
 from .run_context import EngineStopped, RunContext, load_run
 
 # 緊急停止evidenceのprefix（violation bindingやintent keyと同じく、値の由来を読めるようにする）
@@ -171,6 +171,7 @@ def emergency_stop(
     number: int,
     stop_port: ProcessStopPort,
     grace_seconds: float,
+    escalation: StopEscalation | None = None,
 ) -> StopOutcome:
     """記録済みの緊急停止要求を1回だけ実行する。"""
     run = load_run(paths, run_id=run_id, repository=repository, number=number)
@@ -188,7 +189,9 @@ def emergency_stop(
     refs = read_active_trees(run.payload)
     if isinstance(refs, SectionUnavailable):
         return EngineStopped("processes_unavailable", refs.detail)
-    outcome = stop_trees(refs, stop_port=stop_port, grace_seconds=grace_seconds)
+    outcome = stop_trees(
+        refs, stop_port=stop_port, grace_seconds=grace_seconds, escalation=escalation
+    )
     if isinstance(outcome, TreeStopFailed):
         # stateを進めず要求も消さない。**保存もしない**（残す値が現在のcheckpointと同じ）
         return EmergencyStopFailed(detail=outcome.detail)
