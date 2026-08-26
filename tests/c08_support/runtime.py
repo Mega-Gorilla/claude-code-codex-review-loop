@@ -50,6 +50,7 @@ from .helpers import (
     MODEL,
     SPEAKER,
     USER_SPEAKER,
+    FakeStopPort,
     gate_answer_payload,
     user_record_payload,
     user_submit_payload,
@@ -275,6 +276,17 @@ def round_ports(env: RuntimeEnv, **overrides: object) -> PortSet:
     return replace(ports, **overrides) if overrides else ports
 
 
+def stopping_ports(env: RuntimeEnv, **overrides: object) -> PortSet:
+    """停止portだけをfakeにした束。
+
+    台帳へ置くrefはtestが組み立てた値で、**実在するprocessを指さない**。製品の
+    `TreeStopper`へ渡すと現在のOSのprocess APIを実際に叩き、他OSのref種別は
+    `ref_mismatch`で拒否される（C-03の仕様）。実停止の挙動はC-03のtestが担保する。
+    """
+    ports = replace(default_ports(env.paths, env.config), stop=FakeStopPort())
+    return replace(ports, **overrides) if overrides else ports
+
+
 def gate_host(env: RuntimeEnv) -> FakeActiveHost:
     """merge gateから3 round回るfake host（質問 -> 回答 -> cancel）。"""
     return FakeActiveHost(
@@ -327,6 +339,7 @@ __all__ = [
     "fixed_clock",
     "gate_host",
     "round_ports",
+    "stopping_ports",
     "runtime_env",
     "seed_comments",
     "session_payload",

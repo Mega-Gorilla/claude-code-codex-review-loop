@@ -4,6 +4,10 @@
 handlerは**flagを立てるだけ**で、checkpointの書き込みもprocessの停止も安全点で行う。
 signal handlerは任意のbytecode境界で走るため、そこでI/Oをすると書きかけのfileを残し得る。
 
+停止portは常にfakeにする。台帳へ置くrefはtestが組み立てた値で実在するprocessを指さず、
+製品の`TreeStopper`へ渡すと現在のOSのprocess APIを実際に叩く（他OSのref種別は
+`ref_mismatch`で拒否される）。実停止の挙動はC-03のtestが担保する。
+
 signalの有無で**状態遷移が変わらない**ことも固定する。signalは停止要求を作るだけで、
 実行は`advance` -> `EmergencyStopRequired` -> `emergency_stop`の1経路を通る。
 """
@@ -27,6 +31,7 @@ from c08_support.runtime import (
     gate_host,
     round_ports,
     runtime_env,
+    stopping_ports,
 )
 
 from claude_code_codex_review_loop.domain.values import Awaiting, RecordKind, State
@@ -120,7 +125,7 @@ class TestSafePoints:
         result = step(
             paths=env.paths,
             config=env.config,
-            ports=env.ports(),
+            ports=stopping_ports(env),
             id_source=FakeIds("sig"),
             issued_at=ISSUED_AT,
             stop=stop,
@@ -136,7 +141,7 @@ class TestSafePoints:
         result = step(
             paths=env.paths,
             config=env.config,
-            ports=env.ports(),
+            ports=stopping_ports(env),
             id_source=FakeIds("req"),
             issued_at=ISSUED_AT,
             stop=StopSignal(),
@@ -153,7 +158,7 @@ class TestSafePoints:
         kwargs = {
             "paths": env.paths,
             "config": env.config,
-            "ports": env.ports(),
+            "ports": stopping_ports(env),
             "issued_at": ISSUED_AT,
             "stop": stop,
         }
@@ -184,7 +189,7 @@ class TestSafePoints:
         result = step(
             paths=env.paths,
             config=env.config,
-            ports=env.ports(),
+            ports=stopping_ports(env),
             id_source=FakeIds("sig"),
             issued_at=ISSUED_AT,
             stop=stop,
@@ -205,7 +210,7 @@ class TestSafePoints:
         outcome = step(
             paths=env.paths,
             config=env.config,
-            ports=env.ports(),
+            ports=stopping_ports(env),
             id_source=FakeIds("sig"),
             issued_at=ISSUED_AT,
             stop=stop,
@@ -223,7 +228,7 @@ class TestSafePoints:
         outcome = step(
             paths=env.paths,
             config=env.config,
-            ports=env.ports(),
+            ports=stopping_ports(env),
             id_source=FakeIds("sig"),
             issued_at=ISSUED_AT,
         ).outcome
@@ -249,7 +254,7 @@ class TestSafePoints:
         outcome = step(
             paths=env.paths,
             config=env.config,
-            ports=env.ports(),
+            ports=stopping_ports(env),
             id_source=FakeIds("sig"),
             issued_at=ISSUED_AT,
         ).outcome
