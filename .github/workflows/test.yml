@@ -47,7 +47,8 @@ jobs:
       - name: Run tests with coverage
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-        run: python -m coverage run -m pytest -q
+        # tmp directoryをworkspace内の固定位置へ置き、失敗時に成果物を収集できるようにする
+        run: python -m coverage run -m pytest -q --basetemp=.pytest-tmp
 
       - name: Combine coverage data
         run: python -m coverage combine
@@ -89,3 +90,22 @@ jobs:
           fi
           echo "Checking ${base}..${AFTER_SHA}"
           git diff --check "${base}" "${AFTER_SHA}"
+
+      # 失敗したjobのstate（checkpointとenvelope / result）だけを収集する。何が起きたかは
+      # C-08のstateに現れるが、CIのlogには残らないためである。
+      #
+      # **収集対象はpath patternで限定する**。run directory配下のcheckpointとenvelope /
+      # resultに絞り、session config（`gh_env`を持つ）とfake GitHubのstateは含めない。
+      # 実行するのはfake ghだけなので実credentialは存在しないが、収集範囲を「絞る」ことを
+      # 既定にしておかないと、実transportを使うPhaseで漏れる。
+      - name: Collect run state on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-state-${{ matrix.os }}
+          path: |
+            .pytest-tmp/**/runs/*/checkpoint.json
+            .pytest-tmp/**/runs/*/actions/*/*.json
+            .pytest-tmp/**/runs/*/requests/*/*.json
+          if-no-files-found: ignore
+          retention-days: 7

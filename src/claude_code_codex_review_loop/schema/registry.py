@@ -33,7 +33,7 @@ class SchemaKind(Enum):
     C-01の`RecordKind` 21種（canonical record）に、record化されないprotocol message
     （merge intent / merge outcome / follow-up候補と評価 / HOST_ACTION envelope /
     submit envelope / AWAIT_USER request / user-input submit / permission resume /
-    checkpoint envelope / PR lock file）を加えた集合。schemaをtransportや各workflowへ
+    session config / checkpoint envelope / PR lock file）を加えた集合。schemaをtransportや各workflowへ
     分散させないため、canonical recordの全kindをここで所有する。
     """
 
@@ -72,6 +72,7 @@ class SchemaKind(Enum):
     USER_REQUEST = "USER_REQUEST"
     USER_SUBMIT = "USER_SUBMIT"
     PERMISSION_RESUME = "PERMISSION_RESUME"
+    SESSION_CONFIG = "SESSION_CONFIG"
     CHECKPOINT = "CHECKPOINT"
     RUN_LOCK = "RUN_LOCK"
 
