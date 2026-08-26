@@ -43,6 +43,26 @@ def _validate_header_field(label: str, value: str) -> None:
         raise TransportError("render", f"{label}は非空の1行でなければならない", ErrorCategory.PERMANENT)
 
 
+def prepare_user_body(user_body: str, *, speaker: str, route: str) -> PreparedBody:
+    """ユーザー入力の転記を公開用へ変換する: 改行正規化 -> sanitize -> redact -> header。
+
+    `prepare_public_body`はagent発言用でmodelの明示を要求するが、転記recordの内容を書いた
+    のはmodelではなくユーザーである。ここではmodelの代わりに**入力経路**を明示する
+    （TE「Controllerが入力経路を明記して転記したPR comment」）。sanitize / redactは
+    agent発言と同じ単一choke pointを通す。
+    """
+    _validate_header_field("speaker", speaker)
+    _validate_header_field("route", route)
+    sanitized = sanitize_agent_body(normalize_newlines(user_body))
+    redacted = redact(sanitized.text)
+    text = f"**{speaker}**（入力経路: {route}）\n\n{redacted.text}"
+    return PreparedBody(
+        text=text,
+        redaction_hits=redacted.hits,
+        escaped_marker_count=sanitized.escaped_count,
+    )
+
+
 def prepare_public_body(agent_body: str, *, speaker: str, model: str) -> PreparedBody:
     """agent発言を公開用へ変換する: 改行正規化 -> sanitize -> redact -> headerの前置。"""
     _validate_header_field("speaker", speaker)

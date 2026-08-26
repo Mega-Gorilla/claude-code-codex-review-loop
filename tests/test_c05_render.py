@@ -11,6 +11,7 @@ from claude_code_codex_review_loop.transport import (
     TransportError,
     attach_marker,
     prepare_public_body,
+    prepare_user_body,
 )
 
 
@@ -55,3 +56,34 @@ def test_invalid_header_fields_are_rejected(speaker: str, model: str) -> None:
     with pytest.raises(TransportError) as excinfo:
         prepare_public_body("body", speaker=speaker, model=model)
     assert excinfo.value.stage == "render"
+
+
+class TestUserTranscript:
+    """ユーザー入力の転記は、発言者と**入力経路**を明示する（ADR-0018 決定14）。"""
+
+    def test_header_shows_speaker_and_route(self) -> None:
+        prepared = prepare_user_body("mergeを承認します", speaker="User", route="host_transcript")
+        assert prepared.text.startswith("**User**（入力経路: host_transcript）\n\n")
+        assert "mergeを承認します" in prepared.text
+
+    def test_secrets_are_removed_end_to_end(self) -> None:
+        """agent発言と同じredaction choke pointを通る（転記だけ素通しにしない）。"""
+        secret = "ghp_" + "a1B2" * 9
+        prepared = prepare_user_body(f"token {secret}", speaker="User", route="host_transcript")
+        assert secret not in prepared.text
+        assert any(hit.name == "github-token" for hit in prepared.redaction_hits)
+
+    def test_embedded_marker_is_escaped(self) -> None:
+        prepared = prepare_user_body(MARKER_TOKEN, speaker="User", route="host_transcript")
+        assert MARKER_TOKEN not in prepared.text and ESCAPED_TOKEN in prepared.text
+        assert prepared.escaped_marker_count == 1
+
+    @pytest.mark.parametrize(
+        ("speaker", "route"),
+        [("", "route"), ("User", ""), ("a\nb", "route"), ("User", "a\nb")],
+        ids=["empty_speaker", "empty_route", "multiline_speaker", "multiline_route"],
+    )
+    def test_header_fields_must_be_a_single_non_empty_line(self, speaker: str, route: str) -> None:
+        with pytest.raises(TransportError) as excinfo:
+            prepare_user_body("body", speaker=speaker, route=route)
+        assert excinfo.value.stage == "render"

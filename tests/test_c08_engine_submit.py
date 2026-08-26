@@ -23,6 +23,7 @@ from c08_support.helpers import (
     RETRY_BUDGET,
     RUN,
     SPEAKER,
+    USER_SPEAKER,
     FakeBodyPort,
     FakeEvidencePort,
     FakeIds,
@@ -63,6 +64,7 @@ def _issue(env, *, ids=None, state=None):
         head_sha=HEAD,
         payload_port=FakePayloadPort(),
         evidence_port=FakeEvidencePort(review_records()),
+        records_port=FakeRecordSource(records=review_records()),
         id_source=ids if ids is not None else FakeIds(),
         issued_at=ISSUED_AT,
     )
@@ -87,6 +89,7 @@ def _submit(env, payload, *, records=None, budget=RETRY_BUDGET):
         accepted_at=ACCEPTED_AT,
         speaker=SPEAKER,
         model=MODEL,
+        user_speaker=USER_SPEAKER,
     )
 
 
@@ -332,6 +335,7 @@ class TestResultFile:
             accepted_at=ACCEPTED_AT,
             speaker=SPEAKER,
             model=MODEL,
+            user_speaker=USER_SPEAKER,
         )
         assert isinstance(outcome, EngineStopped) and outcome.code == "too_large"
 

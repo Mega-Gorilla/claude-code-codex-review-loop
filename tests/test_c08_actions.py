@@ -30,6 +30,7 @@ from claude_code_codex_review_loop.schema.projection import PROJECTION_SPECS
 from claude_code_codex_review_loop.workflow import (
     ACTION_SPECS,
     RESULT_VARIANTS,
+    USER_REQUEST_SPECS,
     ActionRegistryError,
     ActionSpec,
     ResultVariant,
@@ -113,6 +114,7 @@ class TestResultVariantsMatchC01:
     def test_no_unused_variant_is_declared(self) -> None:
         """使われないvariantを残さない（registryの語彙を実態と一致させる）。"""
         used = {kind for spec in ACTION_SPECS.values() for kind in spec.result_kinds}
+        used |= {kind for spec in USER_REQUEST_SPECS.values() for kind in spec.result_kinds}
         assert set(RESULT_VARIANTS) == used
 
 
@@ -161,7 +163,8 @@ class TestResultAndEvent:
         """host actionが投稿するrecordは内部record（user-input recordではない）。"""
         from claude_code_codex_review_loop.domain.values import INTERNAL_RECORD_KINDS
 
-        assert set(RESULT_VARIANTS) <= INTERNAL_RECORD_KINDS
+        used = {kind for spec in ACTION_SPECS.values() for kind in spec.result_kinds}
+        assert used <= INTERNAL_RECORD_KINDS
 
 
 class TestEvidenceSelection:

@@ -48,7 +48,7 @@ from .marker import (
     sanitize_agent_body,
 )
 from .pull_request import UnverifiedPullRequest, get_pull_request, pull_request_from_json
-from .render import PreparedBody, normalize_newlines, prepare_public_body
+from .render import PreparedBody, normalize_newlines, prepare_public_body, prepare_user_body
 from .threads import (
     ReplyOutcome,
     ReplyRoute,
@@ -102,6 +102,7 @@ __all__ = [
     "post_issue_comment",
     "post_thread_reply",
     "prepare_public_body",
+    "prepare_user_body",
     "pull_request_from_json",
     "reply_with_fallback",
     "run_gh",

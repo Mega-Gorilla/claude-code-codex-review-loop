@@ -155,7 +155,7 @@ def test_full_envelope_with_all_sections_is_accepted() -> None:
             "intent": "APPROVE_MERGE",
             "pr_number": 12,
             "approved_head_sha": "ccc",
-            "input_route": "powershell",
+            "input_route": "host_transcript",
             "approval_comment_id": "c-200",
             "approval_body_hash": "h-200",
             "candidate_fingerprint": "fp-cand",

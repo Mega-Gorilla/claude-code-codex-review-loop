@@ -23,9 +23,16 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from ..domain.values import RecordKind
+from ..domain import events as ev
+from ..domain.commands import Command
+from ..domain.machine import transition
+from ..domain.values import MachineState, OpaqueBinding, RecordKind, TransitionRejected
 from ..identity.errors import IdentityError
-from ..identity.record_chain import VerifiedRecord, compose_record_marker_payload
+from ..identity.record_chain import (
+    ChainVerification,
+    VerifiedRecord,
+    compose_record_marker_payload,
+)
 from ..schema.projection import ProjectionError, build_record_projection, derive_record_binding
 from ..transport.conversation import body_hash_of
 from ..transport.gh import TransportError
@@ -112,6 +119,64 @@ def issue_transaction(
         body_hash=body_hash_of(marked),
         marked_body=marked,
     )
+
+
+@dataclass(frozen=True)
+class ProducedRecord:
+    """transactionを発行し、C-01を`RecordProduced`まで進めた結果。"""
+
+    transaction: IssuedTransaction
+    machine_state: MachineState
+    commands: tuple[Command, ...]
+
+
+@dataclass(frozen=True)
+class ProduceRejected:
+    """recordを作れない（推測して投稿しない）。codeは診断とtestの安定した識別子。"""
+
+    code: str
+    detail: str
+
+
+ProduceOutcome = ProducedRecord | ProduceRejected
+
+
+def produce_record(
+    machine_state: MachineState,
+    *,
+    kind: RecordKind,
+    payload: Mapping[str, object],
+    run_id: str,
+    head_sha: str,
+    body: str,
+    chain: ChainVerification,
+) -> ProduceOutcome:
+    """検証済みpayloadとrender済み本文から、投稿待ちのrecordを1件作る。
+
+    host actionの結果（`engine`）とユーザー入力の転記（`user_input`）は、本文の作り方と
+    受理の記録だけが違い、**採番から`RecordProduced`までは同じ**である。分けて書くと
+    chain gateやC-01の受理判定が2箇所へ散るため、ここへ集約する。
+    """
+    if not chain.is_intact:
+        # 壊れたchainの上でseqとprevを決めない（integrityの解消はC-01のblockが扱う）
+        return ProduceRejected("chain_violation", f"chainにviolationがある（{len(chain.violations)}件）")
+    issued = issue_transaction(
+        kind=kind,
+        payload=payload,
+        run_id=run_id,
+        head_sha=head_sha,
+        body=body,
+        records=chain.records,
+    )
+    if isinstance(issued, TransactionUnavailable):
+        return ProduceRejected("transaction_unavailable", issued.detail)
+    try:
+        updated, commands = transition(
+            machine_state, ev.RecordProduced(kind=kind, binding=OpaqueBinding(issued.binding))
+        )
+    except (TransitionRejected, ev.IllegalEventError) as error:
+        return ProduceRejected("illegal_event", f"C-01が結果を受理しない: {error}")
+    return ProducedRecord(transaction=issued, machine_state=updated, commands=commands)
 
 
 def transaction_section(issued: IssuedTransaction) -> dict[str, object]:

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""checkpointの`state` / `host_action` sectionのreaderとwriter（Phase 8。ADR-0015）。
+"""checkpointの`state` / `host_action` / `user_request` sectionのreaderとwriter。
+
+Phase 8。ADR-0015（host action）とADR-0018（`AWAIT_USER`）。
 
 schema検証を通ったcheckpointでは解釈できない形にならないが、解釈できない場合に「無い」へ
 丸めると、未完了actionの取りこぼしと重複発行の余地を作る。C-07の`read_transaction`と同じく
@@ -34,6 +36,7 @@ from ..domain.values import (
 from ..errors import ErrorCategory
 
 _SECTION = "host_action"
+_USER_SECTION = "user_request"
 
 
 @dataclass(frozen=True)
@@ -488,3 +491,279 @@ def next_attempt(action: PendingAction, *, action_id: str, nonce: str, result_pa
         attempt=action.attempt + 1,
         issued_at=issued_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# `user_request` section（Phase 8 PR-2c。ADR-0018）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PendingUserRequest:
+    """未完了の`AWAIT_USER` request（1 request = 1 nonce = 1 応答）。"""
+
+    request_id: str
+    awaiting: Awaiting
+    nonce: str
+    expected_head_sha: str
+    result_path: str
+    envelope_path: str
+    envelope_hash: str
+    since_seq: int
+    issued_at: str | None = None
+
+
+@dataclass(frozen=True)
+class UserRequestReceipt:
+    """受理済みuser-input submitの記録。判定は`submit_hash`で行う。"""
+
+    request_id: str
+    nonce: str
+    submit_hash: str
+    result_hash: str
+    # recordを作らない応答（permission resume）はintentの台帳に載らないためNone
+    intent_key: str | None = None
+    result_kind: RecordKind | None = None
+    accepted_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ConsumedIntent:
+    """当該awaiting instanceで消費済みのuser intent（2経路の重複防止台帳）。"""
+
+    intent_key: str
+    binding: str
+    route: str
+
+
+def _user_section(payload: Mapping[str, object]) -> dict[str, object] | SectionUnavailable | None:
+    section = payload.get(_USER_SECTION)
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        return SectionUnavailable(detail="user_requestがobjectでない")
+    return section
+
+
+def _entry_of(
+    section: dict[str, object] | SectionUnavailable | None, name: str
+) -> dict[str, object] | SectionUnavailable | None:
+    if section is None or isinstance(section, SectionUnavailable):
+        return section
+    entry = section.get(name)
+    if entry is None:
+        return None
+    if not isinstance(entry, dict):
+        return SectionUnavailable(detail=f"user_request.{name}がobjectでない")
+    return entry
+
+
+def _texts(
+    entry: Mapping[str, object], names: tuple[str, ...], *, where: str
+) -> dict[str, str] | SectionUnavailable:
+    values: dict[str, str] = {}
+    for name in names:
+        value = _text(entry, name)
+        if value is None:
+            return SectionUnavailable(detail=f"{where}の{name}が欠如または不正")
+        values[name] = value
+    return values
+
+
+_PENDING_USER_KEYS = (
+    "request_id",
+    "awaiting",
+    "nonce",
+    "expected_head_sha",
+    "result_path",
+    "envelope_path",
+    "envelope_hash",
+)
+
+
+def read_user_request(
+    payload: Mapping[str, object],
+) -> PendingUserRequest | SectionUnavailable | None:
+    """未完了のuser requestを読む（無ければNone）。"""
+    entry = _entry_of(_user_section(payload), "pending")
+    if entry is None or isinstance(entry, SectionUnavailable):
+        return entry
+    values = _texts(entry, _PENDING_USER_KEYS, where="user_request.pending")
+    if isinstance(values, SectionUnavailable):
+        return values
+    since = entry.get("since_seq")
+    if isinstance(since, bool) or not isinstance(since, int) or since < 0:
+        return SectionUnavailable(detail="user_request.pendingのsince_seqが0以上の整数でない")
+    try:
+        awaiting = Awaiting(values["awaiting"])
+    except ValueError:  # pragma: no cover - schemaのenumが値域を限定している
+        return SectionUnavailable(detail="user_request.pendingに未知のawaiting")
+    return PendingUserRequest(
+        request_id=values["request_id"],
+        awaiting=awaiting,
+        nonce=values["nonce"],
+        expected_head_sha=values["expected_head_sha"],
+        result_path=values["result_path"],
+        envelope_path=values["envelope_path"],
+        envelope_hash=values["envelope_hash"],
+        since_seq=since,
+        issued_at=_text(entry, "issued_at"),
+    )
+
+
+def read_user_receipt(
+    payload: Mapping[str, object],
+) -> UserRequestReceipt | SectionUnavailable | None:
+    """受理済み応答を読む（無ければNone）。
+
+    `receipts`ではなく単数なのは構造的な帰結である: engineはユーザー入力へretry attemptを
+    発行せず（人間の入力にbudgetを課さない）、1 instanceの応答は1件しかない。
+    """
+    entry = _entry_of(_user_section(payload), "receipt")
+    if entry is None or isinstance(entry, SectionUnavailable):
+        return entry
+    values = _texts(
+        entry, ("request_id", "nonce", "submit_hash", "result_hash"), where="user_request.receipt"
+    )
+    if isinstance(values, SectionUnavailable):
+        return values
+    kind_value = _text(entry, "result_kind")
+    try:
+        kind = RecordKind(kind_value) if kind_value is not None else None
+    except ValueError:  # pragma: no cover - schemaのenumが値域を限定している
+        return SectionUnavailable(detail="user_request.receiptに未知のresult_kind")
+    return UserRequestReceipt(
+        request_id=values["request_id"],
+        nonce=values["nonce"],
+        submit_hash=values["submit_hash"],
+        result_hash=values["result_hash"],
+        intent_key=_text(entry, "intent_key"),
+        result_kind=kind,
+        accepted_at=_text(entry, "accepted_at"),
+    )
+
+
+def read_consumed_intent(
+    payload: Mapping[str, object],
+) -> ConsumedIntent | SectionUnavailable | None:
+    """当該instanceで消費済みのintentを読む（無ければNone）。"""
+    entry = _entry_of(_user_section(payload), "consumed")
+    if entry is None or isinstance(entry, SectionUnavailable):
+        return entry
+    values = _texts(entry, ("intent_key", "binding", "route"), where="user_request.consumed")
+    if isinstance(values, SectionUnavailable):
+        return values
+    return ConsumedIntent(
+        intent_key=values["intent_key"], binding=values["binding"], route=values["route"]
+    )
+
+
+@dataclass(frozen=True)
+class UserRequestState:
+    """`user_request` sectionの読み出し結果（3 entryを1回で読む）。
+
+    entryごとに呼び出し側で直和を捌くと、**同じ「解釈できない」を3箇所で分岐**することに
+    なる。sectionは1つの単位として読み、失敗を1点へ集約する。
+    """
+
+    pending: PendingUserRequest | None
+    receipt: UserRequestReceipt | None
+    consumed: ConsumedIntent | None
+
+
+def read_user_section(payload: Mapping[str, object]) -> UserRequestState | SectionUnavailable:
+    """`user_request` sectionをまとめて読む（1つでも解釈できなければ停止させる）。"""
+    pending = read_user_request(payload)
+    if isinstance(pending, SectionUnavailable):
+        return pending
+    receipt = read_user_receipt(payload)
+    if isinstance(receipt, SectionUnavailable):
+        return receipt
+    consumed = read_consumed_intent(payload)
+    if isinstance(consumed, SectionUnavailable):
+        return consumed
+    return UserRequestState(pending=pending, receipt=receipt, consumed=consumed)
+
+
+def _with_user_section(
+    payload: Mapping[str, object], section: dict[str, object]
+) -> dict[str, object]:
+    updated = dict(payload)
+    if section:
+        updated[_USER_SECTION] = section
+    else:
+        updated.pop(_USER_SECTION, None)
+    return updated
+
+
+def _current_user_section(payload: Mapping[str, object]) -> dict[str, object]:
+    section = payload.get(_USER_SECTION)
+    return dict(section) if isinstance(section, dict) else {}
+
+
+def with_user_request(
+    payload: Mapping[str, object], request: PendingUserRequest
+) -> dict[str, object]:
+    """新しいrequestを置く（**section全体を入れ替える**）。
+
+    前instanceの応答と消費済みintentは持ち越さない。重複防止keyは`since_seq`を含むため
+    instanceを跨いで一致せず、残しても判定に使えないまま伸びるだけである。
+    """
+    pending: dict[str, object] = {
+        "request_id": request.request_id,
+        "awaiting": request.awaiting.value,
+        "nonce": request.nonce,
+        "expected_head_sha": request.expected_head_sha,
+        "result_path": request.result_path,
+        "envelope_path": request.envelope_path,
+        "envelope_hash": request.envelope_hash,
+        "since_seq": request.since_seq,
+    }
+    if request.issued_at is not None:
+        pending["issued_at"] = request.issued_at
+    return _with_user_section(payload, {"pending": pending})
+
+
+def without_user_request(payload: Mapping[str, object]) -> dict[str, object]:
+    """未完了requestを外す（応答を受理したとき。receiptと消費済みintentは残す）。"""
+    section = _current_user_section(payload)
+    section.pop("pending", None)
+    return _with_user_section(payload, section)
+
+
+def with_user_receipt(
+    payload: Mapping[str, object], receipt: UserRequestReceipt
+) -> dict[str, object]:
+    """受理済み応答を置く（同一instanceの応答は1件）。"""
+    section = _current_user_section(payload)
+    entry: dict[str, object] = {
+        "request_id": receipt.request_id,
+        "nonce": receipt.nonce,
+        "submit_hash": receipt.submit_hash,
+        "result_hash": receipt.result_hash,
+    }
+    if receipt.intent_key is not None:
+        entry["intent_key"] = receipt.intent_key
+    if receipt.result_kind is not None:
+        entry["result_kind"] = receipt.result_kind.value
+    if receipt.accepted_at is not None:
+        entry["accepted_at"] = receipt.accepted_at
+    section["receipt"] = entry
+    return _with_user_section(payload, section)
+
+
+def with_consumed_intent(
+    payload: Mapping[str, object], consumed: ConsumedIntent
+) -> dict[str, object]:
+    """消費済みintentを記録する（2経路が同じkeyを書き、二重recordを作らない）。
+
+    転記経路（C-08）は応答を受理した時点で、GitHub直接comment経路（C-13）は
+    `accept_user_decision`の受理時点で、それぞれ同じ`intent_key`をここへ書く。
+    """
+    section = _current_user_section(payload)
+    section["consumed"] = {
+        "intent_key": consumed.intent_key,
+        "binding": consumed.binding,
+        "route": consumed.route,
+    }
+    return _with_user_section(payload, section)
