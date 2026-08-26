@@ -175,7 +175,7 @@ class TestSubmitClassification:
 
 
 class TestIntentKey:
-    """2経路の重複防止key（ADR-0018 決定6）。"""
+    """2経路の重複防止key（ADR-0018 決定7）。"""
 
     def _key(self, **overrides: object) -> str:
         values: dict[str, object] = {

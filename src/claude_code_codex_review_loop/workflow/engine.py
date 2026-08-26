@@ -370,7 +370,7 @@ def _reissue(loaded: RunContext, action: PendingAction) -> HostActionIssued | En
 def _describes_current_instance(
     request: PendingUserRequest, *, awaiting: Awaiting, head_sha: str, since_seq: int
 ) -> bool:
-    """未応答requestが**今の待機**を指しているか（ADR-0018 決定12）。
+    """未応答requestが**今の待機**を指しているか（ADR-0018 決定20）。
 
     3つとも一致しなければ再提示しない。
 

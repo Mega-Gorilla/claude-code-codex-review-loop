@@ -110,7 +110,7 @@ class UserIntentAlreadyRecorded:
     GitHub直接comment（経路2）をC-13が受理すると、同じawaiting instanceの同じintentが
     canonical recordとして確定する。その後に届く転記submitへ「requestが古い」とだけ返すと、
     runが壊れたのか決定が済んだのかを呼び出し側が区別できない。消費済み台帳を照合して
-    **どのbindingで確定したか**を返す（ADR-0018 決定7）。
+    **どのbindingで確定したか**を返す（ADR-0018 決定9）。
     """
 
     consumed: ConsumedIntent

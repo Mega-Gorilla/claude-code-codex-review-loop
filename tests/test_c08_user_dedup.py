@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""2経路の重複防止key（Phase 8 PR-2c。ADR-0018 決定6 / 7）。
+"""2経路の重複防止key（Phase 8 PR-2c。ADR-0018 決定7 / 8）。
 
 ユーザー入力は2経路ある（対話型sessionからの転記 / GitHubへの直接comment）。同じ待機に
 対して両方が使われても、canonical recordを二重に作らないことをkeyで保証する。
