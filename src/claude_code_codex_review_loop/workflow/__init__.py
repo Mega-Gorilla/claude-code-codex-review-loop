@@ -76,7 +76,7 @@ from .engine import (
     advance,
     submit,
 )
-from .halt import HaltCompleted, HaltFailed, HaltOutcome, halt
+from .halt import HaltCompleted, HaltFailed, HaltOutcome, completion_event_for, halt
 from .persistence import (
     IntegrityDetected,
     PersistFailed,
@@ -181,6 +181,7 @@ __all__ = [
     "advance",
     "build_event",
     "find_receipt",
+    "completion_event_for",
     "halt",
     "intent_digest",
     "intent_key",

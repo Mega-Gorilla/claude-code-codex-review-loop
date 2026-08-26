@@ -44,11 +44,13 @@ USER_CANCEL を submit -> persist -> UserCancelVerified
 
 ### `HaltRun`の実行
 
-13. **停止してから保存する**。順序は`load -> 完了eventを決める -> tree停止 -> transition -> checkpoint保存`。先に保存して停止前に落ちると、stateだけが「停止済み」になり、走り続けるprocessを誰も止めない。停止してから落ちた場合は、resumeがC-01のX系列ruleで`HaltRun`を冪等に再発行し、停止をやり直す（`stop_tree_by_ref`は冪等）。
-14. **完了eventは手続きから決める**（推測しない）。`CancellingProcedure` -> `CancellationCompleted(attempt_binding)`、`HaltingForBlockProcedure` -> `BlockHaltCompleted(attempt_binding)`、`NormalProcedure` + 緊急停止の根拠 -> `CancellationCompleted(emergency_evidence)`。いずれでもなければ停止したことにしない。
+13. 順序は`load -> 完了eventを決める -> **受理可否の確認** -> tree停止 -> checkpoint保存`。
+    - **停止する前にC-01が受理できるかを確かめる**。`transition`は純粋関数（R2）なので副作用なしに判定でき、拒否される状態でtreeを止めると「processは死んだがstateは走行中」という不整合が残る。台帳が読めない場合も同様に、止める前に停止する
+    - **保存より先に停止する**。先に保存して停止前に落ちると、stateだけが「停止済み」になり、走り続けるprocessを誰も止めない。停止してから落ちた場合は、resumeがC-01のX系列ruleで`HaltRun`を冪等に再発行し、停止をやり直す（`stop_tree_by_ref`は冪等）
+14. **完了eventは手続きから決める**（推測しない）。`CancellingProcedure` -> `CancellationCompleted(attempt_binding)`、`HaltingForBlockProcedure` -> `BlockHaltCompleted(attempt_binding)`の2つだけで、手続きが無ければ停止したことにしない。この2つはC-01が当該手続きの成立する**全state**で受理することをcontract testで固定する（決定13の事前確認が意味を持つ前提）。
 15. **停止対象が無い場合も正常完了**である。C-01の横断規則は「手続き中の失敗・明示resumeは停止commandの冪等再発行のみ」を前提にしており、台帳が空でも手続きは完了へ進める。
 16. **1つでも止められなければstateを進めない**。`RunFailed`をC-01へ入力し、X系列ruleが`HaltRun`を再発行する（`HaltFailed`は「次のresumeでやり直す」を意味する）。
-17. **signal handlerの設置はentry pointの責務**（PR-3b）。本moduleは緊急停止の**状態境界**だけを提供する。Ctrl+Cもここへ合流する。
+17. **緊急停止（Ctrl+C）はPR-3aで扱わない**。C-01は緊急停止を`NormalProcedure`のまま完了させる（C-05 rule）ため、停止に失敗したときの`RunFailed`はF-01で`FAILED(recovery_to)`へ進み、**`HaltRun`を再発行しない**（`command_names=()`）。つまり停止意図がcheckpointへ残らず、次のresumeが再停止しない。durableに表現する方法（C-01へprocedureを足すか、C-08側に停止要求の台帳を持つか）はsignal handlerの設置と同じPRで決める必要があるため、entry pointを持つ**PR-3b**へ送る。
 
 ### `advance`の分岐
 
@@ -63,4 +65,4 @@ USER_CANCEL を submit -> persist -> UserCancelVerified
 - **AC-C08-06（別processからのresume）の前提**が揃った。停止手続きの途中で中断したrunを復元できる
 - **`RecordIntegrityIncident`の実行は未割当のまま残る**。cancel中にintegrity violationが検出されると`RecordingIncidentProcedure`へ入り、そこで停止する（`USER_CANCEL`がPR-3a前に止まっていたのと同じ形）。**PR-3dが実行を追加する**まで、この経路は完走しない。代表cancelシナリオが完走するのは`deferred_integrity`が空の場合である
 - `BLOCK_INTERVENTION`の搬送路は**PR-3c**が扱う。この「待ち」は`Awaiting`ではなくblock自身であり、request identityが`awaiting` + `since_seq`ではなくblock bindingになるため、`USER_REQUEST` / `USER_SUBMIT`へ別のdiscriminatorを足すschema変更を伴う
-- adapterとprocess境界（AC-C08-01 / 02 / 03 / 04）は**PR-3b**が扱う
+- adapterとprocess境界（AC-C08-01 / 02 / 03 / 04）と、**緊急停止のdurableな表現 + signal handler**は**PR-3b**が扱う

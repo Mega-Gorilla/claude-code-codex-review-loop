@@ -22,8 +22,9 @@ from c08_support.helpers import (
 )
 
 from claude_code_codex_review_loop.domain.commands import HaltRun
-from claude_code_codex_review_loop.domain.states import State
+from claude_code_codex_review_loop.domain.states import ACTIVE_STATES, State
 from claude_code_codex_review_loop.domain.values import (
+    IllegalMachineStateError,
     MachineState,
     OpaqueBinding,
     PendingRecord,
@@ -40,12 +41,11 @@ from claude_code_codex_review_loop.workflow import (
     EngineStopped,
     HaltCompleted,
     HaltFailed,
+    completion_event_for,
     halt,
     read_active_trees,
     read_machine_state,
 )
-
-EMERGENCY = "run-1:checkpoint-1"
 
 
 def _payload(env) -> dict[str, object]:
@@ -111,46 +111,61 @@ class TestIntegrityHalt:
         assert read_machine_state(_payload(env)) == outcome.machine_state
 
 
-class TestEmergency:
-    def test_an_emergency_stop_reaches_cancelled(self, tmp_path) -> None:
-        """Ctrl+C等の緊急停止も同じ停止・checkpoint境界へ合流する。"""
+class TestAcceptanceBeforeStopping:
+    """**停止する前に**C-01の受理可否を確かめる（副作用を先に出さない）。"""
+
+    def test_no_procedure_does_not_touch_any_tree(self, tmp_path) -> None:
+        """手続きが無ければ、台帳にtreeがあっても止めない。"""
         env = halt_env(
-            tmp_path,
-            state=MachineState(state=State.APPLYING_FIXES),
-            trees=[process_group_ref()],
+            tmp_path, state=MachineState(state=State.APPLYING_FIXES), trees=[process_group_ref()]
         )
-        outcome = halt(**halt_kwargs(env, emergency_evidence=EMERGENCY))
-        assert isinstance(outcome, HaltCompleted)
-        assert outcome.machine_state.state is State.CANCELLED
-
-    def test_an_emergency_stop_c01_refuses_is_reported(self, tmp_path) -> None:
-        """MERGINGのoutcome段階では緊急停止を受理しない（別headの黙示mergeを防ぐ設計）。"""
-        from claude_code_codex_review_loop.domain.values import (
-            Awaiting,
-            IntegrityEvidenceRef,
-            OpaqueRef,
-        )
-
-        state = MachineState(
-            state=State.MERGING,
-            awaiting=Awaiting.MERGE_OUTCOME_EXECUTE,
-            deferred_integrity=(
-                IntegrityEvidenceRef(
-                    binding=OpaqueBinding("iv:gap:run-1:2"),
-                    descriptor=OpaqueRef("gap"),
-                    head=OpaqueRef("a" * 40),
-                ),
-            ),
-        )
-        env = halt_env(tmp_path, state=state, trees=[process_group_ref()])
-        outcome = halt(**halt_kwargs(env, emergency_evidence=EMERGENCY))
-        assert isinstance(outcome, EngineStopped) and outcome.code == "illegal_event"
-
-    def test_without_evidence_there_is_no_procedure(self, tmp_path) -> None:
-        """手続きも緊急停止の根拠も無ければ、停止したことにしない。"""
-        env = halt_env(tmp_path, state=MachineState(state=State.APPLYING_FIXES))
-        outcome = halt(**halt_kwargs(env))
+        port = FakeStopPort()
+        outcome = halt(**halt_kwargs(env, stop_port=port))
         assert isinstance(outcome, EngineStopped) and outcome.code == "no_halt_procedure"
+        assert port.calls == []
+
+    def test_an_unreadable_ledger_does_not_touch_any_tree(self, tmp_path) -> None:
+        env = halt_env(tmp_path, state=cancelling())
+        payload = _payload(env)
+        payload["processes"] = {"trees": [{"kind": "PROCESS_GROUP", "pid": 1}]}
+        save_checkpoint(checkpoint_path(env.paths, RUN), payload)
+        port = FakeStopPort()
+        outcome = halt(**halt_kwargs(env, stop_port=port))
+        assert isinstance(outcome, EngineStopped) and outcome.code == "processes_unavailable"
+        assert port.calls == []
+
+    @pytest.mark.parametrize(
+        "procedure",
+        [MachineState(state=State.APPLYING_FIXES).procedure, cancelling().procedure],
+        ids=["normal", "cancelling"],
+    )
+    def test_only_stop_procedures_produce_a_completion_event(self, procedure) -> None:
+        from claude_code_codex_review_loop.domain.values import NormalProcedure
+
+        event = completion_event_for(procedure)
+        assert (event is None) is isinstance(procedure, NormalProcedure)
+
+    def test_c01_accepts_every_completion_event_we_construct(self) -> None:
+        """C-08が作る完了eventは、その手続きが成立する**全state**でC-01が受理する。
+
+        `halt`はこれを前提に、受理判定を副作用の前へ置いている。ここが崩れたら、
+        「止めたのに状態が進まない」経路が生まれる。
+        """
+        from claude_code_codex_review_loop.domain.machine import transition
+        from claude_code_codex_review_loop.domain.states import TERMINAL_STATES
+
+        checked = 0
+        for state in sorted(set(State) - TERMINAL_STATES, key=lambda s: s.value):
+            for build in (cancelling, halting_for_block):
+                try:
+                    machine_state = build(state=state)
+                except IllegalMachineStateError:
+                    continue
+                event = completion_event_for(machine_state.procedure)
+                assert event is not None
+                transition(machine_state, event)  # 例外なら受理していない
+                checked += 1
+        assert checked >= 2 * len(ACTIVE_STATES - {State.MERGING})
 
 
 class TestNoTrees:
