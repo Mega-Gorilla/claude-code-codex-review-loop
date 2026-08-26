@@ -47,8 +47,12 @@ jobs:
       - name: Run tests with coverage
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-        # tmp directoryをworkspace内の固定位置へ置き、失敗時に成果物を収集できるようにする
-        run: python -m coverage run -m pytest -q --basetemp=.pytest-tmp
+        # tmp directoryを固定位置へ置き、失敗時に成果物を収集できるようにする。
+        #
+        # **workspace内へは置けない**。`tests/test_c06_isolation.py`はreviewer用のgit呼び出しが
+        # 隔離home外のconfigを読まないことを検証しており、tmp directoryがこのrepository配下に
+        # あると、cwdから発見されるrepository localの`.git/config`がoriginへ混ざる。
+        run: python -m coverage run -m pytest -q --basetemp="${{ runner.temp }}/pytest-tmp"
 
       - name: Combine coverage data
         run: python -m coverage combine
@@ -98,14 +102,17 @@ jobs:
       # resultに絞り、session config（`gh_env`を持つ）とfake GitHubのstateは含めない。
       # 実行するのはfake ghだけなので実credentialは存在しないが、収集範囲を「絞る」ことを
       # 既定にしておかないと、実transportを使うPhaseで漏れる。
+      #
+      # directory名を`.`で始めない。upload-artifactは`include-hidden-files`が既定false
+      # であり、hidden pathは黙って収集対象から外れる。
       - name: Collect run state on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: run-state-${{ matrix.os }}
           path: |
-            .pytest-tmp/**/runs/*/checkpoint.json
-            .pytest-tmp/**/runs/*/actions/*/*.json
-            .pytest-tmp/**/runs/*/requests/*/*.json
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/checkpoint.json
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/actions/*/*.json
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/requests/*/*.json
           if-no-files-found: ignore
           retention-days: 7
