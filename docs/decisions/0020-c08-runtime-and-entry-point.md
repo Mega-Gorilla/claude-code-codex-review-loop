@@ -30,6 +30,7 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 6. その結果、**entry pointが呼ぶengine経路は`step`と`submit`の2つだけ**になる（AC-C08-03）。ASTのcontract testで固定する。
 7. **1 stepあたりのengine側作業に回数上限を置く**（`MAX_ENGINE_WORK`）。C-01が同じ作業を返し続けるのは不変条件の破れであり、推測して回し続けずに停止する。上限は**ちょうどその回数まで**を許し、次の副作用を起こす**前に**停止する（超過して1回多く実行しない）。
 8. **停止に失敗したら同じstepで回さない**。`HaltFailed`はC-01が停止commandを再発行することを意味するが、同じ理由で失敗し続けるため、呼び出し側へ返して次のresumeへ委ねる。
+8-a. **submitのchain gateは冪等判定より後に置く**。受理済みsubmitの再送は「以前と同じ結果」でなければならず（ADR-0015）、後からchainが壊れたかどうかで結果が変わってはならない。exact replayとduplicate mismatchの判定を先に済ませ、**未受理のsubmitを消費する直前**にgateを置く。stale / binding不一致の診断も`chain_violation`で潰さない。
 9. **portの例外を呼び出し側へ飛ばさない**。`PortUnavailableError`は担当componentを名指しした`EngineStopped`へ写す。例外が飛び越えると「進退は構造化outcomeで決まる」という前提が壊れる。
 
 ### `HostPort`: engineから見たhostの同一interface
@@ -81,7 +82,17 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 
 29. **失敗したjobのcheckpointとenvelopeだけを収集する**。何が起きたかはC-08のstateに現れるが、CIのlogには残らない。
 30. **収集対象はfile名まで指定して限定する**（Issue #13: 未redact入力を含めない）。`checkpoint.json`の`transaction.body`はredact済みのrender出力（ADR-0015）、`action.json` / `request.json`はbinding・hash・comment ID・action payloadで自由記述を持たない。**`result.json`は含めない**——hostが返した実行結果とユーザーの入力そのものが入り、redactを通っていない。session config（`gh_env`を持つ）とfake GitHubのstateも外す。
-30-a. **file名の対応をcontract testで固定する**（`tests/test_c08_artifact_contract.py`）。収集file名を製品定数（`CHECKPOINT_FILE_NAME` / 両`ENVELOPE_FILE`）と突き合わせ、`*.json`のようなwildcardへ広がった瞬間にfailさせる。実行するのはfake ghだけなので実credentialは存在しないが、**収集範囲を絞ることを既定にしておかないと実transportを使うPhaseで漏れる**。
+30-a. **Issue #13が挙げる4種のうち、PR-3b1が収集するのは2種である**。残り2種は**まだproducerが存在しない**ため、収集範囲を狭めたのではなく対象物が無い。
+
+| 対象 | PR-3b1 | 備考 |
+| --- | --- | --- |
+| checkpoint | 収集する | `checkpoint.json` |
+| envelope | 収集する | `action.json` / `request.json` |
+| canonical record | **未収集** | 正本はGitHub上のcomment。localの`artifact_records`（C-07が定義）へ書くcomponentがまだ無い。`checkpoint.transaction`は永続化で消費されるため常設の代替にならない |
+| redact済みlog | **未収集** | logging機構自体が未実装 |
+
+30-b. **残り2種の収集はPR-3b2が扱う**。producerと同じPRで収集経路を入れる（対象物が無いまま収集stepだけ増やしても、`if-no-files-found: ignore`で黙って0 fileになる）。それまでPR-3bのartifact受入は**未完**として扱う。
+30-c. **file名の対応をcontract testで固定する**（`tests/test_c08_artifact_contract.py`）。収集file名を製品定数（`CHECKPOINT_FILE_NAME` / 両`ENVELOPE_FILE`）と突き合わせ、`*.json`のようなwildcardへ広がった瞬間にfailさせる。実行するのはfake ghだけなので実credentialは存在しないが、**収集範囲を絞ることを既定にしておかないと実transportを使うPhaseで漏れる**。
 31. artifact名へOSを含め、Ubuntu / Windowsの失敗を区別する。tmp directoryは**workspace外**へ置く（`tests/test_c06_isolation.py`がreviewer用git呼び出しのconfig originを検査しており、repository配下だとrepository localの`.git/config`が混ざる）。`.`始まりの名前も使わない（`include-hidden-files`が既定falseで、hidden pathは黙って外れる）。
 
 ## Consequences
@@ -93,4 +104,5 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 - **緊急停止のdurableな表現とsignal handlerも未着手**である（ADR-0019 決定17がPR-3bへ送った項目のうち、PR-3b1は扱わない）
 - `session.json`の書き手は当面testだけである。C-12が実CLIを持つときに書き手を引き取る。全field必須なので、C-12がどの値をどこから解決するかはそのPhaseの設計として明示的に決まる
 - **未実装portの範囲がtestのfakeとして可視**になった。`ActionPayloadPort`とagent recordの本文の2つだけがfakeで、それ以外はentry pointから実物が走る
-- CIの`--basetemp`がworkspace内へ移った。ローカル実行の既定は変えていない
+- CIの`--basetemp`が**workspace外の固定位置**（`${{ runner.temp }}/pytest-tmp`）へ移った。ローカル実行の既定は変えていない
+- **CI artifactの収集は2/4種にとどまる**（決定30-a）。canonical recordとredact済みlogはproducerが未実装で、収集はPR-3b2が担当する。PR-3bのartifact受入は未完である

@@ -841,13 +841,6 @@ def submit(
             accepted_at=accepted_at,
             speaker=user_speaker,
         )
-    # ここから先はhostまたはユーザーへ次のturnを起こす経路である。**その前にchainを検証する**
-    # （`verify_record_chain`はviolationがあってもrecordsを返すため、consumerが確かめる）。
-    # 上の早期returnはchainを読まない: `persist`は自分で同じ検査を行い、`Blocked`と終端は
-    # 現在の状態を報告するだけで新しいturnを起こさない
-    chain = _chain_gate(records_port, run_id)
-    if isinstance(chain, EngineStopped):
-        return chain
     receipts = read_receipts(loaded.payload)
     if isinstance(receipts, SectionUnavailable):  # pragma: no cover - schema検証がreceiptの形を保証する
         return EngineStopped("host_action_unavailable", receipts.detail)
@@ -873,6 +866,12 @@ def submit(
     reissued = _reissue(loaded, pending)
     if isinstance(reissued, EngineStopped):
         return reissued
+    # **未受理のsubmitを消費する直前に**chainを検証する。冪等判定（exact replayと
+    # duplicate mismatch）はこれより前で終わっている必要がある: 受理済みsubmitの再送は
+    # 「以前と同じ結果」でなければならず（ADR-0015）、後からchainが壊れたかどうかで
+    # 結果が変わってはならない。stale / binding不一致の診断もchain_violationで潰さない
+    if isinstance(gate := _chain_gate(records_port, run_id), EngineStopped):
+        return gate
     receipt = _receipt_of(envelope, submit_hash=submit_hash, accepted_at=accepted_at)
     if receipt.outcome == "COMPLETED":
         return _completed(

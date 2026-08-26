@@ -4,6 +4,11 @@
 Issue #13の契約: **checkpoint / canonical record / envelope / redact済みlogを対象にし、
 credential・token・未redact入力は含めない**。
 
+PR-3b1が収集するのは**checkpointとenvelopeの2種**である。canonical recordのlocal
+artifact（`artifact_records`）とredact済みlogは**producerが未実装**で、収集はPR-3b2が
+producerと同じPRで入れる（ADR-0020 決定30-a / 30-b）。ここが検査するのは
+「収集しているものが契約の範囲内か」であって、「4種すべてを収集しているか」ではない。
+
 `result.json`はhostが返した実行結果とユーザーの入力そのもので、redactを通っていない。
 workflowのpathが`*.json`のようなwildcardへ広がった瞬間に混ざるため、収集file名を
 **製品定数と突き合わせて**固定する。

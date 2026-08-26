@@ -18,18 +18,31 @@ from c06_support.helpers import seed_dict
 from c07_support.helpers import NUMBER, RUN, chain_comments_of, conversation_section
 from c08_support.helpers import machine_state, user_machine_state
 from c08_support.runtime import (
+    ACCEPTED_AT,
     ISSUED_AT,
     FakeActionPayloads,
     FakeIds,
     RuntimeEnv,
+    gate_host,
     round_ports,
     runtime_env,
 )
 
 from claude_code_codex_review_loop.domain.values import Awaiting, RecordKind
-from claude_code_codex_review_loop.runtime import ChainNotIntactError, PortSet, step
+from claude_code_codex_review_loop.runtime import (
+    ChainNotIntactError,
+    PortSet,
+    step,
+    submit_result,
+)
 from claude_code_codex_review_loop.state import checkpoint_path
-from claude_code_codex_review_loop.workflow import EngineStopped
+from claude_code_codex_review_loop.workflow import (
+    AwaitUser,
+    EngineStopped,
+    HostActionIssued,
+    SubmitAccepted,
+    SubmitReplayed,
+)
 
 GATE_KINDS = (RecordKind.FINAL_REPORT,)
 ACTION_KINDS = (RecordKind.REVIEW_RESULT,)
@@ -138,6 +151,78 @@ class TestKnownRecordDeleted:
         outcome = _step(env).outcome
         assert isinstance(outcome, EngineStopped)
         assert outcome.code == "chain_violation"
+
+
+class TestSubmitIdempotence:
+    """受理済みsubmitの再送は、**chainが後から壊れても**以前と同じ結果になる。
+
+    ADR-0015の「受理済み同一submitは以前と同じ結果」は、chainの状態に依存しない。
+    gateを冪等判定より前に置くと、同じbytesの再送が`SubmitReplayed`ではなく
+    `chain_violation`になり、遅延再送するhostがretryできなくなる。
+    """
+
+    def _accepted(self, tmp_path):
+        """`HOST_ACTION`へ1件submitを受理させ、そのbytesとenvを返す。"""
+        env = runtime_env(
+            tmp_path,
+            state=user_machine_state(Awaiting.USER_INPUT_GATE),
+            seeded=(RecordKind.FINAL_REPORT,),
+        )
+        ports = round_ports(env)
+        host = gate_host(env)
+        issued = _step(env, ports).outcome
+        assert isinstance(issued, AwaitUser)
+        _submit(env, ports, host.execute(issued))
+        action = _step(env, ports).outcome
+        assert isinstance(action, HostActionIssued)
+        raw = host.execute(action)
+        assert isinstance(_submit(env, ports, raw), SubmitAccepted)
+        return env, ports, raw
+
+    def test_an_exact_replay_survives_a_broken_chain(self, tmp_path) -> None:
+        env, ports, raw = self._accepted(tmp_path)
+        _tamper(
+            env,
+            (RecordKind.FINAL_REPORT, RecordKind.GATE_QUESTION, RecordKind.GATE_ANSWER),
+            mutate=self._break_first,
+        )
+        assert not ports.records.chain(RUN).is_intact  # 前提: chainは壊れている
+        assert isinstance(_submit(env, ports, raw), SubmitReplayed)
+
+    def test_a_new_submit_is_refused_on_a_broken_chain(self, tmp_path) -> None:
+        """未受理のsubmitは消費しない（冪等判定の後にgateがある）。"""
+        env = runtime_env(
+            tmp_path,
+            state=user_machine_state(Awaiting.USER_INPUT_GATE),
+            seeded=(RecordKind.FINAL_REPORT,),
+        )
+        ports = round_ports(env)
+        host = gate_host(env)
+        issued = _step(env, ports).outcome
+        assert isinstance(issued, AwaitUser)
+        _submit(env, ports, host.execute(issued))
+        action = _step(env, ports).outcome
+        assert isinstance(action, HostActionIssued)
+        raw = host.execute(action)
+        _tamper(
+            env,
+            (RecordKind.FINAL_REPORT, RecordKind.GATE_QUESTION),
+            mutate=self._break_first,
+        )
+        outcome = _submit(env, ports, raw)
+        assert isinstance(outcome, EngineStopped)
+        assert outcome.code == "chain_violation"
+
+    @staticmethod
+    def _break_first(entries: list[dict]) -> list[dict]:
+        entries[0]["body"] = str(entries[0]["body"]).replace("record 1", "改竄")
+        return entries
+
+
+def _submit(env: RuntimeEnv, ports: PortSet, raw: bytes):
+    return submit_result(
+        raw, paths=env.paths, config=env.config, ports=ports, accepted_at=ACCEPTED_AT
+    )
 
 
 class TestMissingCheckpoint:
