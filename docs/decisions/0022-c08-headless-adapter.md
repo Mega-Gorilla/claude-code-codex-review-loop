@@ -28,6 +28,7 @@ PR-3b1（#45）でruntimeとentry pointが、PR-3b2（#46）で緊急停止の�
 6. **`run_tree`は使えない**。spawn -> wait -> closeを内包してhandleを返さないため、台帳へ載せる隙が無い。adapterが同じ保証（AC-C03-01: どちらの経路でもtreeを残さない）を保ったまま段階を開く。
 7. **登録は待機より先**（ADR-0019 決定10）。待っている間にControllerが落ちたtreeを、次のprocessが台帳から止められる。
 8. **read-modify-writeする**。`with_active_trees`はlistを全置換するので、自分のrefだけを渡すと他componentのtreeが消える（C-09のreviewerとheadless coderは並走し得る）。`with_tree_added` / `with_tree_removed`を`checkpoint_view`へ置き、登録も除去も**冪等**にする。
+8-a. **read-modify-writeだけでは足りず、`checkpoint_guard`で直列化する**。read-modify-writeは逐次更新の取りこぼしを防ぐだけで、2つの書き手が同じ旧payloadを読むと後勝ちで相手のrefが消える（lost update）。決定8が前提にした「C-09のreviewerとheadless coderは並走し得る」状況がまさにその形である。refが消えるとcancel / resumeがそのtreeへ到達できず、AC-C03-01とADR-0019 決定10 / 11の停止保証が破れる。guardは`state.lock`の取得guardと同じ`os.mkdir`の排他を`state.store`へ置き、**guardの下で読んでから同じguardの下で保存する**。保持するのはload -> change -> saveの一往復だけなので、取れない間は短く待って再試行し、回数が尽きたら推測せず失敗させる（treeを起動したまま待ち始めない。決定11と同じ扱い）。PR lockは同一PRの別runを拒否するもので、同一run内の複数の書き手は防がない。
 9. **除去は停止を確認してから**行う（決定11）。`close()`を`try/finally`で必ず呼び、その後に台帳から外す。残すとpidが再利用されたときに別treeへ到達し得る。
 10. **spawn直後から登録までの窓は構造的に残る**。refはspawnしないと決まらないためである。ADR-0019 決定10が前提にしていた形で、この窓で落ちたtreeは台帳に載らず、次のresumeが拾えない。**本PRはこの窓を閉じない**。
 11. 台帳を更新できない場合（checkpointが読めない、sectionが壊れている）は**推測せず失敗させる**。treeを起動したのに台帳へ載せられない状態で待ち始めない。
@@ -61,6 +62,7 @@ PR-3b1（#45）でruntimeとentry pointが、PR-3b2（#46）で緊急停止の�
 ## Consequences
 
 - **AC-C08-04 / MVP-06が充足した**。Phase 8のAC-C08-01〜07がすべて揃った
+- **checkpointのread-modify-writeを直列化する仕組みが入った**（`state.checkpoint_guard`）。台帳へtreeを載せるcomponentは、C-09以降も同じguardの下で更新する
 - **`processes`台帳が読み書き揃った**。PR-3a（読んで停止）、PR-3b2（緊急停止で読んで停止）に対し、本PRが書き手を入れた
 - **CI artifactは3/4種になった**。checkpoint / envelope / redact済みlogを集め、canonical recordのlocal artifactだけがC-09以降に残る
 - **主経路は変わっていない**。active hostは`HostPort`を実装せず、Controllerがsubprocess化することもない（AC-C08-02）。同値性testはその対比として、active側のspawn回数が0であることも観測する

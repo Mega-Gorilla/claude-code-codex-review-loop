@@ -24,6 +24,7 @@ from claude_code_codex_review_loop.state import (
     CheckpointSchemaInvalid,
     CheckpointStoreError,
     CheckpointUnreadable,
+    checkpoint_guard,
     checkpoint_path,
     load_checkpoint,
     save_checkpoint,
@@ -147,3 +148,37 @@ class TestLoadResults:
             pytest.skip("hard linkを作成できない環境")
         result = load_checkpoint(path)
         assert isinstance(result, CheckpointPermissionViolation | CheckpointUnreadable)
+
+
+class TestCheckpointGuard:
+    """read-modify-writeの直列化（lost update防止）。
+
+    `load_checkpoint`と`save_checkpoint`はそれぞれ原子的だが、その2つを跨いだ更新は
+    原子的でない。2つの書き手が同じ旧payloadを読むと、後に保存した側が相手の変更を消す。
+    """
+
+    def test_the_guard_is_created_and_released(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        guard = path.with_name(f"{path.name}{store_module.CHECKPOINT_GUARD_SUFFIX}")
+        with checkpoint_guard(path):
+            assert guard.is_dir()
+        assert not guard.exists()
+
+    def test_a_held_guard_is_reported_after_the_attempts_run_out(self, tmp_path: Path) -> None:
+        """取れないまま尽きたら**推測せず失敗させる**（silent repair禁止）。"""
+        path = _path(tmp_path)
+        path.with_name(f"{path.name}{store_module.CHECKPOINT_GUARD_SUFFIX}").mkdir(parents=True)
+        with pytest.raises(CheckpointStoreError) as caught:
+            with checkpoint_guard(path, attempts=2, wait_seconds=0.0):
+                pytest.fail("guardを取れてはならない")
+        assert caught.value.stage == "guard"
+        assert "更新中" in caught.value.detail
+
+    def test_the_guard_is_released_when_the_body_fails(self, tmp_path: Path) -> None:
+        """解放し損ねると以後の更新が止まる。"""
+        path = _path(tmp_path)
+        guard = path.with_name(f"{path.name}{store_module.CHECKPOINT_GUARD_SUFFIX}")
+        with pytest.raises(RuntimeError):
+            with checkpoint_guard(path):
+                raise RuntimeError("本体の失敗")
+        assert not guard.exists()

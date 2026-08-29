@@ -118,6 +118,7 @@ from .store import (
     CheckpointSchemaInvalid,
     CheckpointStoreError,
     CheckpointUnreadable,
+    checkpoint_guard,
     load_checkpoint,
     save_checkpoint,
 )
@@ -190,6 +191,7 @@ __all__ = [
     "acquire_pr_lock",
     "artifact_content_hash",
     "build_resume_context",
+    "checkpoint_guard",
     "checkpoint_path",
     "collect_approvals",
     "current_host",

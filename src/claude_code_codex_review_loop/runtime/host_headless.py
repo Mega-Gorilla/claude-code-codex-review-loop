@@ -13,7 +13,8 @@ spawn_tree -> 台帳へ登録 -> wait -> 停止 / close -> 台帳から除去 ->
 - **起動commandは呼び出し側が渡す**。既定値を持たない（解決はC-12）。`identity.auto_mode`の
   `probe_auto_mode`と同じ形で、argvの先頭は絶対path、`ensure_argv_allowed`を通す（P-006）
 - **台帳への登録は待機より先**（ADR-0019 決定10）。待っている間に落ちたtreeを、次のprocessが
-  台帳から止められる
+  台帳から止められる。更新は`checkpoint_guard`の下で直列化する（並走する書き手が
+  同じ旧payloadを読むと、後勝ちで相手のrefが消えるため）
 - **例外を呼び出し側へ飛ばさない**。起動失敗・timeout・出力不正はすべて構造化結果へ写す
   （`HostPort.execute`はbytesを返す契約なので、失敗は`HeadlessError`として明示する）
 - stdoutは**submit envelope**、stderrは**log**。logは`redact`を通してから`host.log`へ書く
@@ -33,7 +34,15 @@ from ..identity.fs_permissions import replace_private_text
 from ..policy.permission_profile import ensure_argv_allowed
 from ..policy.redaction import redact
 from ..process import Completed, ProcessError, SpawnSpec, TreeHandle, spawn_tree, stop_tree
-from ..state import CheckpointLoaded, StatePaths, checkpoint_path, load_checkpoint, save_checkpoint
+from ..state import (
+    CheckpointLoaded,
+    CheckpointStoreError,
+    StatePaths,
+    checkpoint_guard,
+    checkpoint_path,
+    load_checkpoint,
+    save_checkpoint,
+)
 from ..workflow import SectionUnavailable, with_tree_added, with_tree_removed
 from .session import HostWork
 
@@ -123,8 +132,23 @@ class HeadlessHost:
         self._update(lambda payload: with_tree_removed(payload, handle.ref))
 
     def _update(self, change: LedgerChange) -> None:
-        """台帳をread-modify-writeする（他componentのtreeを消さない）。"""
+        """台帳をread-modify-writeする（他componentのtreeを消さない）。
+
+        **guardの下で読んでから同じguardの下で保存する**。read-modify-write単体は逐次更新の
+        取りこぼしを防ぐだけで、2つの書き手が同じ旧payloadを読むとlost updateになる
+        （後勝ちで相手のrefが消える）。refが消えるとcancel / resumeがそのtreeへ到達できず、
+        AC-C03-01とADR-0019 決定10 / 11の停止保証が破れる。C-09のreviewerとheadless coderは
+        並走し得るため（ADR-0022 決定8）、直列化はここで担保する。
+        """
         path = checkpoint_path(self.paths, self.run_id)
+        try:
+            with checkpoint_guard(path):
+                self._update_under_guard(path, change)
+        except CheckpointStoreError as error:
+            raise HeadlessError(f"台帳を更新できない: {error.detail}") from error
+
+    def _update_under_guard(self, path: Path, change: LedgerChange) -> None:
+        """guard保持中の更新本体（読取と保存の間に別の書き手が入れない）。"""
         loaded = load_checkpoint(path)
         if not isinstance(loaded, CheckpointLoaded):
             raise HeadlessError(f"台帳を更新できない: checkpointを読めない（{type(loaded).__name__}）")

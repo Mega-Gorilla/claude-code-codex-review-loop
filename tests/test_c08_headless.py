@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from claude_code_codex_review_loop.identity.fs_permissions import (
     verify_private_file,
 )
 from claude_code_codex_review_loop.policy.permission_profile import ForbiddenFlagError
+from claude_code_codex_review_loop.process import TreeRef
 from claude_code_codex_review_loop.runtime import HeadlessError, HeadlessHost, step, submit_result
 from claude_code_codex_review_loop.runtime.host_headless import LOG_FILE, STDERR_FILE, STDOUT_FILE
 from claude_code_codex_review_loop.state import (
@@ -32,6 +34,7 @@ from claude_code_codex_review_loop.state import (
     load_checkpoint,
     save_checkpoint,
 )
+from claude_code_codex_review_loop.state.store import CHECKPOINT_GUARD_SUFFIX
 from claude_code_codex_review_loop.workflow import (
     AwaitUser,
     SectionUnavailable,
@@ -105,6 +108,10 @@ def _host(runtime: RuntimeEnv, tmp_path: Path, **overrides: object) -> HeadlessH
     }
     values.update(overrides)
     return HeadlessHost(**values)  # type: ignore[arg-type]
+
+
+def _ref_key(ref: TreeRef) -> str:
+    return repr(ref)
 
 
 def _ledger(env: RuntimeEnv):
@@ -254,6 +261,51 @@ class TestProcessLedger:
         again = with_tree_removed(removed, ref)
         assert not isinstance(again, SectionUnavailable)
         assert read_active_trees(again) == ()
+
+    def test_concurrent_writers_never_lose_a_ref(self, tmp_path: Path) -> None:
+        """**barrierで揃えた複数の書き手**が同時に登録しても、どのrefも消えない。
+
+        read-modify-write単体は逐次更新の取りこぼしを防ぐだけで、2つの書き手が同じ旧payloadを
+        読むと後勝ちで相手のrefが消える（lost update）。refが消えるとcancel / resumeがその
+        treeへ到達できず、AC-C03-01とADR-0019 決定10 / 11の停止保証が破れる。C-09のreviewerと
+        headless coderは並走し得るため（ADR-0022 決定8）、`checkpoint_guard`で直列化している。
+        """
+        env = _env(tmp_path)
+        host = _host(env, tmp_path)
+        writers = 6
+        refs = [
+            job_object_ref(pid=5000 + index, job_name=f"cc-review-{index}")
+            for index in range(writers)
+        ]
+        barrier = threading.Barrier(writers)
+        failures: list[BaseException] = []
+
+        def register(ref: TreeRef) -> None:
+            try:
+                # 読取の直前で揃える。直列化が無ければ全員が同じ旧payloadを読む形になる
+                barrier.wait(timeout=30)
+                host._update(lambda payload: with_tree_added(payload, ref))
+            except BaseException as error:  # noqa: BLE001 - threadの失敗を本体へ運ぶ
+                failures.append(error)
+
+        threads = [threading.Thread(target=register, args=(ref,)) for ref in refs]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        assert failures == []
+        assert sorted(_ledger(env), key=_ref_key) == sorted(refs, key=_ref_key)
+
+    def test_a_held_guard_is_reported(self, tmp_path: Path) -> None:
+        """guardを取れないまま尽きたら推測せず失敗させる（treeを起動したまま待たない）。"""
+        env = _env(tmp_path)
+        work = _issue(env)
+        path = checkpoint_path(env.paths, RUN)
+        path.with_name(f"{path.name}{CHECKPOINT_GUARD_SUFFIX}").mkdir()
+        host = _host(env, tmp_path)
+        with pytest.raises(HeadlessError, match="台帳を更新できない"):
+            host.execute(work)
 
     def test_an_unreadable_checkpoint_is_reported(self, tmp_path: Path) -> None:
         env = _env(tmp_path)
