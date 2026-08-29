@@ -66,7 +66,10 @@ PR-3b1で入れた`processes`台帳（停止対象の`TreeRef`）は1を解決�
 19-d. 捕捉と再実行は`workflow.halt`の`stop_trees`が引き受ける。**停止を始める前にforce要求が在れば最初からgrace 0**で呼び、**grace待機中に届いた場合は`KeyboardInterrupt`を捕まえてgrace 0でやり直す**（`stop_tree_by_ref`は冪等）。どちらの順序で届いても同じ結果になる。
 19-e. **force要求を伴わない中断は握り潰さない**。別の理由の`KeyboardInterrupt`を停止要求へ読み替えると、中断の意味を偽装することになる。
 19-f. engineはsignalの受け取り方を知らないので、必要な事実だけを`StopEscalation` port（`force_requested`のみ）で受け取る。`ProcessStopPort`と同じ層の定義である。
-19-g. entry pointは`KeyboardInterrupt`を**最後の網**として構造化結果（`forced_stop`）へ写す。停止の外側で2回目が届いた場合、要求は台帳へ残っているので次のresumeが停止をやり直す。
+19-g. entry pointは`KeyboardInterrupt`を**最後の網**として構造化結果へ写す。tracebackで落ちるとprocess境界の契約が崩れる。
+19-h. **2回目が`stop_trees`の内側に届くとは限らない**。要求を保存する前・保存中・台帳の読込中・`drive`のhost作業中にも届く。最外層で報告するだけでは**controllerが終了してもtreeが残り**、保存前なら次のresumeが再停止する根拠すら無い（AC-C03-01 / 02に反する）。そこで**`step`が捕捉して停止をやり切る**（`_forced_stop`）: 要求を（未保存なら）durableにしてから、`grace = 0`で台帳のtreeを止める。
+19-i. **forced pathは`advance`を通さない**。要求が在るときの`advance`は`EmergencyStopRequired`を返すだけだが、その手前でchain gate（GitHub取得）を通る場合がある。forceは「待たずに殺せ」という要求なので、local I/Oだけで完結する2手——要求の保存とtreeの停止——へ絞る。
+19-j. **最後の網は`StopSignal`を見て分類する**。handler設置前や`submit`中に届く通常の（1回目の）`KeyboardInterrupt`まで`forced_stop`と報告すると、停止の昇格が起きたように読める。force要求が無ければ`interrupted`とする。
 
 ### signal経路とresume経路を台帳で合流させる
 
@@ -92,3 +95,4 @@ PR-3b1で入れた`processes`台帳（停止対象の`TreeRef`）は1を解決�
 - **`processes`台帳の書き手はまだ存在しない**。本PRは読んで停止するだけで、testが台帳をseedする。書き手はtreeを起動するcomponent（PR-3b3のheadless adapter、C-09）である
 - **AC-C03-02のwiringが初めて成立した**。ADR-0005はC-03に停止primitiveだけを置き、2段階Ctrl+Cのwiringを「C-08が実装すればよい」として保留していた。signal handlerを設置する本PRがその実装地点である
 - AC-C03-02のE2E testは**実際に終了しないtreeへ実signalを2回送る**。treeを起動するのはtestで（C-03の公開API）、**製品codeはprocessを起動しない**という本PRの範囲は変わらない
+- 2回目が届く窓は**grace待機中**と**最初の安全点より前**の2つがあり、E2Eは両方を覆う。後者はdriverが「1回目を観測した直後・要求を保存する前」で待つ継ぎ目を持つ（待ち時間の代わりになるのは、実際にはcheckpointのI/Oと`drive`のhost作業である）

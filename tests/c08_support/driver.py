@@ -103,12 +103,34 @@ def _describe(outcome: object) -> dict[str, object]:
     return {"outcome": type(outcome).__name__}
 
 
-def _wait_for_signal(paths, config, ports) -> int:
+@dataclasses.dataclass
+class _SlowStopSignal(StopSignal):
+    """最初の安全点へ入る**手前**で待つsignal（2回目をその窓へ届かせるための継ぎ目）。
+
+    `step`は`stop.pending`を読んだ直後に停止要求を保存する。その読み出しで待つことで、
+    2回目の`KeyboardInterrupt`が「要求を保存する前」——実装が最も落としやすい窓——へ確実に
+    落ちる。待ち時間の代わりになるのは、実際にはcheckpointのI/Oと`drive`のhost作業である。
+    """
+
+    delay: float = 0.0
+    armed: bool = False
+
+    @property
+    def pending(self) -> bool:
+        value = StopSignal.pending.fget(self)  # type: ignore[attr-defined]
+        if value and not self.armed:
+            self.armed = True
+            print("ARMED", flush=True)
+            time.sleep(self.delay)
+        return value
+
+
+def _wait_for_signal(paths, config, ports, stop: StopSignal | None = None) -> int:
     """handlerを設置し、実signalを受け取ってから1 stepだけ進める。
 
     `READY`を出してから待つので、呼び出し側は「handler設置済み」を確かめてsignalを送れる。
     """
-    with install_stop_handler(StopSignal()) as stop:
+    with install_stop_handler(stop if stop is not None else StopSignal()) as stop:
         print("READY", flush=True)
         while not stop.requested:
             time.sleep(0.02)
@@ -156,6 +178,14 @@ def main(argv: list[str]) -> int:
         return _wait_for_signal(paths, config, ports)
     elif command == "wait-for-signal-real-stop":
         return _wait_for_signal(paths, config, _ports(paths, config, stop_fails=False, real_stop=True))
+    elif command == "wait-for-signal-early-force":
+        # 2回目を「最初の安全点より前」へ届かせる（argv[3]は待ち秒数）
+        return _wait_for_signal(
+            paths,
+            config,
+            _ports(paths, config, stop_fails=False, real_stop=True),
+            _SlowStopSignal(delay=float(argv[3])),
+        )
     elif command == "submit":
         raw = Path(argv[3]).read_bytes()
         outcome = submit_result(

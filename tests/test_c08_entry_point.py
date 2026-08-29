@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -173,25 +174,44 @@ class TestSubmit:
         assert code == entry.EXIT_STOPPED
         assert payload["code"] == "submit_too_large"
 
-    def test_a_forced_stop_is_reported_instead_of_a_traceback(
-        self, tmp_path: Path, monkeypatch, capsys
-    ) -> None:
-        """2回目のsignalが停止の**外側**で届いた場合の最後の網（ADR-0021 決定19-g）。
-
-        停止中に届いた場合は`stop_trees`が即時forceへ昇格させる（`test_c08_force_stop.py`）。
-        それ以外の位置で届いても、要求は台帳に残るので次のresumeが停止をやり直す。
-        """
+    def _interrupt(self, tmp_path: Path, monkeypatch, capsys, *, force: bool) -> dict[str, object]:
         env = _gate_env(tmp_path)
 
-        def _interrupted(**kwargs: object) -> None:
+        def _raise(**kwargs: object) -> None:
+            if force:
+                signal_object = kwargs["stop"]
+                signal_object.record(signal.SIGINT)  # type: ignore[union-attr]
+                signal_object.record_force(signal.SIGINT)  # type: ignore[union-attr]
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(entry, "step", _interrupted)
+        monkeypatch.setattr(entry, "step", _raise)
         code = entry.main(["advance", "--state-root", str(env.paths.root), "--run", RUN])
         assert code == entry.EXIT_STOPPED
         payload = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert isinstance(payload, dict)
         assert payload["outcome"] == "STOPPED"
+        return payload
+
+    def test_a_forced_stop_is_reported_instead_of_a_traceback(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """2回目のsignalが停止の外側で届いた場合の最後の網（ADR-0021 決定19-g）。
+
+        停止の完了は`step`が引き受けるので（`_forced_stop`）、ここへ届くのはそれも
+        失敗した場合だけである。
+        """
+        payload = self._interrupt(tmp_path, monkeypatch, capsys, force=True)
         assert payload["code"] == "forced_stop"
+
+    def test_an_ordinary_interrupt_is_not_reported_as_a_forced_stop(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """handler設置前や`submit`中の通常のCtrl+Cを「2回目」と分類しない。
+
+        分類を`StopSignal`から取らないと、停止の昇格が起きたように読める（ADR-0021 決定19-h）。
+        """
+        payload = self._interrupt(tmp_path, monkeypatch, capsys, force=False)
+        assert payload["code"] == "interrupted"
 
     def test_an_unknown_command_is_rejected_by_the_parser(self, tmp_path: Path) -> None:
         env = _gate_env(tmp_path)

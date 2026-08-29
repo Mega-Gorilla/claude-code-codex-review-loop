@@ -14,6 +14,7 @@ signalの有無で**状態遷移が変わらない**ことも固定する。sign
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import signal
 import subprocess
@@ -63,10 +64,14 @@ from claude_code_codex_review_loop.workflow import (
 )
 
 
-def _stop_request(env: RuntimeEnv):
+def _loaded(env: RuntimeEnv) -> dict[str, object]:
     loaded = load_checkpoint(checkpoint_path(env.paths, RUN))
     assert isinstance(loaded, CheckpointLoaded), loaded
-    return read_stop_request(loaded.payload)
+    return loaded.payload
+
+
+def _stop_request(env: RuntimeEnv):
+    return read_stop_request(_loaded(env))
 
 
 def _gate_env(tmp_path) -> RuntimeEnv:
@@ -211,6 +216,193 @@ class _InterruptingStopPort:
             self.stop_signal.record_force(signal.SIGINT)
             raise KeyboardInterrupt
         return StopResult(method=StopMethod.FORCED, graceful_requested=True)
+
+
+class TestForceOutsideTheStop:
+    """2回目が`stop_trees`の**外側**で届いた場合（ADR-0021 決定19-h）。
+
+    1回目のsignal後、要求を保存する前・保存中・台帳の読込中・`drive`のhost作業中にも
+    2回目は届く。**どこで届いても停止を完了させる**ことを、窓ごとに固定する。
+    """
+
+    def _env(self, tmp_path, ref):
+        return runtime_env(
+            tmp_path, state=machine_state(), extra=with_active_trees({}, [ref])
+        )
+
+    def _signalled(self) -> StopSignal:
+        """1回目を受けてから2回目が届いた状態のsignal。"""
+        stop = StopSignal()
+        stop.record(signal.SIGINT)
+        stop.record_force(signal.SIGINT)
+        return stop
+
+    def _step(self, env, stop, port):
+        return step(
+            paths=env.paths,
+            config=env.config,
+            ports=dataclasses.replace(env.ports(), stop=port),
+            id_source=FakeIds("sig"),
+            issued_at=ISSUED_AT,
+            stop=stop,
+        )
+
+    def test_an_interrupt_before_the_request_is_saved_still_stops(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """**保存前**の中断。台帳に根拠が無いまま終了させない。"""
+        from claude_code_codex_review_loop.runtime import session as session_module
+
+        ref = job_object_ref()
+        env = self._env(tmp_path, ref)
+        stop = self._signalled()
+        original = session_module.request_emergency_stop
+        calls: list[int] = []
+
+        def _interrupting(**kwargs: object):
+            calls.append(1)
+            if len(calls) == 1:
+                raise KeyboardInterrupt  # 保存に入る直前で2回目が届いた
+            return original(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(session_module, "request_emergency_stop", _interrupting)
+        port = FakeStopPort()
+        result = self._step(env, stop, port)
+
+        assert isinstance(result.outcome, EngineStopped)
+        assert result.outcome.code == "forced_stop"
+        # 要求はdurableになり、treeは即時forceで止まっている
+        assert _stop_request(env) is None  # 停止完了と同時に消費される
+        assert [grace for _, grace in port.calls] == [0.0]
+        assert read_machine_state(_loaded(env)).state is State.CANCELLED
+
+    def test_an_interrupt_during_advance_still_stops(self, tmp_path, monkeypatch) -> None:
+        """**要求の保存後・停止の前**の中断（`advance`はGitHubを触り得る）。"""
+        from claude_code_codex_review_loop.runtime import session as session_module
+
+        ref = job_object_ref()
+        env = self._env(tmp_path, ref)
+        stop = self._signalled()
+        original = session_module.advance
+        calls: list[int] = []
+
+        def _interrupting(**kwargs: object):
+            calls.append(1)
+            if len(calls) == 1:
+                raise KeyboardInterrupt
+            return original(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(session_module, "advance", _interrupting)
+        port = FakeStopPort()
+        result = self._step(env, stop, port)
+
+        assert isinstance(result.outcome, EngineStopped)
+        assert result.outcome.code == "forced_stop"
+        assert [grace for _, grace in port.calls] == [0.0]
+        assert read_machine_state(_loaded(env)).state is State.CANCELLED
+
+    def test_the_forced_path_does_not_touch_github(self, tmp_path, monkeypatch) -> None:
+        """forceは「待たずに殺せ」なので、chain gate（GitHub取得）を通さない。"""
+        from claude_code_codex_review_loop.runtime import session as session_module
+
+        ref = job_object_ref()
+        env = self._env(tmp_path, ref)
+        stop = self._signalled()
+
+        def _interrupting(**kwargs: object):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(session_module, "advance", _interrupting)
+        result = self._step(env, stop, FakeStopPort())
+        # `advance`は1度も成功していないのに停止は完了している
+        assert isinstance(result.outcome, EngineStopped)
+        assert result.outcome.code == "forced_stop"
+        assert result.trace.stopped == 1
+
+    def test_a_failed_forced_stop_keeps_the_request(self, tmp_path, monkeypatch) -> None:
+        """force経路でも停止できなければstateを進めず、要求を残す。"""
+        from claude_code_codex_review_loop.runtime import session as session_module
+
+        ref = job_object_ref()
+        env = self._env(tmp_path, ref)
+        stop = self._signalled()
+        monkeypatch.setattr(
+            session_module, "advance", lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt())
+        )
+        result = self._step(env, stop, FakeStopPort(fails=frozenset({ref})))
+
+        assert isinstance(result.outcome, EngineStopped)
+        assert result.outcome.code == "emergency_stop_failed"
+        assert _stop_request(env) is not None  # 次のresumeが停止をやり直す
+
+    def _already_recorded(self) -> StopSignal:
+        """要求は保存済みで、その後に2回目が届いた状態（`_forced_stop`へ直行する）。"""
+        stop = self._signalled()
+        stop.mark_recorded()
+        return stop
+
+    def test_an_unrecordable_request_is_reported(self, tmp_path, monkeypatch) -> None:
+        """force経路でも要求を読めなければ推測しない。"""
+        from claude_code_codex_review_loop.runtime import session as session_module
+
+        env = runtime_env(
+            tmp_path,
+            state=machine_state(),
+            extra={"stop_request": {"requested_at": "2026-08-26T11:00:00Z"}},
+        )
+        monkeypatch.setattr(
+            session_module, "advance", lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt())
+        )
+        result = self._step(env, self._already_recorded(), FakeStopPort())
+        assert isinstance(result.outcome, EngineStopped)
+        assert result.outcome.code == "stop_request_unavailable"
+
+    def test_an_unreadable_ledger_is_reported_in_the_forced_path(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """force経路でも停止対象を推測しない。"""
+        from claude_code_codex_review_loop.runtime import session as session_module
+
+        request = StopRequest(
+            requested_at="2026-08-26T11:00:00Z",
+            evidence=stop_evidence(
+                run_id=RUN,
+                repository=REPOSITORY,
+                number=NUMBER,
+                requested_at="2026-08-26T11:00:00Z",
+            ),
+            source_state=State.APPLYING_FIXES,
+        )
+        env = runtime_env(
+            tmp_path,
+            state=machine_state(),
+            extra=with_stop_request(
+                {"processes": {"trees": [{"kind": "JOB_OBJECT", "pid": 4242}]}}, request
+            ),
+        )
+        monkeypatch.setattr(
+            session_module, "advance", lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt())
+        )
+        result = self._step(env, self._already_recorded(), FakeStopPort())
+        assert isinstance(result.outcome, EngineStopped)
+        assert result.outcome.code == "processes_unavailable"
+
+    def test_an_interrupt_without_a_force_request_is_not_swallowed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """1回目だけの状態での中断は停止要求へ読み替えない。"""
+        from claude_code_codex_review_loop.runtime import session as session_module
+
+        env = self._env(tmp_path, job_object_ref())
+        stop = StopSignal()
+        stop.record(signal.SIGINT)
+        monkeypatch.setattr(
+            session_module,
+            "request_emergency_stop",
+            lambda **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+        with pytest.raises(KeyboardInterrupt):
+            self._step(env, stop, FakeStopPort())
 
 
 class TestSafePoints:
@@ -410,11 +602,6 @@ class TestSafePoints:
         assert len(host.executed) == 1
         assert read_machine_state(_loaded(env)).state is State.CANCELLED
 
-
-def _loaded(env: RuntimeEnv):
-    loaded = load_checkpoint(checkpoint_path(env.paths, RUN))
-    assert isinstance(loaded, CheckpointLoaded), loaded
-    return loaded.payload
 
 
 class TestRealSignal:

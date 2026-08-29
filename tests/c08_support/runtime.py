@@ -50,6 +50,7 @@ from .helpers import (
     MODEL,
     SPEAKER,
     USER_SPEAKER,
+    FakeIds,
     FakeStopPort,
     gate_answer_payload,
     user_record_payload,
@@ -148,19 +149,6 @@ def runtime_env(
     return RuntimeEnv(
         paths=paths, run_dir=run_directory(paths, RUN), directory=directory, config=config
     )
-
-
-class FakeIds:
-    """決定論的なID供給（runtimeはUUIDを使うが、testは固定値で観測する）。"""
-
-    def __init__(self, prefix: str = "rid") -> None:
-        self.prefix = prefix
-        self.issued: list[str] = []
-
-    def __call__(self) -> str:
-        value = f"{self.prefix}-{len(self.issued) + 1}"
-        self.issued.append(value)
-        return value
 
 
 def fixed_clock(prefix: str = "rid") -> DriveClock:

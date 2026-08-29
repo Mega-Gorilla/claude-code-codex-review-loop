@@ -5,10 +5,16 @@ ADR-0005は停止primitiveだけをC-03に置き、「1回目 = graceful -> grac
 2回目 = force即時」の**wiringはC-08の責務**と定めた（決定6 / Consequences）。PR-3b2が
 signal handlerを設置したことで、この昇格が実際に成立するかを確かめる責任が生じる。
 
-ここでは**実際に終了しないprocess treeへ実signalを2回送る**。unit testは
-`test_c08_signals.py`の`TestForceEscalation`が持つが、それは「`KeyboardInterrupt`が
-`stop_trees`で捕まる」ことしか言わない。grace待機が本当に中断されるかは、C-03の停止
-primitiveへ実signalが届く経路でしか確かめられない。
+ここでは**実際に終了しないprocess treeへ実signalを2回送る**。2回目が届く窓は2つあり、
+どちらもtreeを残さないことを固定する。
+
+| 2回目が届く位置 | test |
+| --- | --- |
+| grace待機中（`stop_trees`の内側） | `test_a_second_signal_forces_a_tree_that_ignores_graceful_stop` |
+| 最初の安全点より前（要求すら未保存） | `test_a_second_signal_before_the_first_safe_point_still_stops_the_tree` |
+
+unit testは`test_c08_signals.py`が持つ（`TestForceEscalation` / `TestForceOutsideTheStop`）が、
+grace待機が本当に中断されるかは、C-03の停止primitiveへ実signalが届く経路でしか確かめられない。
 
 **製品codeはprocessを起動しない**（PR-3b2の範囲）。treeを起動するのはこのtestで、C-03の
 公開API（`spawn_tree`）を使う。Controllerはtest driverのsubprocessである。
@@ -53,13 +59,13 @@ def _force_signal() -> int:
     return signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT
 
 
-def _popen(state_root: Path) -> subprocess.Popen[str]:
+def _popen(state_root: Path, *argv: str) -> subprocess.Popen[str]:
     kwargs: dict[str, object] = {}
     if sys.platform == "win32":
         # WindowsはSIGINTをsubprocessへ送れない（C-03のjob_objectと同じ手段を使う）
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     return subprocess.Popen(  # noqa: S603 - 起動するのは自分たちのtest driver
-        [sys.executable, str(DRIVER), str(state_root), "wait-for-signal-real-stop"],
+        [sys.executable, str(DRIVER), str(state_root), *argv],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -93,7 +99,7 @@ def test_a_second_signal_forces_a_tree_that_ignores_graceful_stop(tmp_path: Path
         )
         assert read_active_trees(_payload(env)) == (handle.ref,)
 
-        driver = _popen(env.paths.root)
+        driver = _popen(env.paths.root, "wait-for-signal-real-stop")
         started = time.monotonic()
         try:
             assert driver.stdout is not None
@@ -123,6 +129,60 @@ def test_a_second_signal_forces_a_tree_that_ignores_graceful_stop(tmp_path: Path
         if payload["outcome"] == "TERMINAL":
             assert read_stop_request(_payload(env)) is None
             assert read_active_trees(_payload(env)) == ()
+    finally:
+        handle.close()
+
+
+@pytest.mark.skipif(
+    os.environ.get("CC_REVIEW_SKIP_PROCESS_TESTS") == "1",
+    reason="実processを起動するtestを外した環境",
+)
+def test_a_second_signal_before_the_first_safe_point_still_stops_the_tree(
+    tmp_path: Path,
+) -> None:
+    """2回目が**最初の安全点より前**に届いてもtreeを残さない（AC-C03-01 / 02）。
+
+    driverは1回目を観測した直後・停止要求を保存する**前**で待つ（`ARMED`）。そこへ2回目を
+    送るので、`KeyboardInterrupt`は`stop_trees`の外側——要求すらまだdurableでない窓——へ落ちる。
+    """
+    script = write_child_script(tmp_path)
+    pidfile = tmp_path / "pids.txt"
+    spec = SpawnSpec(
+        argv=child_argv(script, "ignore", pidfile, grandchild=False),
+        cwd=tmp_path,
+        env=child_env(),
+    )
+    handle = spawn_tree(spec)
+    try:
+        child_pid, _ = read_pids(pidfile)
+        env = runtime_env(
+            tmp_path,
+            state=machine_state(),
+            extra=with_active_trees({}, [handle.ref]),
+            config_overrides={"halt_grace_ms": GRACE_MS},
+        )
+        driver = _popen(env.paths.root, "wait-for-signal-early-force", "10")
+        try:
+            assert driver.stdout is not None
+            assert driver.stdout.readline().strip() == "READY"
+            driver.send_signal(_force_signal())  # 1回目
+            assert driver.stdout.readline().strip() == "ARMED"  # 安全点の手前で待っている
+            driver.send_signal(_force_signal())  # 2回目（要求の保存より前）
+            assert _wait_for_exit(driver, handle), "driverが終了しない"
+        finally:
+            if driver.poll() is None:  # pragma: no cover - 失敗時の後始末
+                driver.kill()
+            stdout, stderr = driver.communicate(timeout=FORCE_LIMIT_SECONDS)
+
+        assert driver.returncode == 0, stderr
+        assert "Traceback" not in stderr, stderr
+        assert tree_gone(child_pid), "treeが残っている"
+        payload = json.loads(stdout.splitlines()[-1])
+        assert payload["outcome"] == "STOPPED"
+        assert payload["code"] == "forced_stop", payload
+        # 停止まで完了しているので要求は消費されている（台帳にも残らない）
+        assert read_stop_request(_payload(env)) is None
+        assert read_active_trees(_payload(env)) == ()
     finally:
         handle.close()
 

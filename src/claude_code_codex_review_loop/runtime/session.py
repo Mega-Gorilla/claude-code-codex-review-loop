@@ -117,7 +117,75 @@ def step(
     portが未実装の場合（`PortUnavailableError`）は、担当componentを名指しした
     `EngineStopped`へ写す。例外が呼び出し側へ飛び越えると、構造化outcomeで進退を決める
     という前提が壊れる。
+
+    2回目の停止signal（`KeyboardInterrupt`）は`stop_trees`の内側とは限らない。要求を保存する
+    前・保存中・台帳の読込中・`drive`のhost作業中にも届く。**どこで届いても停止を完了させる**
+    のがここの責務である（ADR-0021 決定19-h）。
     """
+    if stop is None:
+        return _run_step(paths, config, ports, id_source, issued_at, None)
+    try:
+        return _run_step(paths, config, ports, id_source, issued_at, stop)
+    except KeyboardInterrupt:
+        if not stop.force_requested:
+            # 停止の昇格要求ではない中断は握り潰さない
+            raise
+        return _forced_stop(paths, config, ports, stop, issued_at)
+
+
+def _forced_stop(
+    paths: StatePaths,
+    config: SessionConfig,
+    ports: PortSet,
+    stop: StopSignal,
+    issued_at: str,
+) -> StepResult:
+    """2回目の停止signalで中断した後に、停止を最後までやり切る。
+
+    **`advance`を通さない**。要求が在るときの`advance`は`EmergencyStopRequired`を返すだけで、
+    その手前でchain gate（GitHub取得）を通る場合がある。forceは「待たずに殺せ」という要求
+    なので、local I/Oだけで完結する2手——要求をdurableにする、台帳のtreeを止める——へ絞る。
+
+    要求の記録は冪等で、**まだ保存していない場合でもここで保存する**。保存前に中断された場合、
+    台帳に停止の根拠が無いまま終了してしまうためである。
+    """
+    recorded = request_emergency_stop(
+        paths=paths,
+        run_id=config.run_id,
+        repository=config.repository,
+        number=config.number,
+        requested_at=issued_at,
+    )
+    if isinstance(recorded, EngineStopped):
+        return StepResult(recorded, StepTrace((), 0, 0, 0))
+    stop.mark_recorded()
+    requested = 0 if recorded.already_recorded else 1
+    stopped = _emergency(paths, config, ports, stop)
+    if isinstance(stopped, EngineStopped):
+        return StepResult(stopped, StepTrace((), 0, requested, 0))
+    if isinstance(stopped, EmergencyStopFailed):
+        return StepResult(
+            EngineStopped("emergency_stop_failed", stopped.detail),
+            StepTrace((), 0, requested, 0),
+        )
+    return StepResult(
+        EngineStopped(
+            "forced_stop",
+            f"2回目の停止signalで中断し、treeを停止した（state={stopped.machine_state.state.value}）",
+        ),
+        StepTrace((), 0, requested, 1),
+    )
+
+
+def _run_step(
+    paths: StatePaths,
+    config: SessionConfig,
+    ports: PortSet,
+    id_source: Callable[[], str],
+    issued_at: str,
+    stop: StopSignal | None,
+) -> StepResult:
+    """`step`の本体（`KeyboardInterrupt`の扱いは呼び出し側が持つ）。"""
     persisted: list[str] = []
     halted = 0
     requested = 0
