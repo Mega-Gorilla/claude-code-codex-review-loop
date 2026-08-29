@@ -7,6 +7,9 @@ checkpointは**GitHubがcanonicalな会話に対するcache**であり、単独�
 - 保存は「先にschema検証 -> atomic replace」。不正なcheckpointを永続化しない
 - 更新は`identity.fs_permissions.replace_private_text`（一時file + `os.replace`）で、
   中断してもtruncateされた中間状態を残さない。世代は保存しない
+- **read-modify-writeは`checkpoint_guard`の下で行う**。読取と保存の間に別の書き手が
+  入るとlost updateになる（後勝ちで相手の変更が消える）。guardは`state.lock`と同じ
+  `os.mkdir`の排他で、取得できない間は短く待って再試行し、尽きたら失敗させる
 - 読込結果は真偽値ではなく**構造化直和**にする。missing / unreadable /
   permission-violation / schema-invalid / migration-unavailableを区別し、
   壊れたcheckpointを「無いもの」として黙って上書きしない（silent repair禁止）
@@ -15,8 +18,13 @@ checkpointは**GitHubがcanonicalな会話に対するcache**であり、単独�
 from __future__ import annotations
 
 import json
+import os
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from ..identity.fs_permissions import (
     FsPermissionError,
@@ -28,6 +36,12 @@ from ..schema.envelope import CHECKPOINT
 from ..schema.migrate import load_with_migration
 from ..schema.registry import validate_object
 from ..schema.validate import PublicError
+
+# read-modify-writeを直列化する排他guard（`state.lock`のACQUIRE_GUARDと同じ仕組み）。
+# 保持時間はload -> change -> saveの一往復だけなので、待つのは短く、回数で上限を切る
+CHECKPOINT_GUARD_SUFFIX: Final = ".guard"
+GUARD_ATTEMPTS: Final = 200
+GUARD_WAIT_SECONDS: Final = 0.01
 
 
 class CheckpointStoreError(Exception):
@@ -116,6 +130,56 @@ def save_checkpoint(path: Path, payload: dict[str, object]) -> None:
             write_private_text(path, text)
     except FsPermissionError as error:
         raise CheckpointStoreError("write", f"checkpointを書けない: {error.detail}") from error
+
+
+@contextmanager
+def checkpoint_guard(
+    path: Path, *, attempts: int = GUARD_ATTEMPTS, wait_seconds: float = GUARD_WAIT_SECONDS
+) -> Iterator[None]:
+    """checkpointのread-modify-writeを**排他guardの下で直列化**する。
+
+    `load_checkpoint`と`save_checkpoint`はそれぞれ原子的だが、その2つを跨いだ更新は
+    原子的でない。2つの書き手が同じ旧payloadを読むと、後に保存した側が相手の変更を消す
+    （lost update）。`processes`台帳でこれが起きると停止対象のrefが消え、cancel / resumeが
+    treeへ到達できなくなる（AC-C03-01、ADR-0019 決定10 / 11）。
+
+    guardは`state.lock`の取得guardと同じ`os.mkdir`の排他である。保持するのは
+    load -> change -> saveの一往復だけなので、取得できない間は短く待って再試行し、
+    回数が尽きたら**推測せず失敗させる**（silent repair禁止）。
+    """
+    guard = path.with_name(f"{path.name}{CHECKPOINT_GUARD_SUFFIX}")
+    _take_guard(guard, attempts=attempts, wait_seconds=wait_seconds)
+    try:
+        yield
+    finally:
+        _release_guard(guard)
+
+
+def _take_guard(guard: Path, *, attempts: int, wait_seconds: float) -> None:
+    """guardを取る（他の書き手が保持している間は待つ）。"""
+    remaining = max(attempts, 1)
+    while True:
+        try:
+            os.mkdir(guard)
+            return
+        except FileExistsError:
+            remaining -= 1
+            if remaining == 0:
+                raise CheckpointStoreError(
+                    "guard",
+                    f"別の書き手がcheckpointを更新中（中断した場合は{guard.name}を削除する）",
+                ) from None
+            time.sleep(wait_seconds)
+        except OSError as error:  # pragma: no cover - private dir配下のmkdir失敗は実質起きない
+            raise CheckpointStoreError("guard", f"guardを作成できない（errno={error.errno}）") from error
+
+
+def _release_guard(guard: Path) -> None:
+    """guardを解放する（残ると以後の更新が止まるため、失敗も無視しない）。"""
+    try:
+        guard.rmdir()
+    except OSError as error:  # pragma: no cover - 直前に自分で作成したdirectoryの削除失敗は実質起きない
+        raise CheckpointStoreError("guard", f"guardを解放できない: {guard}") from error
 
 
 def load_checkpoint(path: Path) -> CheckpointLoadResult:

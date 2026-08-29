@@ -21,10 +21,13 @@ from claude_code_codex_review_loop.domain.values import Awaiting, RecordKind, St
 from claude_code_codex_review_loop.runtime import drive
 from claude_code_codex_review_loop.workflow import Terminal
 
-# hostをprocessとして起動する / TUIへ入力を送る手段。PR-3b1のruntimeは1つも持たない
-# （headless adapterはPR-3b2が別moduleで導入する）
+# processを起動する / TUIへ入力を送る手段。**主経路のmoduleはどちらも持たない**
 SPAWN_MODULES = frozenset({"subprocess", "multiprocessing", "os", "pty", "winpty"})
 KEY_INJECTION_MODULES = frozenset({"pyautogui", "pywinauto", "keyboard", "pynput", "msvcrt"})
+# headless経路のadapter。Controllerが起動する側なので、spawnの検査から明示的に外す
+# （implementation plan Section 4: 「Claude coder（headless経路）はControllerが
+# subprocessとして起動するadapter」。ADR-0022）
+HEADLESS_MODULE = "host_headless.py"
 
 
 def _gate_env(tmp_path: Path) -> RuntimeEnv:
@@ -99,23 +102,51 @@ class TestNoSpawnNoKeyInjection:
         assert host.spawned == 0
         assert host.key_injections == 0
 
-    def test_the_runtime_package_cannot_spawn_or_type(self) -> None:
-        """counterではなく**構造**で固定する（fakeが数えるのは今回のrunだけである）。"""
-        directory = Path(runtime_package.__file__).parent
+    def test_the_active_path_cannot_spawn(self) -> None:
+        """**主経路のmoduleはprocessを起動する手段を持たない**（counterではなく構造）。
+
+        AC-C08-02が禁じるのは主経路でのsubprocess起動であって、headless経路の起動ではない
+        （headlessはControllerが起動する設計。implementation plan Section 4）。そこで
+        `host_headless.py`だけを対象外にし、**他のどのmoduleにも起動手段が無い**ことを固定する。
+        `host_headless.py`へ起動が集まっていること自体が、主経路に起動が無いことの裏返しになる。
+        """
         offending: dict[str, set[str]] = {}
-        for source in sorted(directory.glob("*.py")):
-            imported = _imported_modules(source)
-            hits = imported & (SPAWN_MODULES | KEY_INJECTION_MODULES)
+        for source in _runtime_modules():
+            if source.name == HEADLESS_MODULE:
+                continue
+            hits = _imported_modules(source) & SPAWN_MODULES
             if hits:
                 offending[source.name] = hits
         assert offending == {}
 
-    def test_process_control_stays_behind_the_stop_port(self) -> None:
-        """runtimeが触れるprocessは**停止対象**だけで、起動はC-03の外にも無い。"""
-        source = Path(runtime_package.__file__).parent / "ports.py"
-        imported = _imported_names(source)
-        assert "stop_tree_by_ref" in imported
-        assert not {name for name in imported if name.startswith(("spawn", "Popen", "launch"))}
+    def test_no_module_can_inject_keystrokes(self) -> None:
+        """キー入力注入はheadless経路でも行わない（対象外にしない）。"""
+        offending = {
+            source.name: hits
+            for source in _runtime_modules()
+            if (hits := _imported_modules(source) & KEY_INJECTION_MODULES)
+        }
+        assert offending == {}
+
+    def test_only_the_headless_adapter_starts_a_tree(self) -> None:
+        """起動は1 moduleへ閉じる。ここが増えたら主経路の契約を見直す合図である。"""
+        starters = {
+            source.name
+            for source in _runtime_modules()
+            if "spawn_tree" in _imported_names(source)
+        }
+        assert starters == {HEADLESS_MODULE}
+
+    def test_process_control_stays_behind_c03(self) -> None:
+        """停止も起動も**C-03経由**で、`subprocess`を直接触るmoduleは無い。"""
+        directory = Path(runtime_package.__file__).parent
+        assert "stop_tree_by_ref" in _imported_names(directory / "ports.py")
+        for source in _runtime_modules():
+            assert "subprocess" not in _imported_modules(source), source.name
+
+
+def _runtime_modules() -> list[Path]:
+    return sorted(Path(runtime_package.__file__).parent.glob("*.py"))
 
 
 def _imported_modules(source: Path) -> set[str]:

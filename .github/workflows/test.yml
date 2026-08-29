@@ -103,8 +103,10 @@ jobs:
       # - `checkpoint.json`: `transaction.body`は**redact済み**のrender出力（ADR-0015）
       # - `action.json` / `request.json`: envelope。binding・hash・comment ID・action payloadで、
       #   自由記述を持たない
-      # - `result.json`は**含めない**。hostが返した実行結果とユーザーの入力そのものが入り、
-      #   redactを通っていない。session config（`gh_env`を持つ）とfake GitHubのstateも同様に外す
+      # - `host.log`: headless hostのstderrを`policy.redaction`へ通したもの（ADR-0022）
+      # - `result.json` / `host.stdout` / `host.stderr`は**含めない**。hostが返した実行結果と
+      #   ユーザーの入力そのもの、およびredact前のlogが入る。session config（`gh_env`を持つ）と
+      #   fake GitHubのstateも同様に外す
       #
       # 実行するのはfake ghだけなので実credentialは存在しないが、収集範囲を「絞る」ことを
       # 既定にしておかないと、実transportを使うPhaseで漏れる。file名の対応は
@@ -120,6 +122,8 @@ jobs:
           path: |
             ${{ runner.temp }}/pytest-tmp/**/runs/*/checkpoint.json
             ${{ runner.temp }}/pytest-tmp/**/runs/*/actions/*/action.json
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/actions/*/host.log
             ${{ runner.temp }}/pytest-tmp/**/runs/*/requests/*/request.json
+            ${{ runner.temp }}/pytest-tmp/**/runs/*/requests/*/host.log
           if-no-files-found: ignore
           retention-days: 7

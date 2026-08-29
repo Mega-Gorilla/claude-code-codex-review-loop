@@ -4,10 +4,10 @@
 Issue #13の契約: **checkpoint / canonical record / envelope / redact済みlogを対象にし、
 credential・token・未redact入力は含めない**。
 
-PR-3b1が収集するのは**checkpointとenvelopeの2種**である。canonical recordのlocal
-artifact（`artifact_records`）とredact済みlogは**producerが未実装**で、収集はPR-3b2が
-producerと同じPRで入れる（ADR-0020 決定30-a / 30-b）。ここが検査するのは
-「収集しているものが契約の範囲内か」であって、「4種すべてを収集しているか」ではない。
+収集するのは**checkpoint / envelope / redact済みlog**の3種である（PR-3b1で前2種、
+PR-3b3で`host.log`。ADR-0022）。canonical recordのlocal artifact（`artifact_records`）だけは
+**producerが未実装**で、C-09以降が入れる。ここが検査するのは「収集しているものが契約の
+範囲内か」であって、「4種すべてを収集しているか」ではない。
 
 `result.json`はhostが返した実行結果とユーザーの入力そのもので、redactを通っていない。
 workflowのpathが`*.json`のようなwildcardへ広がった瞬間に混ざるため、収集file名を
@@ -21,6 +21,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from claude_code_codex_review_loop.runtime.host_headless import (
+    LOG_FILE as HOST_LOG,
+)
+from claude_code_codex_review_loop.runtime.host_headless import (
+    STDERR_FILE as HOST_STDERR,
+)
+from claude_code_codex_review_loop.runtime.host_headless import (
+    STDOUT_FILE as HOST_STDOUT,
+)
 from claude_code_codex_review_loop.state import CHECKPOINT_FILE_NAME
 from claude_code_codex_review_loop.workflow.engine import ACTIONS_DIR
 from claude_code_codex_review_loop.workflow.engine import ENVELOPE_FILE as ACTION_ENVELOPE
@@ -56,16 +65,20 @@ def test_the_step_exists_and_declares_paths() -> None:
     assert _collected_paths(), WORKFLOW
 
 
-def test_only_checkpoints_and_envelopes_are_collected() -> None:
-    """収集するfile名は製品定数の3つだけ（wildcardへ広げない）。"""
-    allowed = {CHECKPOINT_FILE_NAME, ACTION_ENVELOPE, REQUEST_ENVELOPE}
+def test_only_checkpoints_envelopes_and_redacted_logs_are_collected() -> None:
+    """収集するfile名は製品定数の4つだけ（wildcardへ広げない）。"""
+    allowed = {CHECKPOINT_FILE_NAME, ACTION_ENVELOPE, REQUEST_ENVELOPE, HOST_LOG}
     names = {pattern.rsplit("/", 1)[-1] for pattern in _collected_paths()}
     assert names == allowed
 
 
-def test_result_files_are_never_collected() -> None:
-    """`result.json`には未redactのhost出力とユーザー入力が入る（Issue #13の契約）。"""
-    forbidden = {ACTION_RESULT, REQUEST_RESULT}
+def test_unredacted_files_are_never_collected() -> None:
+    """未redactのhost出力・ユーザー入力・logは収集しない（Issue #13の契約）。
+
+    `result.json`はhostが返した結果とユーザーの入力そのもの、`host.stdout`はsubmit envelope、
+    `host.stderr`は**redact前**のlogである。redactを通った`host.log`だけを集める。
+    """
+    forbidden = {ACTION_RESULT, REQUEST_RESULT, HOST_STDOUT, HOST_STDERR}
     for pattern in _collected_paths():
         name = pattern.rsplit("/", 1)[-1]
         assert name not in forbidden, pattern
@@ -76,8 +89,14 @@ def test_result_files_are_never_collected() -> None:
 def test_each_envelope_directory_is_covered() -> None:
     """actionとuser requestの両方のenvelopeが対象に入っている（片側の取りこぼし防止）。"""
     patterns = _collected_paths()
-    assert any(f"{ACTIONS_DIR}/" in pattern for pattern in patterns), patterns
-    assert any(f"{REQUESTS_DIR}/" in pattern for pattern in patterns), patterns
+    for directory in (ACTIONS_DIR, REQUESTS_DIR):
+        names = {
+            pattern.rsplit("/", 1)[-1] for pattern in patterns if f"{directory}/" in pattern
+        }
+        assert names == {
+            ACTION_ENVELOPE if directory == ACTIONS_DIR else REQUEST_ENVELOPE,
+            HOST_LOG,
+        }, (directory, names)
 
 
 def test_the_session_config_is_not_collected() -> None:
