@@ -11,6 +11,8 @@ import hashlib
 import json
 import sys
 import threading
+import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -295,6 +297,56 @@ class TestProcessLedger:
             thread.join(timeout=60)
 
         assert failures == []
+        assert sorted(_ledger(env), key=_ref_key) == sorted(refs, key=_ref_key)
+
+    def test_only_one_writer_is_inside_the_guard(self, tmp_path: Path) -> None:
+        """**load -> change -> saveの窓に同時に2人入らない**（直列化そのものの観測）。
+
+        `_update`はchange callbackを**guardの下で**、しかもloadの後・saveの前に呼ぶ。
+        そこで観測点をcallback自身に置くと、製品codeへtest用のhookを足さずに窓の中の
+        同時実行数を数えられる。scheduler依存なしに`peak == 1`が成り立つ。
+        """
+        env = _env(tmp_path)
+        host = _host(env, tmp_path)
+        writers = 6
+        barrier = threading.Barrier(writers)
+        counter = threading.Lock()
+        inside = 0
+        peak = 0
+        failures: list[BaseException] = []
+
+        def change(payload: Mapping[str, object], ref: TreeRef) -> object:
+            nonlocal inside, peak
+            with counter:
+                inside += 1
+                peak = max(peak, inside)
+            try:
+                # 窓を広げる。直列化されていなければ、この間に他の書き手が入る
+                time.sleep(0.01)
+                return with_tree_added(payload, ref)
+            finally:
+                with counter:
+                    inside -= 1
+
+        def register(ref: TreeRef) -> None:
+            try:
+                barrier.wait(timeout=30)
+                host._update(lambda payload: change(payload, ref))  # type: ignore[arg-type,return-value]
+            except BaseException as error:  # noqa: BLE001 - threadの失敗を本体へ運ぶ
+                failures.append(error)
+
+        refs = [
+            job_object_ref(pid=6000 + index, job_name=f"cc-review-guard-{index}")
+            for index in range(writers)
+        ]
+        threads = [threading.Thread(target=register, args=(ref,)) for ref in refs]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        assert failures == []
+        assert peak == 1, f"guardの下に同時に{peak}人入った"
         assert sorted(_ledger(env), key=_ref_key) == sorted(refs, key=_ref_key)
 
     def test_a_held_guard_is_reported(self, tmp_path: Path) -> None:
