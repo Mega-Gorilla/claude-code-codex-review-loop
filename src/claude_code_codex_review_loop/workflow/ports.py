@@ -21,7 +21,7 @@ from typing import Protocol
 
 from ..domain.commands import HostAction
 from ..domain.events import Event
-from ..domain.values import Awaiting, RecordEvidence, RecordKind
+from ..domain.values import Awaiting, BlockContext, RecordEvidence, RecordKind
 from ..identity.record_chain import ChainVerification, VerifiedRecord
 from ..process import StopResult, TreeRef
 
@@ -52,9 +52,25 @@ class UserRequestContext:
     head_sha: str
 
 
+@dataclass(frozen=True)
+class BlockRequestContext:
+    """`BLOCKED`での介入待ちを組み立てる文脈（ADR-0023）。
+
+    `BLOCKED`にawaitingは無く、識別子は解除対象の**block attempt binding**である。
+    どのrecordを根拠として同梱するかはblock種別が決める（`BlockRequestSpec`）。
+    """
+
+    block: BlockContext
+    block_binding: str
+    run_id: str
+    repository: str
+    number: int
+    head_sha: str
+
+
 # actionとuser requestは同じevidence選択規則（許可kind・対象head・seq昇順）を使うため、
-# portは両方の文脈を受け取る。片方だけのportを増やして規則を二重化しない
-RequestContext = ActionContext | UserRequestContext
+# portは3つの文脈を受け取る。片方だけのportを増やして規則を二重化しない
+RequestContext = ActionContext | UserRequestContext | BlockRequestContext
 
 
 class ActionPayloadPort(Protocol):

@@ -42,7 +42,19 @@ from ..schema.registry import validate_object
 from ..schema.user_input import HOST_TRANSCRIPT_ROUTE, PERMISSION_RESUME, USER_REQUEST
 from ..state import StatePaths, checkpoint_path, save_checkpoint
 from ..transport.render import prepare_user_body
-from .actions import UserRequestSpec, intent_key, intent_value_of, user_spec_for
+from .actions import (
+    AwaitingInstance,
+    BlockInstance,
+    BlockRequestSpec,
+    RequestSpec,
+    UserRequestSpec,
+    WaitInstance,
+    block_binding_of,
+    block_spec_for,
+    intent_key,
+    intent_value_of,
+    user_spec_for,
+)
 from .checkpoint_view import (
     ConsumedIntent,
     PendingUserRequest,
@@ -74,12 +86,18 @@ class AwaitUser:
     intentを`result_path`へ書いてsubmitする。
     """
 
-    awaiting: Awaiting
+    # `BLOCKED`での介入待ちはawaitingを持たない（識別子はrequestのblock binding）
+    awaiting: Awaiting | None
     request: PendingUserRequest
     envelope: dict[str, object]
     envelope_path: Path
     result_path: Path
     reissued: bool
+
+    @property
+    def waits_for_block(self) -> bool:
+        """block介入待ちか（hostの提示文面を変えるための区別）。"""
+        return self.request.waits_for_block
 
 
 @dataclass(frozen=True)
@@ -134,8 +152,17 @@ def _request_paths(request_id: str) -> tuple[str, str]:
     )
 
 
+def _wait_fields(spec: RequestSpec, block_binding: str | None) -> dict[str, object]:
+    """envelopeへ書く待機の識別子（排他。schemaのcross-field ruleと同じ規則）。"""
+    if isinstance(spec, BlockRequestSpec):
+        # 型では表せないが、block specを渡す呼び出しは必ずbindingを伴う
+        assert block_binding is not None
+        return {"block_binding": block_binding}
+    return {"awaiting": spec.kind}
+
+
 def _build_envelope(
-    spec: UserRequestSpec,
+    spec: RequestSpec,
     *,
     run_id: str,
     repository: str,
@@ -146,6 +173,7 @@ def _build_envelope(
     result_path: str,
     since_seq: int,
     evidence: Sequence[tuple[str, str]],
+    block_binding: str | None,
 ) -> dict[str, object]:
     return {
         "schema_version": USER_REQUEST_VERSION,
@@ -154,7 +182,7 @@ def _build_envelope(
         "repository": repository,
         "number": number,
         "expected_head_sha": head_sha,
-        "awaiting": spec.kind,
+        **_wait_fields(spec, block_binding),
         "nonce": nonce,
         "result_path": result_path,
         "since_seq": since_seq,
@@ -168,7 +196,7 @@ def _build_envelope(
 
 def issue_user_request(
     run: RunContext,
-    spec: UserRequestSpec,
+    spec: RequestSpec,
     *,
     paths: StatePaths,
     run_id: str,
@@ -179,8 +207,13 @@ def issue_user_request(
     evidence: Sequence[tuple[str, str]],
     id_source: Callable[[], str],
     issued_at: str,
+    block_binding: str | None = None,
 ) -> AwaitUser | EngineStopped:
-    """新しいuser requestを発行する（envelopeを保存してからcheckpointを更新する）。"""
+    """新しいuser requestを発行する（envelopeを保存してからcheckpointを更新する）。
+
+    待機の識別子は直和である（ADR-0023 決定1）。`UserRequestSpec`ならC-01のawaiting、
+    `BlockRequestSpec`なら解除対象の**block attempt binding**が識別子になる。
+    """
     request_id = id_source()
     nonce = id_source()
     envelope_rel, result_rel = _request_paths(request_id)
@@ -195,6 +228,7 @@ def issue_user_request(
         result_path=result_rel,
         since_seq=since_seq,
         evidence=evidence,
+        block_binding=block_binding,
     )
     validation = validate_object(USER_REQUEST, dict(envelope))
     if not validation.ok:
@@ -202,7 +236,8 @@ def issue_user_request(
         return EngineStopped("request_invalid", f"USER_REQUESTが検証を通らない（{codes}）")
     request = PendingUserRequest(
         request_id=request_id,
-        awaiting=spec.awaiting,
+        awaiting=None if isinstance(spec, BlockRequestSpec) else spec.awaiting,
+        block_binding=block_binding,
         nonce=nonce,
         expected_head_sha=head_sha,
         result_path=result_rel,
@@ -219,7 +254,7 @@ def issue_user_request(
         return EngineStopped("request_write", f"user requestを保存できない: {error}")
     save_checkpoint(checkpoint_path(paths, run_id), with_user_request(run.payload, request))
     return AwaitUser(
-        awaiting=spec.awaiting,
+        awaiting=request.awaiting,
         request=request,
         envelope=envelope,
         envelope_path=run.run_dir / envelope_rel,
@@ -255,7 +290,12 @@ def _binding_mismatch(
     """submitのbinding echoを未応答requestと突き合わせる（AC-C08-05と同じ規則）。"""
     if envelope.get("request_id") != request.request_id or envelope.get("nonce") != request.nonce:
         return EngineStopped("stale_request", "submitが未応答のuser requestを指していない")
-    if envelope.get("awaiting") != request.awaiting.value:
+    if request.block_binding is not None:
+        # block介入待ちは**block attempt binding**が識別子である。別のblockを指すsubmitを
+        # 受理すると、解消evidenceが対象blockと一致しないrecordを作らせることになる
+        if envelope.get("block_binding") != request.block_binding:
+            return EngineStopped("block_mismatch", "submitの対象blockが一致しない")
+    elif envelope.get("awaiting") != (request.awaiting.value if request.awaiting else None):
         return EngineStopped("awaiting_mismatch", "submitの待機種別が一致しない")
     if envelope.get("expected_head_sha") != request.expected_head_sha:
         return EngineStopped("head_mismatch", "submitの対象headが一致しない")
@@ -280,6 +320,15 @@ def _bound_head(kind: RecordKind, payload: Mapping[str, object], request: Pendin
     return None
 
 
+def _wait_instance(request: PendingUserRequest) -> WaitInstance:
+    """requestが指す待機instance（intent keyの構成要素。2経路が同じ値を導く）。"""
+    if request.block_binding is not None:
+        return BlockInstance(block_binding=request.block_binding)
+    # 型では表せないが、readerが「一方だけ」を保証している
+    assert request.awaiting is not None
+    return AwaitingInstance(awaiting=request.awaiting, since_seq=request.since_seq)
+
+
 def _dedup(
     request: PendingUserRequest,
     consumed: ConsumedIntent | None,
@@ -295,8 +344,7 @@ def _dedup(
     """
     key = intent_key(
         run_id=run_id,
-        awaiting=request.awaiting,
-        since_seq=request.since_seq,
+        instance=_wait_instance(request),
         head_sha=request.expected_head_sha,
         kind=kind,
         intent_value=intent_value_of(kind, payload),
@@ -315,7 +363,7 @@ def _dedup(
 def _record_path(
     run: RunContext,
     request: PendingUserRequest,
-    spec: UserRequestSpec,
+    spec: RequestSpec,
     *,
     kind: RecordKind,
     consumed: ConsumedIntent | None,
@@ -345,6 +393,9 @@ def _record_path(
     head_mismatch = _bound_head(kind, result.payload, request)
     if head_mismatch is not None:
         return head_mismatch
+    block_mismatch = _bound_block(kind, result.payload, request)
+    if block_mismatch is not None:
+        return block_mismatch
     if result.payload.get("input_route") != HOST_TRANSCRIPT_ROUTE:
         # 転記経路のrecordがGitHub直接comment由来を名乗ると、C-06 / C-13が受理主体を
         # 取り違える（D-031の照合対象が変わる）。経路の詐称を構造的に止める
@@ -469,12 +520,54 @@ def _resume_path(
 
 
 def _still_awaited(run: RunContext, request: PendingUserRequest) -> EngineStopped | None:
-    """C-01がまだこの入力を待っているか（別経路の受理でstateが進んでいないか）。"""
-    if run.machine_state.awaiting is not request.awaiting:
+    """C-01がまだこの入力を待っているか（別経路の受理でstateが進んでいないか）。
+
+    blockの介入待ちは`awaiting`ではなく**同じblockがまだあるか**で判定する。解消されたblock
+    や別のblockへ入り直した後のrunへ、古いrequestの応答を流し込ませない。
+    """
+    if request.block_binding is not None:
+        block = run.machine_state.block
+        if block is None or block_binding_of(block) != request.block_binding:
+            return EngineStopped("request_superseded", "対象のblockは既に解消または交代している")
+    elif run.machine_state.awaiting is not request.awaiting:
         return EngineStopped("request_superseded", "C-01は既にこの待機を消費している")
     if run.machine_state.pending_record is not None:
         return EngineStopped("persist_required", "永続化を待つrecordがあるため新しい入力を受理しない")
     return None
+
+
+def _bound_block(
+    kind: RecordKind, payload: Mapping[str, object], request: PendingUserRequest
+) -> EngineStopped | None:
+    """`BLOCK_INTERVENTION`の解除対象が、requestが束ねたblockと一致することを要求する。
+
+    C-01は**解消時に**blockとの完全一致を求める（AC-C01-11）。ここを通してしまうと、
+    recordはGitHubへ投稿されるのに解消eventが一致せず、runは`BLOCKED`のまま詰まる。
+    投稿してから気付くのではなく、**受理の時点で止める**。
+    """
+    if kind is not RecordKind.BLOCK_INTERVENTION:
+        return None
+    if payload.get("target_block_binding") != request.block_binding:
+        return EngineStopped("record_block_mismatch", "resultの解除対象blockがrequestと一致しない")
+    return None
+
+
+def _spec_of(run: RunContext, request: PendingUserRequest) -> RequestSpec | EngineStopped:
+    """未応答requestが指す待機の契約を引く（引けなければ推測せず停止する）。"""
+    if request.block_binding is not None:
+        block = run.machine_state.block
+        if block is None:
+            return EngineStopped("request_superseded", "対象のblockは既に解消している")
+        spec = block_spec_for(block)
+        if spec is None:
+            return EngineStopped("not_user_input", "このblockは介入recordを受理しない")
+        return spec
+    # 型では表せないが、readerが「一方だけ」を保証している
+    assert request.awaiting is not None
+    user_spec = user_spec_for(request.awaiting)
+    if user_spec is None:  # pragma: no cover - awaitingはschemaのenumで3値に限定されている
+        return EngineStopped("not_user_input", f"{request.awaiting.value}はユーザー入力待ちではない")
+    return user_spec
 
 
 def accept_user_submit(
@@ -517,9 +610,9 @@ def accept_user_submit(
     mismatch = _binding_mismatch(envelope, request)
     if mismatch is not None:
         return mismatch
-    spec = user_spec_for(request.awaiting)
-    if spec is None:  # pragma: no cover - awaitingはschemaのenumで3値に限定されている
-        return EngineStopped("not_user_input", f"{request.awaiting.value}はユーザー入力待ちではない")
+    spec = _spec_of(run, request)
+    if isinstance(spec, EngineStopped):
+        return spec
     # `result_kind`の有無がrecordを作る応答かを決める（不在はpermission resume。schemaの
     # cross-field ruleがその組み合わせを`USER_INPUT_PERMISSION`へ限定している）
     kind_value = envelope.get("result_kind")
@@ -543,6 +636,9 @@ def accept_user_submit(
     stale = _still_awaited(run, request)
     if stale is not None:
         return stale
+    if not isinstance(spec, UserRequestSpec):  # pragma: no cover - schemaのcross-field ruleが
+        # `result_kind`不在を`USER_INPUT_PERMISSION`へ限定するため、block requestはここへ来ない
+        return EngineStopped("not_user_input", "block介入待ちにrecordを作らない応答は無い")
     return _resume_path(
         run,
         request,

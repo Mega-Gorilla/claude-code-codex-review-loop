@@ -30,6 +30,7 @@ from claude_code_codex_review_loop.state import (
     save_checkpoint,
 )
 from claude_code_codex_review_loop.workflow import (
+    AwaitingInstance,
     AwaitUser,
     ConsumedIntent,
     EngineStopped,
@@ -65,8 +66,7 @@ def _consume_via_github(env, issued: AwaitUser, kind: RecordKind) -> str:
     """
     key = intent_key(
         run_id=RUN,
-        awaiting=issued.request.awaiting,
-        since_seq=issued.request.since_seq,
+        instance=AwaitingInstance(awaiting=issued.request.awaiting, since_seq=issued.request.since_seq),
         head_sha=issued.request.expected_head_sha,
         kind=kind,
     )
@@ -141,8 +141,7 @@ class TestInstanceBoundary:
         key = _consume_via_github(env, issued, RecordKind.MERGE_APPROVAL)
         later = intent_key(
             run_id=RUN,
-            awaiting=GATE,
-            since_seq=issued.request.since_seq + 1,
+            instance=AwaitingInstance(awaiting=GATE, since_seq=issued.request.since_seq + 1),
             head_sha=HEAD,
             kind=RecordKind.MERGE_APPROVAL,
         )
@@ -190,8 +189,7 @@ class TestDecisionAnswer:
     def _consume(self, env, issued: AwaitUser, answer: str) -> None:
         key = intent_key(
             run_id=RUN,
-            awaiting=issued.request.awaiting,
-            since_seq=issued.request.since_seq,
+            instance=AwaitingInstance(awaiting=issued.request.awaiting, since_seq=issued.request.since_seq),
             head_sha=issued.request.expected_head_sha,
             kind=RecordKind.USER_DECISION,
             intent_value=answer,

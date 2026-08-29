@@ -27,9 +27,11 @@ from c07_support.helpers import (
 )
 
 from claude_code_codex_review_loop.domain._rules_workflow import BLOCKED_CONTINUATIONS
-from claude_code_codex_review_loop.domain.events import Event
+from claude_code_codex_review_loop.domain.events import BlockResolvedIntervention, Event
 from claude_code_codex_review_loop.domain.values import (
     Awaiting,
+    BlockContext,
+    BlockResolutionEvidence,
     Budget,
     CancellingProcedure,
     ExternalDependencyBlock,
@@ -70,6 +72,7 @@ from claude_code_codex_review_loop.transport.gh import GhContext, RetryPolicy
 from claude_code_codex_review_loop.workflow import (
     RESULT_VARIANTS,
     IssuedTransaction,
+    block_spec_for,
     build_event,
     issue_transaction,
     transaction_section,
@@ -173,12 +176,46 @@ class GithubBackedRecords:
         )
 
 
+def _port_mapped_event(
+    evidence: RecordEvidence, record: VerifiedRecord, block: BlockContext | None
+) -> Event:
+    """`RecordEvidence`だけでは作れないeventを組み立てる（写像はportの責務）。
+
+    `BLOCK_INTERVENTION`の解消evidenceは**解除対象blockへの参照**（`target_block_binding`）と
+    record自身のbindingを分離して持つ（AC-C01-11）。対象bindingはcanonical projectionから
+    取れるが、C-01の完全一致照合は**blockが持つ値**（head / reason / budget / counter
+    snapshot / fingerprint）まで要求する。これらはC-10 / C-11が所有する値で**C-08は作らない**
+    ため、portが供給する。fakeでは呼び出し側がblockを渡してその位置を示す。
+    """
+    if record.kind is not RecordKind.BLOCK_INTERVENTION:  # pragma: no cover - 他にport_mappedは無い
+        raise AssertionError(f"port_mappedの写像が未定義: {record.kind.value}")
+    target = record.projection.target
+    assert target is not None, "BLOCK_INTERVENTIONのprojectionは解除対象を必ず含む"
+    assert block is not None, "解消evidenceの組み立てにはblockの値が要る（C-10 / C-11が所有）"
+    progress = block if isinstance(block, ProgressBlock) else None
+    return BlockResolvedIntervention(
+        resolution=BlockResolutionEvidence(
+            target_block_binding=OpaqueBinding(target),
+            head=block.head,
+            record=evidence,
+            reason=None if progress is None else progress.reason,
+            budget=None if progress is None else progress.budget,
+            counter_snapshot=None if progress is None else progress.counter_snapshot,
+            fingerprint=None if progress is None else progress.fingerprint,
+        )
+    )
+
+
 @dataclass
 class FakeRecordEvents:
     """検証済みrecordからC-01 eventを作るport（本実装はC-10 / C-11）。
 
     host actionの結果はregistryの`build_event`をそのまま使う（1対1の対応がある）。
     `extra_event_inputs`（`ProgressReport` / `head`）はC-08が作らない値なのでここで供給する。
+
+    **port_mappedなvariant**（`BLOCK_INTERVENTION`）は`build_event`では作れない。eventが
+    受け取るのは`BlockResolutionEvidence`であって`RecordEvidence`ではないためで、写像を
+    供給するのがまさにこのportの役目である（ADR-0017 決定2 / ADR-0023 決定7）。
     """
 
     report: ProgressReport = field(
@@ -191,12 +228,16 @@ class FakeRecordEvents:
     )
     head: OpaqueRef = OpaqueRef("head-audit")
     events: Mapping[RecordKind, Event] = field(default_factory=dict)
+    # port_mappedな写像に要るblock（C-10 / C-11が所有する値の供給元）
+    block: BlockContext | None = None
 
     def event_for(self, evidence: RecordEvidence, record: VerifiedRecord) -> Event:
         override = self.events.get(record.kind)
         if override is not None:
             return override
         variant = RESULT_VARIANTS[record.kind]
+        if variant.port_mapped:
+            return _port_mapped_event(evidence, record, self.block)
         inputs: dict[str, object] = {}
         for name in variant.extra_event_inputs:
             inputs[name] = self.report if name == "report" else self.head
@@ -438,14 +479,20 @@ def user_machine_state(awaiting: Awaiting) -> MachineState:
 
 
 def user_record_payload(
-    kind: RecordKind, *, head: str = HEAD, route: str = HOST_TRANSCRIPT_ROUTE
+    kind: RecordKind,
+    *,
+    head: str = HEAD,
+    route: str = HOST_TRANSCRIPT_ROUTE,
+    target_block_binding: str | None = None,
 ) -> dict[str, object]:
-    """user-input recordの代表payload（対象headと入力経路だけ差し替える）。"""
+    """user-input recordの代表payload（対象head・入力経路・解除対象blockだけ差し替える）。"""
     payload = dict(REPRESENTATIVE[SchemaKind(kind.value)])
     head_source = PROJECTION_SPECS[kind].head_source
     assert head_source is not None
     payload[head_source] = head
     payload["input_route"] = route
+    if target_block_binding is not None:
+        payload["target_block_binding"] = target_block_binding
     return payload
 
 
@@ -464,20 +511,29 @@ def user_submit_payload(
     request_id: str,
     nonce: str,
     result_hash: str,
-    awaiting: Awaiting = Awaiting.USER_INPUT_GATE,
+    awaiting: Awaiting | None = Awaiting.USER_INPUT_GATE,
     result_kind: str | None = "GATE_QUESTION",
     run_id: str = RUN,
     head: str = HEAD,
+    block_binding: str | None = None,
 ) -> dict[str, object]:
+    """user-input submitの代表envelope。
+
+    待機の識別子は直和（ADR-0023）。`block_binding`を渡すとblock介入待ちのsubmitになり、
+    `awaiting`は載らない（schemaのcross-field ruleが一方だけを要求する）。
+    """
     payload: dict[str, object] = {
         "schema_version": 1,
         "run_id": run_id,
         "request_id": request_id,
-        "awaiting": awaiting.value,
         "expected_head_sha": head,
         "nonce": nonce,
         "result_hash": result_hash,
     }
+    if block_binding is not None:
+        payload["block_binding"] = block_binding
+    elif awaiting is not None:
+        payload["awaiting"] = awaiting.value
     if result_kind is not None:
         payload["result_kind"] = result_kind
     return payload
@@ -493,8 +549,10 @@ class UserEnv:
     context: GhContext
     repo: RepoRef
     policy: RetryPolicy
-    awaiting: Awaiting
+    # 待機の識別子は直和（ADR-0023）。blockの介入待ちはawaitingを持たない
+    awaiting: Awaiting | None
     records: tuple[VerifiedRecord, ...]
+    block: BlockContext | None = None
 
     def advance_kwargs(self, **overrides: object) -> dict[str, object]:
         values: dict[str, object] = {
@@ -541,7 +599,7 @@ class UserEnv:
             "records_port": GithubBackedRecords(
                 context=self.context, repo=self.repo, number=NUMBER, policy=self.policy
             ),
-            "event_port": FakeRecordEvents(),
+            "event_port": FakeRecordEvents(block=self.block),
             "policy": self.policy,
             "search_since": None,
             "search_attempts": 1,
@@ -552,10 +610,17 @@ class UserEnv:
         return values
 
     def evidence(self) -> tuple[VerifiedRecord, ...]:
-        """当該awaitingの根拠として許可されるrecordだけを渡す（registryが値域を決める）。"""
-        spec = user_spec_for(self.awaiting)
-        assert spec is not None
-        return tuple(record for record in self.records if record.kind in spec.evidence_kinds)
+        """当該待機の根拠として許可されるrecordだけを渡す（registryが値域を決める）。"""
+        if self.block is not None:
+            block_spec = block_spec_for(self.block)
+            # 介入を受け付けないblockには提示する根拠が無い（requestも出ない）
+            kinds = () if block_spec is None else block_spec.evidence_kinds
+        else:
+            assert self.awaiting is not None
+            spec = user_spec_for(self.awaiting)
+            assert spec is not None
+            kinds = spec.evidence_kinds
+        return tuple(record for record in self.records if record.kind in kinds)
 
     def comments(self) -> list[object]:
         entries = read_state(self.directory)["comments"]
@@ -566,22 +631,31 @@ class UserEnv:
 def user_env(
     tmp_path: Path,
     *,
-    awaiting: Awaiting = Awaiting.USER_INPUT_GATE,
+    awaiting: Awaiting | None = Awaiting.USER_INPUT_GATE,
     seeded: Sequence[RecordKind] = (RecordKind.FINAL_REPORT,),
     state: MachineState | None = None,
     extra: Mapping[str, object] | None = None,
     scenario: str = "ok",
     timeout_seconds: float = 30.0,
+    block: BlockContext | None = None,
 ) -> UserEnv:
-    """GitHubへseq=1..nを投稿済みにし、当該awaitingで待機するcheckpointを用意する。"""
+    """GitHubへseq=1..nを投稿済みにし、当該待機で止まっているcheckpointを用意する。
+
+    `block`を渡すと`BLOCKED`のrunになる（`awaiting`はNoneになり、識別子はblock binding）。
+    """
     directory = tmp_path / "gh"
     directory.mkdir(parents=True, exist_ok=True)
     posted = chain_comments_of(list(seeded))
     seed_state(directory, comments=[seed_dict(comment, issue=NUMBER) for comment in posted])
     paths = state_paths(tmp_path)
-    payload = with_machine_state(
-        checkpoint_payload(), state if state is not None else user_machine_state(awaiting)
-    )
+    if state is not None:
+        machine_state = state
+    elif block is not None:
+        machine_state = blocked_machine_state(block)
+    else:
+        assert awaiting is not None
+        machine_state = user_machine_state(awaiting)
+    payload = with_machine_state(checkpoint_payload(), machine_state)
     if awaiting is Awaiting.USER_INPUT_PERMISSION:
         payload["permission"] = dict(PERMISSION_SECTION)
     if extra is not None:
@@ -594,8 +668,9 @@ def user_env(
         context=make_context(directory, scenario=scenario, timeout_seconds=timeout_seconds),
         repo=RepoRef(owner="owner", name="repo"),
         policy=make_policy(),
-        awaiting=awaiting,
+        awaiting=None if block is not None else awaiting,
         records=verified_chain(list(seeded)).records,
+        block=block,
     )
 
 
@@ -702,6 +777,24 @@ def progress_block(continuation: str = "FIX_RESULT") -> ProgressBlock:
     )
 
 
+def limit_block() -> ProgressBlock:
+    """限度到達の膠着block。
+
+    出口は**limit引き上げ**（B-LR）であって介入ではない。C-01はこのblockで
+    `BLOCK_INTERVENTION`を受理しないため（P-22は`NO_PROGRESS`限定）、C-08は介入requestを
+    出さず`Blocked`のまま返す。
+    """
+    return ProgressBlock(
+        binding=OpaqueBinding("cr:run-1:1:limit"),
+        head=OpaqueRef(HEAD),
+        continuation=BLOCKED_CONTINUATIONS["FIX_RESULT"],
+        reason=Progress.LIMIT_REACHED,
+        budget=Budget.REVIEW_ROUND,
+        counter_snapshot=OpaqueSnapshot("snap-1"),
+        fingerprint=OpaqueFingerprint("fp-1"),
+    )
+
+
 def external_block() -> ExternalDependencyBlock:
     return ExternalDependencyBlock(
         binding=OpaqueBinding("cr:run-1:1:external"),
@@ -713,6 +806,11 @@ def external_block() -> ExternalDependencyBlock:
             ref=OpaqueRef("c-1"),
         ),
     )
+
+
+def blocked_machine_state(block: BlockContext) -> MachineState:
+    """当該blockで止まっている`BLOCKED`のMachineState（介入requestの起点）。"""
+    return MachineState(state=State.BLOCKED, block=block)
 
 
 def integrity_block(binding: str = "iv:gap:run-1:2") -> RecordIntegrityBlock:
@@ -754,6 +852,7 @@ __all__ = [
     "USER_AWAITING_STATES",
     "USER_SPEAKER",
     "UserEnv",
+    "blocked_machine_state",
     "cancelling",
     "external_block",
     "failure_payload",
@@ -763,6 +862,7 @@ __all__ = [
     "halt_kwargs",
     "halting_for_block",
     "integrity_block",
+    "limit_block",
     "job_object_ref",
     "machine_state",
     "permission_resume_payload",

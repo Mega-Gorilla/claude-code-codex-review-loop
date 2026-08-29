@@ -44,6 +44,7 @@ from claude_code_codex_review_loop.state import (
     save_checkpoint,
 )
 from claude_code_codex_review_loop.workflow import (
+    AwaitingInstance,
     AwaitUser,
     ConsumedIntent,
     EngineStopped,
@@ -270,8 +271,7 @@ class TestReissue:
         consumed = ConsumedIntent(
             intent_key=intent_key(
                 run_id=RUN,
-                awaiting=GATE,
-                since_seq=first.request.since_seq,
+                instance=AwaitingInstance(awaiting=GATE, since_seq=first.request.since_seq),
                 head_sha=HEAD,
                 kind=RecordKind.GATE_QUESTION,
             ),

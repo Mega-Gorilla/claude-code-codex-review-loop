@@ -64,7 +64,15 @@ from ..state import (
     save_checkpoint,
 )
 from ..transport.render import prepare_public_body
-from .actions import ActionSpec, spec_for_awaiting, spec_for_kind, user_spec_for
+from .actions import (
+    ActionSpec,
+    BlockRequestSpec,
+    block_binding_of,
+    block_spec_for,
+    spec_for_awaiting,
+    spec_for_kind,
+    user_spec_for,
+)
 from .checkpoint_view import (
     PendingAction,
     PendingUserRequest,
@@ -86,6 +94,7 @@ from .checkpoint_view import (
 from .ports import (
     ActionContext,
     ActionPayloadPort,
+    BlockRequestContext,
     EvidencePort,
     RecordBodyPort,
     RecordSourcePort,
@@ -481,6 +490,72 @@ def _describes_current_instance(
     )
 
 
+def _describes_current_block(request: PendingUserRequest, *, binding: str, head_sha: str) -> bool:
+    """未応答requestが**今のblock**を指しているか（ADR-0023 決定2）。
+
+    判定に`since_seq`を**使わない**。block attempt bindingがinstanceそのものであり、
+    chainが伸びただけで同じblockのrequestを作り直す理由は無いためである（blockへ入り直せば
+    bindingが変わり、この判定が自然に外れる）。
+    """
+    return request.block_binding == binding and request.expected_head_sha == head_sha
+
+
+def _await_intervention(
+    loaded: RunContext,
+    block: BlockContext,
+    spec: BlockRequestSpec,
+    *,
+    paths: StatePaths,
+    run_id: str,
+    repository: str,
+    number: int,
+    head_sha: str,
+    chain: ChainVerification,
+    evidence_port: EvidencePort,
+    id_source: Callable[[], str],
+    issued_at: str,
+) -> AdvanceOutcome:
+    """`BLOCKED`での介入requestを返す（**同じblockの**未応答があれば再提示する）。
+
+    C-01は`BLOCK_INTERVENTION`のcanonical検証だけを膠着 / 外部依存blockの出口として受理する
+    （P-22 / P-23 -> B-IV1 / B-IV2）。この経路はそのrecordを作るためのユーザー入力を運ぶ。
+    """
+    binding = block_binding_of(block)
+    if binding is None:  # pragma: no cover - `block_spec_for`が通したblockは必ずbindingを持つ
+        return EngineStopped("block_binding_missing", "介入対象のblockがattempt bindingを持たない")
+    section = read_user_section(loaded.payload)
+    if isinstance(section, SectionUnavailable):
+        return EngineStopped("user_request_unavailable", section.detail)
+    pending = section.pending
+    if pending is not None and _describes_current_block(pending, binding=binding, head_sha=head_sha):
+        return reissue_user_request(loaded, pending)
+    context = BlockRequestContext(
+        block=block,
+        block_binding=binding,
+        run_id=run_id,
+        repository=repository,
+        number=number,
+        head_sha=head_sha,
+    )
+    evidence = _evidence_of(spec.evidence_kinds, spec.kind, evidence_port, context)
+    if isinstance(evidence, EngineStopped):
+        return evidence
+    return issue_user_request(
+        loaded,
+        spec,
+        paths=paths,
+        run_id=run_id,
+        repository=repository,
+        number=number,
+        head_sha=head_sha,
+        since_seq=chain.max_seq,
+        evidence=evidence,
+        id_source=id_source,
+        issued_at=issued_at,
+        block_binding=binding,
+    )
+
+
 def _await_user(
     loaded: RunContext,
     awaiting: Awaiting,
@@ -569,8 +644,32 @@ def advance(
         return _procedure_outcome(procedure, machine_state)
     if machine_state.pending_record is not None:
         return PersistRequired(record=machine_state.pending_record)
-    if machine_state.block is not None:
-        return Blocked(block=machine_state.block)
+    block = machine_state.block
+    if block is not None:
+        # 介入を受け付けないblock（`LIMIT_REACHED`の膠着 / `RECORD_INTEGRITY`）は、状態を
+        # 報告するだけで新しいturnを起こさない。出口はC-08の外にある（ADR-0019 決定19）
+        block_spec = block_spec_for(block)
+        if block_spec is None:
+            return Blocked(block=block)
+        # 介入requestは**ユーザーへ判断を求める**turnなので、`AWAIT_USER`と同じく先にchainを
+        # 検証する。壊れたchainの上で判断を求めない（ADR-0018 決定13）
+        block_chain = _chain_gate(records_port, run_id)
+        if isinstance(block_chain, EngineStopped):
+            return block_chain
+        return _await_intervention(
+            loaded,
+            block,
+            block_spec,
+            paths=paths,
+            run_id=run_id,
+            repository=repository,
+            number=number,
+            head_sha=head_sha,
+            chain=block_chain,
+            evidence_port=evidence_port,
+            id_source=id_source,
+            issued_at=issued_at,
+        )
     # ここから先はhostまたはユーザーへ次のturnを起こす経路である。**その前にchainを検証する**
     # （`verify_record_chain`はviolationがあってもrecordsを返すため、consumerが確かめる）。
     # 上の早期returnはchainを読まない: `persist`は自分で同じ検査を行い、`Blocked`と終端は

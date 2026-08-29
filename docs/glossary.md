@@ -67,6 +67,7 @@
 | 停止の昇格 | 2回目のCtrl+Cでgrace待機を打ち切り即時forceへ移ること（AC-C03-02）。C-03は停止primitiveだけを持ち、graceful要求とforce要求の競合の最終確定はC-08が行う。実体は`stop_tree_by_ref`をgrace 0で呼び直すこと（ADR-0005 決定6、ADR-0021） |
 | headless adapter | 対話型sessionが無い復旧経路のClaude coderを、Controllerがsubprocessとして起動する`HostPort`実装。engineから見たinterfaceが主経路と同一であることが、active / headlessの同値性（AC-C08-04）を構造で担保する（ADR-0022） |
 | host log | headless hostのstderrを`policy.redaction`へ通した`host.log`。CIのartifactが集めるのはこれだけで、redact前の`host.stderr`と`host.stdout`（submit envelope）は収集しない（ADR-0022） |
+| block intervention request | `BLOCKED`のrunへユーザーの介入を求める`AWAIT_USER` request。待機の識別子は`awaiting`ではなく解除対象の**block attempt binding**で、C-01が`BLOCK_INTERVENTION`を受理するblock（`NO_PROGRESS`の膠着・外部依存）でだけ発行する（ADR-0023） |
 | resume context | resumeがGitHubとlocal cacheの照合から組み立てる再開の判断材料（run選択・turn同一性・pending record・head binding・承認の有無・直接回答候補）。`MachineState`の完全replayではない |
 | advertised head | PRが現在advertiseしているhead SHA。C-05のPR metadata primitiveで観測し、承認のbind先と一致するかがAC-C07-03の判定になる。隔離checkout側の照合はC-09 |
 | pending reissue directive | 中断したrecordを**同一key・同一本文**で再発行するための指示（binding・完成形本文・body hash）。C-07は投稿せず、実行はC-01のR-P経由でC-08が行う |

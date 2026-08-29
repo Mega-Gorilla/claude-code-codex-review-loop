@@ -90,9 +90,16 @@ def _advance_payload(outcome: object) -> dict[str, object]:
             "reissued": outcome.reissued,
         }
     if isinstance(outcome, AwaitUser):
+        # 待機の識別子は直和（ADR-0023）。`BLOCKED`での介入待ちはawaitingを持たず、
+        # 解除対象のblock bindingが識別子になる
+        wait: dict[str, object] = (
+            {"block_binding": outcome.request.block_binding}
+            if outcome.awaiting is None
+            else {"awaiting": outcome.awaiting.value}
+        )
         return {
             "outcome": "AWAIT_USER",
-            "awaiting": outcome.awaiting.value,
+            **wait,
             "request_id": outcome.request.request_id,
             "envelope_path": str(outcome.envelope_path),
             "result_path": str(outcome.result_path),

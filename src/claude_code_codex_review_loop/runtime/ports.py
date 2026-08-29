@@ -46,11 +46,12 @@ from ..workflow import (
     RecordEventPort,
     RecordSourcePort,
     RequestContext,
+    block_spec_for,
     build_event,
     spec_for,
     user_spec_for,
 )
-from ..workflow.ports import ActionContext
+from ..workflow.ports import ActionContext, BlockRequestContext
 from .config import SessionConfig
 
 
@@ -132,6 +133,11 @@ def _evidence_kinds(context: RequestContext) -> tuple[RecordKind, ...]:
     """当該actionまたはuser requestが根拠として許可するrecord種別（registryが正本）。"""
     if isinstance(context, ActionContext):
         return spec_for(context.action).evidence_kinds
+    if isinstance(context, BlockRequestContext):
+        block_spec = block_spec_for(context.block)
+        if block_spec is None:  # pragma: no cover - engineは介入可能なblockでのみ文脈を作る
+            raise PortUnavailableError("このblockは介入recordを受理しない")
+        return block_spec.evidence_kinds
     spec = user_spec_for(context.awaiting)
     if spec is None:  # pragma: no cover - `UserRequestContext`は3値のawaitingでのみ作られる
         raise PortUnavailableError(f"{context.awaiting.value}はユーザー入力待ちではない")

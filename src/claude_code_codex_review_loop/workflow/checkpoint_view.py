@@ -656,17 +656,28 @@ def next_attempt(action: PendingAction, *, action_id: str, nonce: str, result_pa
 
 @dataclass(frozen=True)
 class PendingUserRequest:
-    """未完了の`AWAIT_USER` request（1 request = 1 nonce = 1 応答）。"""
+    """未完了のユーザー入力request（1 request = 1 nonce = 1 応答）。
+
+    待機の識別子は**直和**である（ADR-0023 決定1）。`AWAIT_USER`はC-01の`awaiting`で識別し、
+    `BLOCKED`での介入待ちは解除対象の**block attempt binding**で識別する。どちらか一方だけが
+    値を持ち、両方・どちらも無しは読み手がfail closeする。
+    """
 
     request_id: str
-    awaiting: Awaiting
+    awaiting: Awaiting | None
     nonce: str
     expected_head_sha: str
     result_path: str
     envelope_path: str
     envelope_hash: str
     since_seq: int
+    block_binding: str | None = None
     issued_at: str | None = None
+
+    @property
+    def waits_for_block(self) -> bool:
+        """block介入待ちか（`awaiting`との排他は構築時と読み出しで保証される）。"""
+        return self.block_binding is not None
 
 
 @dataclass(frozen=True)
@@ -728,7 +739,6 @@ def _texts(
 
 _PENDING_USER_KEYS = (
     "request_id",
-    "awaiting",
     "nonce",
     "expected_head_sha",
     "result_path",
@@ -750,13 +760,22 @@ def read_user_request(
     since = entry.get("since_seq")
     if isinstance(since, bool) or not isinstance(since, int) or since < 0:
         return SectionUnavailable(detail="user_request.pendingのsince_seqが0以上の整数でない")
+    awaiting_value = _text(entry, "awaiting")
+    block_binding = _text(entry, "block_binding")
+    # 待機の識別子は排他。どちらも無い / 両方あるpendingは何を待っているかが決まらないので、
+    # **推測せずfail closeする**（ADR-0023 決定1）
+    if (awaiting_value is None) == (block_binding is None):
+        return SectionUnavailable(
+            detail="user_request.pendingはawaitingとblock_bindingのどちらか一方だけを持つ"
+        )
     try:
-        awaiting = Awaiting(values["awaiting"])
+        awaiting = None if awaiting_value is None else Awaiting(awaiting_value)
     except ValueError:  # pragma: no cover - schemaのenumが値域を限定している
         return SectionUnavailable(detail="user_request.pendingに未知のawaiting")
     return PendingUserRequest(
         request_id=values["request_id"],
         awaiting=awaiting,
+        block_binding=block_binding,
         nonce=values["nonce"],
         expected_head_sha=values["expected_head_sha"],
         result_path=values["result_path"],
@@ -867,7 +886,6 @@ def with_user_request(
     """
     pending: dict[str, object] = {
         "request_id": request.request_id,
-        "awaiting": request.awaiting.value,
         "nonce": request.nonce,
         "expected_head_sha": request.expected_head_sha,
         "result_path": request.result_path,
@@ -875,6 +893,11 @@ def with_user_request(
         "envelope_hash": request.envelope_hash,
         "since_seq": request.since_seq,
     }
+    # 待機の識別子は排他（dataclassが一方だけを持つ）
+    if request.awaiting is not None:
+        pending["awaiting"] = request.awaiting.value
+    if request.block_binding is not None:
+        pending["block_binding"] = request.block_binding
     if request.issued_at is not None:
         pending["issued_at"] = request.issued_at
     return _with_user_section(payload, {"pending": pending})
