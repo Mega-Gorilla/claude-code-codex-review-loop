@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from ..identity.errors import IdentityError
+from ..identity.fs_permissions import replace_private_text
 from ..policy.permission_profile import ensure_argv_allowed
 from ..policy.redaction import redact
 from ..process import Completed, ProcessError, SpawnSpec, TreeHandle, spawn_tree, stop_tree
@@ -98,7 +100,11 @@ class HeadlessHost:
             raise HeadlessError(f"headless hostがtimeoutした（{self.timeout_seconds}秒）")
         if completed.exit_code != 0:
             raise HeadlessError(f"headless hostが異常終了した（exit={completed.exit_code}）")
-        return _read_submit(directory / STDOUT_FILE)
+        # submit envelopeを先に確かめる。何も出力しなかった子へ「result fileが無い」と
+        # 報告しても、実際に起きたこと（結果を返していない）が伝わらない
+        raw = _read_submit(directory / STDOUT_FILE)
+        _harden_result(work.result_path)
+        return raw
 
     def _run(self, handle: TreeHandle) -> Completed | None:
         """台帳へ登録してから待つ（登録が待機より先。ADR-0019 決定10）。timeoutはNone。"""
@@ -128,13 +134,18 @@ class HeadlessHost:
         save_checkpoint(path, updated)
 
     def _write_log(self, directory: Path) -> None:
-        """stderrをredactして`host.log`へ書く（rawは残すが収集対象にしない）。"""
+        """stderrをredactして`host.log`へ書く（rawは残すが収集対象にしない）。
+
+        **作成者限定で書く**。`host.log`はCIのartifactが集めるfileで、private repositoryの
+        内容が写り込み得る（AC-C06-05 / P-009）。C-03はredirect先を0o600で開くので、raw側は
+        既に作成者限定である。
+        """
         raw = directory / STDERR_FILE
         try:
             text = raw.read_text(encoding="utf-8", errors="replace")
         except OSError:  # pragma: no cover - 直前にredirect先として作成したfile
             return
-        (directory / LOG_FILE).write_text(redact(text).text, encoding="utf-8")
+        replace_private_text(directory / LOG_FILE, redact(text).text)
 
 
 def _stop_timed_out(handle: TreeHandle, grace_seconds: float) -> None:
@@ -143,6 +154,30 @@ def _stop_timed_out(handle: TreeHandle, grace_seconds: float) -> None:
         stop_tree(handle, grace_seconds)
     except ProcessError:  # pragma: no cover - closeが強制停止を引き受ける
         pass
+
+
+def _harden_result(path: Path) -> None:
+    """子が書いたresult fileを**作成者限定へ揃える**。
+
+    result fileにはprivate repositoryのdiffとreview内容が入り得るため、engineは作成者限定で
+    あることを検証してから読む（`read_result` -> `verify_private_file`。AC-C06-05）。子は
+    外部programで自分のumaskで書く（POSIXの既定は`0o644`）ので、**境界であるadapterが揃える**。
+
+    内容はbytesとして読み直してから書き戻す。`result_hash`は子が同じbytesで計算しており、
+    text経由の改行変換で1 byteでも変わるとhash照合が落ちる。
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise HeadlessError(f"result fileを読めない: {error}") from error
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise HeadlessError(f"result fileがUTF-8でない: {error}") from error
+    try:
+        replace_private_text(path, text)
+    except IdentityError as error:
+        raise HeadlessError(f"result fileを作成者限定にできない: {error}") from error
 
 
 def _read_submit(path: Path) -> bytes:

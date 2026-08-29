@@ -37,6 +37,10 @@ PR-3b1（#45）でruntimeとentry pointが、PR-3b2（#46）で緊急停止の�
 12. stdoutは**submit envelope**である。`host.stdout`へ受け、adapterが読んでbytesで返す。読む前にsizeを検査する（entry pointの`MAX_SUBMIT_BYTES`と同じ理由・同じ値）。
 13. stderrは**log**である。`host.stderr`（raw）へ受け、子の終了後に`policy.redaction.redact`を通して`host.log`へ書く。redaction moduleは「C-08のlog」を消費者として名指ししており、その実装地点である。
 14. **CIのartifactが集めるのは`host.log`だけ**。`host.stdout` / `host.stderr`は`result.json`と同じ扱いで収集しない（file名のallowlistとcontract testで固定。ADR-0020 決定30-a / 30-c）。これでADR-0021 決定26が本PRへ割り当てた「redact済みlog」が入り、**残るのはcanonical recordのlocal artifactだけ**（C-09以降）になる。
+14-a. **子が書いたresult fileはadapterが作成者限定へ揃える**。engineはresult fileが作成者限定であることを検証してから読む（`read_result` -> `verify_private_file`。AC-C06-05: artifactにはprivate repositoryのdiffとreview内容が入る）。子は外部programで自分のumaskで書くため、POSIXでは既定`0o644`になり、**揃えないとheadless経路はPOSIXで一切通らない**。外部programと私有state directoryの境界はadapterなので、ここが責務である。
+14-b. 揃えるときは**bytesとして読み直してから書き戻す**。`result_hash`は子が同じbytesで計算しており、text経由の改行変換で1 byteでも変わるとhash照合が落ちる。UTF-8でない出力は構造化して落とす。
+14-c. 揃えられない場合（読めない・UTF-8でない・権限を付け替えられない）は**推測せず`HeadlessError`へ写す**。決定15と同じ扱いで、engineの検証まで持ち越さない。
+14-d. `host.log`も**作成者限定で書く**。CIのartifactが集めるfileで、private repositoryの内容が写り込み得る。C-03はredirect先を`0o600`で開くので`host.stdout` / `host.stderr`は既に作成者限定である。
 15. **例外を呼び出し側へ飛ばさない**。起動失敗・timeout・非0 exit・出力不正はすべて`HeadlessError`へ写す。`HostPort.execute`はbytesを返す契約なので、失敗は例外で明示するしかないが、**種類は1つに絞って理由をdetailへ入れる**。
 
 ### AC-C08-02のcontract testを絞る
@@ -61,4 +65,5 @@ PR-3b1（#45）でruntimeとentry pointが、PR-3b2（#46）で緊急停止の�
 - **CI artifactは3/4種になった**。checkpoint / envelope / redact済みlogを集め、canonical recordのlocal artifactだけがC-09以降に残る
 - **主経路は変わっていない**。active hostは`HostPort`を実装せず、Controllerがsubprocess化することもない（AC-C08-02）。同値性testはその対比として、active側のspawn回数が0であることも観測する
 - spawn直後から台帳登録までの窓は残る（決定10）。閉じるにはC-03がrefを予約する仕組みが要り、C-03の責務範囲を広げる判断になるため本PRでは行わない
+- **子の出力の権限はadapterが引き受ける**（決定14-a）。C-09がCodex reviewerを起動するときも同じ問題が出るので、同じ手順を踏むことになる
 - `HeadlessError`は`HostPort.execute`の契約上の例外である。`drive`はこれを捕まえないので、呼び出し側（C-12）がheadless経路の失敗をどう扱うかはそのPhaseで決める

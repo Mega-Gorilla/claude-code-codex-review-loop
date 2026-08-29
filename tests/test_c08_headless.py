@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -18,6 +19,10 @@ from c08_support.helpers import job_object_ref, user_machine_state
 from c08_support.runtime import ISSUED_AT, FakeIds, RuntimeEnv, runtime_env
 
 from claude_code_codex_review_loop.domain.values import Awaiting, RecordKind
+from claude_code_codex_review_loop.identity.fs_permissions import (
+    FsPermissionError,
+    verify_private_file,
+)
 from claude_code_codex_review_loop.policy.permission_profile import ForbiddenFlagError
 from claude_code_codex_review_loop.runtime import HeadlessError, HeadlessHost, step, submit_result
 from claude_code_codex_review_loop.runtime.host_headless import LOG_FILE, STDERR_FILE, STDOUT_FILE
@@ -40,6 +45,29 @@ from claude_code_codex_review_loop.workflow import (
 ACCEPTED_AT = "2026-08-26T09:05:00Z"
 # 例示用のtoken（実物ではない。redactが効くことを見るためだけの文字列）
 FAKE_TOKEN = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+
+
+# UTF-8でないresultを書く子（bytesとして読み直していることの観測点）
+_BINARY_HOST = "\n".join(
+    (
+        "import json, os, sys",
+        "envelope = json.load(open(sys.argv[1], encoding='utf-8'))",
+        "target = os.path.join(",
+        "    os.path.dirname(sys.argv[1]), os.path.basename(envelope['result_path'])",
+        ")",
+        "open(target, 'wb').write(bytes([0xff, 0xfe]))",
+        "sys.stdout.write(json.dumps({'ok': True}))",
+    )
+)
+
+
+# resultを書かずにstdoutだけ返す子（result fileが無い経路の観測点）
+_NO_RESULT_HOST = "\n".join(
+    (
+        "import json, sys",
+        "sys.stdout.write(json.dumps({'ok': True}))",
+    )
+)
 
 
 def _env(tmp_path: Path, **extra: object) -> RuntimeEnv:
@@ -249,6 +277,71 @@ class TestProcessLedger:
             host.execute(work)
 
 
+class TestResultPermissions:
+    """子は外部programで、自分のumaskでresult fileを書く（POSIXの既定は`0o644`）。
+
+    engineはresult fileが作成者限定であることを検証してから読む（AC-C06-05）ので、
+    **境界であるadapterが揃えないとheadless経路はPOSIXで一切通らない**。
+    """
+
+    def test_the_result_file_is_creator_only(self, tmp_path: Path) -> None:
+        env = _env(tmp_path)
+        work = _issue(env)
+        _host(env, tmp_path).execute(work)
+        verify_private_file(work.result_path)
+
+    def test_the_content_survives_the_hardening(self, tmp_path: Path) -> None:
+        """`result_hash`は子が同じbytesで計算している。1 byteでも変えると照合が落ちる。"""
+        env = _env(tmp_path)
+        work = _issue(env)
+        host = _host(env, tmp_path)
+        raw = host.execute(work)
+        digest = hashlib.sha256(work.result_path.read_bytes()).hexdigest()
+        assert json.loads(raw)["result_hash"] == digest
+
+    def test_a_missing_result_is_reported(self, tmp_path: Path) -> None:
+        """submit envelopeを返したのにresult fileが無い場合も構造化する。"""
+        env = _env(tmp_path)
+        work = _issue(env)
+        script = tmp_path / "no_result_host.py"
+        script.write_text(_NO_RESULT_HOST, encoding="utf-8")
+        host = _host(env, tmp_path, command=(sys.executable, str(script)))
+        with pytest.raises(HeadlessError, match="result fileを読めない"):
+            host.execute(work)
+
+    def test_a_failed_hardening_is_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """権限を揃えられない場合も推測しない（例外を呼び出し側へ飛ばさない）。"""
+        from claude_code_codex_review_loop.runtime import host_headless
+
+        env = _env(tmp_path)
+        work = _issue(env)
+
+        real = host_headless.replace_private_text
+
+        def _refuse(path: Path, text: str) -> None:
+            # `host.log`側は通す（落とすのはresult fileの権限だけ）
+            if path.name == LOG_FILE:
+                real(path, text)
+                return
+            raise FsPermissionError("verify", "揃えられない")
+
+        monkeypatch.setattr(host_headless, "replace_private_text", _refuse)
+        with pytest.raises(HeadlessError, match="作成者限定にできない"):
+            _host(env, tmp_path).execute(work)
+
+    def test_a_non_utf8_result_is_reported(self, tmp_path: Path) -> None:
+        """bytesとして読み直すので、UTF-8でない出力は構造化して落とす。"""
+        env = _env(tmp_path)
+        work = _issue(env)
+        script = tmp_path / "binary_host.py"
+        script.write_text(_BINARY_HOST, encoding="utf-8")
+        host = _host(env, tmp_path, command=(sys.executable, str(script)))
+        with pytest.raises(HeadlessError, match="UTF-8"):
+            host.execute(work)
+
+
 class TestTimeout:
     def test_a_hanging_host_times_out_and_leaves_no_tree(self, tmp_path: Path) -> None:
         """AC-C03-01: timeout経路でもtreeを残さず、台帳も空へ戻す。"""
@@ -290,6 +383,13 @@ class TestLog:
         assert "[REDACTED:" in log
         # rawは残る（収集対象ではない。artifact contract testが固定する）
         assert FAKE_TOKEN in (directory / STDERR_FILE).read_text(encoding="utf-8")
+
+    def test_the_log_is_creator_only(self, tmp_path: Path) -> None:
+        """`host.log`はCIのartifactが集めるfileなので作成者限定で書く（AC-C06-05 / P-009）。"""
+        env = _env(tmp_path)
+        work = _issue(env)
+        _host(env, tmp_path).execute(work)
+        verify_private_file(work.envelope_path.parent / LOG_FILE)
 
     def test_the_streams_are_separate_files(self, tmp_path: Path) -> None:
         """stdoutはデータ、stderrはlog。混ぜるとsubmit envelopeが壊れる。"""
