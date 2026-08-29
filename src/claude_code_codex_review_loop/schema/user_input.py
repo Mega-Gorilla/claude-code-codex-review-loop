@@ -7,6 +7,11 @@ target experienceの5.5（merge gate interaction）、ADR-0018。
 `HOST_ACTION`用の`SUBMIT` v2は**変更しない**。ユーザー入力は同じsubmit操作の別variantとして
 `USER_SUBMIT`で戻す（envelopeの判別はC-08が`action_id` / `request_id`の排他で行う）。
 
+**待機の識別子は直和である**（ADR-0023）。`AWAIT_USER`の待機は`awaiting`（C-01が何の入力を
+待っているか）で識別するが、`BLOCKED`での介入待ちに`awaiting`は無く、識別子は**block attempt
+binding**である。そこで`awaiting`と`block_binding`を排他のdiscriminatorとして持ち、
+**どちらか一方だけ**を要求する（両方・どちらも無しはfail closed）。
+
 **intent語彙を新設しない**。merge gateの4 intentは`schema/merge.py`の`MERGE_INTENTS`として、
 判断回答は`USER_DECISION`として既に存在する。ここが持つのは搬送路の形だけで、hostが返す
 結果payloadは**既存のrecord schemaをそのまま再利用**する（ADR-0014 決定4と同じ規則）。
@@ -51,6 +56,22 @@ GITHUB_COMMENT_ROUTE: Final = "github_comment"
 INPUT_ROUTES: Final = (GITHUB_COMMENT_ROUTE, HOST_TRANSCRIPT_ROUTE)
 
 
+def _rule_exactly_one_wait(data: dict[str, object]) -> list[PublicError]:
+    """待機の識別子は`awaiting`か`block_binding`の**どちらか一方**だけ（ADR-0023 決定1）。
+
+    `AWAIT_USER`はC-01のawaitingで、`BLOCKED`での介入待ちはblock attempt bindingで識別する。
+    両方あるenvelopeはどちらの待機を指すのか決まらず、どちらも無いenvelopeは何の待機かが
+    決まらない。どちらも**推測せずに拒否する**。
+
+    `awaiting`をoptionalへ緩めた分は、このruleが構造で締める。
+    """
+    has_awaiting = "awaiting" in data
+    has_block = "block_binding" in data
+    if has_awaiting == has_block:
+        return [PublicError("cross_field", "awaiting")]
+    return []
+
+
 USER_REQUEST = SchemaDefinition(
     kind=SchemaKind.USER_REQUEST,
     versions={
@@ -63,7 +84,10 @@ USER_REQUEST = SchemaDefinition(
                 "repository": text(),
                 "number": integer(),
                 "expected_head_sha": sha(),
-                "awaiting": enum_field(_AWAITING_VALUES),
+                # 待機の識別子（排他。`_rule_exactly_one_wait`が一方だけを要求する）
+                "awaiting": enum_field(_AWAITING_VALUES, required=False),
+                # `BLOCKED`での介入待ちの識別子: 解除対象のblock attempt binding
+                "block_binding": opaque(required=False),
                 # submitを一度だけconsumeするone-time nonce
                 "nonce": opaque(),
                 # Controllerがrun directory内へ払い出す結果path（任意pathを受理しない）
@@ -76,6 +100,7 @@ USER_REQUEST = SchemaDefinition(
                 # 判断の根拠として同梱する検証済みrecord（AC-C08-07と同型）
                 "verified_records": array(obj({"comment_id": opaque(), "head_sha": sha()})),
             },
+            rules=(_rule_exactly_one_wait,),
         )
     },
 )
@@ -104,7 +129,9 @@ USER_SUBMIT = SchemaDefinition(
                 # `USER_REQUEST`のbinding echo（一致しないsubmitはC-08が拒否する）
                 "run_id": opaque(),
                 "request_id": opaque(),
-                "awaiting": enum_field(_AWAITING_VALUES),
+                # 待機の識別子（`USER_REQUEST`と同じ排他。echoして一致を照合する）
+                "awaiting": enum_field(_AWAITING_VALUES, required=False),
+                "block_binding": opaque(required=False),
                 "expected_head_sha": sha(),
                 "nonce": opaque(),
                 # 結果はControllerが払い出したrun directory内のfileで受け渡し、hashで照合する
@@ -112,7 +139,7 @@ USER_SUBMIT = SchemaDefinition(
                 # 作るrecordの種別。不在はpermission resume（recordを作らない）を意味する
                 "result_kind": enum_field(_USER_RECORD_KINDS, required=False),
             },
-            rules=(_rule_result_kind_or_permission,),
+            rules=(_rule_exactly_one_wait, _rule_result_kind_or_permission),
         )
     },
 )

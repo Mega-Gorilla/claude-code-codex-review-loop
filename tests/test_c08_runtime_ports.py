@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from c06_support.helpers import HEAD
 from c07_support.helpers import NUMBER, REPOSITORY, RUN, verified_chain
-from c08_support.helpers import user_record_payload
+from c08_support.helpers import external_block, user_record_payload
 from c08_support.runtime import runtime_env
 
 from claude_code_codex_review_loop.domain.commands import HostAction
@@ -32,7 +32,11 @@ from claude_code_codex_review_loop.runtime import (
     UnavailableActionPayload,
     UserInputBody,
 )
-from claude_code_codex_review_loop.workflow.ports import ActionContext, UserRequestContext
+from claude_code_codex_review_loop.workflow.ports import (
+    ActionContext,
+    BlockRequestContext,
+    UserRequestContext,
+)
 
 
 class _StaticRecords:
@@ -113,6 +117,21 @@ class TestChainEvidence:
         chain = verified_chain([RecordKind.FINAL_REPORT])
         port = ChainEvidence(records=_StaticRecords(chain))
         assert port.evidence_for(_gate_context(head="b" * 40)) == ()
+
+    def test_block_kinds_come_from_the_block_spec(self) -> None:
+        """介入requestの根拠も同じ規則で選ぶ（registryが値域を決める。ADR-0023）。"""
+        chain = verified_chain([RecordKind.EXTERNAL_DEPENDENCY, RecordKind.FINAL_REPORT])
+        port = ChainEvidence(records=_StaticRecords(chain))
+        context = BlockRequestContext(
+            block=external_block(),
+            block_binding="cr:run-1:1:external",
+            run_id=RUN,
+            repository=REPOSITORY,
+            number=NUMBER,
+            head_sha=HEAD,
+        )
+        selected = port.evidence_for(context)
+        assert [record.kind for record in selected] == [RecordKind.EXTERNAL_DEPENDENCY]
 
     def test_selection_is_seq_ascending(self) -> None:
         chain = verified_chain([RecordKind.FINAL_REPORT, RecordKind.FINAL_REPORT])

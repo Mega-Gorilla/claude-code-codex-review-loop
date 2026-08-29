@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from c08_support.helpers import integrity_block, limit_block, progress_block
 
 from claude_code_codex_review_loop.domain import events as ev
 from claude_code_codex_review_loop.domain._ruledefs import AWAITING_COMMANDS
@@ -29,11 +30,14 @@ from claude_code_codex_review_loop.schema.action import HOST_ACTION_KINDS, HOST_
 from claude_code_codex_review_loop.schema.projection import PROJECTION_SPECS
 from claude_code_codex_review_loop.workflow import (
     ACTION_SPECS,
+    BLOCK_REQUEST_SPECS,
     RESULT_VARIANTS,
     USER_REQUEST_SPECS,
     ActionRegistryError,
     ActionSpec,
     ResultVariant,
+    block_binding_of,
+    block_spec_for,
     build_event,
     spec_for,
     spec_for_kind,
@@ -115,7 +119,85 @@ class TestResultVariantsMatchC01:
         """使われないvariantを残さない（registryの語彙を実態と一致させる）。"""
         used = {kind for spec in ACTION_SPECS.values() for kind in spec.result_kinds}
         used |= {kind for spec in USER_REQUEST_SPECS.values() for kind in spec.result_kinds}
+        used |= {kind for spec in BLOCK_REQUEST_SPECS for kind in spec.result_kinds}
         assert set(RESULT_VARIANTS) == used
+
+
+def _variant_id(variant: ResultVariant) -> str:
+    return variant.record_kind.value
+
+
+# `RecordEvidence`からeventを組み立てるvariant（1対1のcontractが成り立つ範囲）。
+# port_mappedなvariantはeventの受け取る形そのものが違うため、別のcontractで固定する
+_EVIDENCE_VARIANTS = [variant for variant in RESULT_VARIANTS.values() if not variant.port_mapped]
+
+
+class TestBlockRequestSpecsMatchC01:
+    """介入requestを出すblockはC-01が決める（ADR-0023 決定7）。"""
+
+    def test_the_specs_cover_the_c01_intervention_rules(self) -> None:
+        """P-22（`NO_PROGRESS`の膠着）とP-23（外部依存）の2つだけである。"""
+        rules = [
+            rule
+            for rule in PRODUCED_RULES
+            if RecordKind.BLOCK_INTERVENTION in (rule.match.record_kinds or frozenset())
+        ]
+        assert {rule.rule_id for rule in rules} == {"P-22", "P-23"}
+        declared = {spec.block_kind for spec in BLOCK_REQUEST_SPECS}
+        assert declared == {kind for rule in rules for kind in (rule.match.block_kinds or ())}
+
+    def test_the_progress_spec_is_limited_to_no_progress(self) -> None:
+        """P-22はreasonまで一致しないと受理しない。limit到達の出口はlimit引き上げである。"""
+        assert block_spec_for(progress_block()) is not None
+        assert block_spec_for(limit_block()) is None
+
+    def test_record_integrity_never_opens_the_transport(self) -> None:
+        """出口は復元 / salvage専用evidenceで、fail closedのままにする。"""
+        assert block_spec_for(integrity_block()) is None
+        # attempt bindingを持たないので、requestの識別子も作れない
+        assert block_binding_of(integrity_block()) is None
+
+    def test_the_offered_kinds_are_the_ones_c01_accepts(self) -> None:
+        """`USER_CANCEL`はP-21（awaiting不問・非terminal全state）が`BLOCKED`を覆うため。"""
+        for spec in BLOCK_REQUEST_SPECS:
+            assert set(spec.result_kinds) == {
+                RecordKind.BLOCK_INTERVENTION,
+                RecordKind.USER_CANCEL,
+            }
+
+    def test_a_kind_outside_the_spec_has_no_variant(self) -> None:
+        """blockが受理しない種別の契約は引けない（提示していない結果を受け取らない）。"""
+        spec = block_spec_for(progress_block())
+        assert spec is not None
+        assert spec.variant_for(RecordKind.MERGE_APPROVAL) is None
+        assert spec.variant_for(RecordKind.BLOCK_INTERVENTION) is not None
+
+
+class TestPortMappedVariants:
+    """evidenceだけでは組み立てられないevent（ADR-0023 決定7）。
+
+    `extra_event_inputs`は「C-08が作らない**値**」を宣言するが、こちらはevidenceの
+    **形そのもの**が違う場合である。`BlockResolvedIntervention`が受け取るのは
+    `BlockResolutionEvidence`（解除対象binding / head / record）であって`RecordEvidence`
+    ではないため、registryは推測で埋めずに写像をportへ委ねる（ADR-0017 決定2）。
+    """
+
+    def test_only_block_intervention_is_port_mapped(self) -> None:
+        mapped = {kind for kind, variant in RESULT_VARIANTS.items() if variant.port_mapped}
+        assert mapped == {RecordKind.BLOCK_INTERVENTION}
+
+    def test_build_event_refuses_a_port_mapped_variant(self) -> None:
+        """**推測で埋めない**。呼び出し側がportを使うべきことをerrorで示す。"""
+        variant = RESULT_VARIANTS[RecordKind.BLOCK_INTERVENTION]
+        evidence = RecordEvidence(
+            RecordKind.BLOCK_INTERVENTION, OpaqueBinding("bi-1"), OpaqueRef("c-1")
+        )
+        with pytest.raises(ActionRegistryError, match="RecordEvidenceだけでは構築できない"):
+            build_event(variant, evidence, {})
+
+    def test_the_event_is_the_c01_resolution_event(self) -> None:
+        """写像先はC-01のblock解消event（B-IV1 / B-IV2の入口）。"""
+        assert RESULT_VARIANTS[RecordKind.BLOCK_INTERVENTION].event is ev.BlockResolvedIntervention
 
 
 class TestResultAndEvent:
@@ -132,16 +214,12 @@ class TestResultAndEvent:
     def test_result_schema_matches_the_record_kind(self, variant: ResultVariant) -> None:
         assert variant.result_schema.value == variant.record_kind.value
 
-    @pytest.mark.parametrize(
-        "variant", list(RESULT_VARIANTS.values()), ids=lambda variant: variant.record_kind.value
-    )
+    @pytest.mark.parametrize("variant", _EVIDENCE_VARIANTS, ids=_variant_id)
     def test_event_expects_the_same_record_kind(self, variant: ResultVariant) -> None:
         """record kindとeventは1対1（値によるdiscriminationを持ち込まない）。"""
         assert variant.event.EXPECTED_KIND is variant.record_kind  # type: ignore[attr-defined]
 
-    @pytest.mark.parametrize(
-        "variant", list(RESULT_VARIANTS.values()), ids=lambda variant: variant.record_kind.value
-    )
+    @pytest.mark.parametrize("variant", _EVIDENCE_VARIANTS, ids=_variant_id)
     def test_extra_event_inputs_match_the_event_fields(self, variant: ResultVariant) -> None:
         """`evidence`以外に要る値を宣言と一致させる（C-08が作らない値の明示）。"""
         fields = tuple(

@@ -22,11 +22,10 @@ from c08_support.helpers import (
     FakePayloadPort,
     FakeRecordSource,
     cancelling,
-    external_block,
     halting_for_block,
     integrity_block,
+    limit_block,
     machine_state,
-    progress_block,
     review_records,
     seed,
 )
@@ -532,14 +531,20 @@ class TestProcedureOutcomes:
 
 
 class TestBlocked:
-    """BLOCKEDは汎用の`no_awaiting`ではなく、block情報を添えて返す。"""
+    """BLOCKEDは汎用の`no_awaiting`ではなく、block情報を添えて返す。
+
+    ただし**介入で解けるblock**（`NO_PROGRESS`の膠着・外部依存）はユーザーへ判断を求める
+    turnを起こすため、`Blocked`ではなく`AWAIT_USER`になる（PR-3c。ADR-0023 決定3）。
+    ここで`Blocked`のまま残るのは、出口がC-08の外にあるblockだけである。
+    """
 
     @pytest.mark.parametrize(
         "block",
-        [progress_block(), external_block(), integrity_block()],
-        ids=["progress", "external", "integrity"],
+        [limit_block(), integrity_block()],
+        ids=["limit_reached", "integrity"],
     )
-    def test_blocked_returns_the_block(self, tmp_path, block) -> None:
+    def test_a_block_without_an_intervention_exit_reports_itself(self, tmp_path, block) -> None:
+        """出口がlimit引き上げ / 復元 / salvageのblockは、状態を報告するだけである。"""
         env = seed(tmp_path, state=MachineState(state=State.BLOCKED, block=block))
         outcome = _advance(env)
         assert isinstance(outcome, Blocked) and outcome.block == block

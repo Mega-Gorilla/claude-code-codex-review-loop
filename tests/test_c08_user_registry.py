@@ -37,6 +37,8 @@ from claude_code_codex_review_loop.workflow import (
     RESULT_VARIANTS,
     USER_REQUEST_SPECS,
     ActionRegistryError,
+    AwaitingInstance,
+    BlockInstance,
     UserRequestSpec,
     build_event,
     intent_digest,
@@ -180,8 +182,7 @@ class TestIntentKey:
     def _key(self, **overrides: object) -> str:
         values: dict[str, object] = {
             "run_id": "run-1",
-            "awaiting": Awaiting.USER_INPUT_GATE,
-            "since_seq": 3,
+            "instance": AwaitingInstance(awaiting=Awaiting.USER_INPUT_GATE, since_seq=3),
             "head_sha": HEAD,
             "kind": RecordKind.MERGE_APPROVAL,
         }
@@ -195,8 +196,8 @@ class TestIntentKey:
         "override",
         [
             {"run_id": "run-2"},
-            {"awaiting": Awaiting.USER_INPUT_DECISION},
-            {"since_seq": 4},
+            {"instance": AwaitingInstance(awaiting=Awaiting.USER_INPUT_DECISION, since_seq=3)},
+            {"instance": AwaitingInstance(awaiting=Awaiting.USER_INPUT_GATE, since_seq=4)},
             {"head_sha": "b" * 40},
             {"kind": RecordKind.USER_CANCEL},
         ],
@@ -204,6 +205,33 @@ class TestIntentKey:
     )
     def test_every_component_changes_the_key(self, override) -> None:
         assert self._key(**override) != self._key()
+
+    def _block_key(self, **overrides: object) -> str:
+        values: dict[str, object] = {
+            "run_id": "run-1",
+            "instance": BlockInstance(block_binding="cr:run-1:1:progress"),
+            "head_sha": HEAD,
+            "kind": RecordKind.BLOCK_INTERVENTION,
+        }
+        values.update(overrides)
+        return intent_key(**values)  # type: ignore[arg-type]
+
+    def test_a_block_instance_keys_on_the_block_binding(self) -> None:
+        """blockの待機instanceはblock attempt bindingそのものである（ADR-0023 決定2）。"""
+        assert self._block_key() == self._block_key()
+        other = self._block_key(instance=BlockInstance(block_binding="cr:run-1:2:progress"))
+        assert other != self._block_key()
+
+    def test_a_block_key_shares_the_ledger_prefix(self) -> None:
+        """台帳は共通にする（C-13が経路2で同じkeyを導けることが要件）。"""
+        assert self._block_key().startswith("ui:")
+
+    def test_a_block_key_never_collides_with_an_awaiting_key(self) -> None:
+        """field集合が異なるので、待機の種類を跨いだ衝突は起こらない。"""
+        block = json.loads(self._block_key()[len("ui:") :])
+        awaiting = json.loads(self._key()[len("ui:") :])
+        assert "block" in block and "awaiting" not in block
+        assert "awaiting" in awaiting and "block" not in awaiting
 
     def test_is_parseable_json_after_the_prefix(self) -> None:
         """区切り文字を含むopaque値でも衝突しない（canonical JSONで導出する）。"""
@@ -249,16 +277,14 @@ class TestIntentValue:
     def test_different_values_produce_different_keys(self) -> None:
         first = intent_key(
             run_id="run-1",
-            awaiting=Awaiting.USER_INPUT_DECISION,
-            since_seq=1,
+            instance=AwaitingInstance(awaiting=Awaiting.USER_INPUT_DECISION, since_seq=1),
             head_sha=HEAD,
             kind=RecordKind.USER_DECISION,
             intent_value="[1]",
         )
         second = intent_key(
             run_id="run-1",
-            awaiting=Awaiting.USER_INPUT_DECISION,
-            since_seq=1,
+            instance=AwaitingInstance(awaiting=Awaiting.USER_INPUT_DECISION, since_seq=1),
             head_sha=HEAD,
             kind=RecordKind.USER_DECISION,
             intent_value="[2]",
@@ -280,8 +306,7 @@ class TestIntentValue:
         with pytest.raises(ActionRegistryError):
             intent_key(
                 run_id="run-1",
-                awaiting=Awaiting.USER_INPUT_GATE,
-                since_seq=1,
+                instance=AwaitingInstance(awaiting=Awaiting.USER_INPUT_GATE, since_seq=1),
                 head_sha=HEAD,
                 kind=kind,
                 intent_value=value,

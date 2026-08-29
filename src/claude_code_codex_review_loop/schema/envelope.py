@@ -568,7 +568,10 @@ def _user_request_section() -> Field:
             "pending": obj(
                 {
                     "request_id": opaque(),
-                    "awaiting": enum_field(_USER_AWAITING_VALUES),
+                    # 待機の識別子は直和（ADR-0023 決定1）。`AWAIT_USER`はawaiting、
+                    # `BLOCKED`での介入待ちはblock attempt binding。readerが一方だけを要求する
+                    "awaiting": enum_field(_USER_AWAITING_VALUES, required=False),
+                    "block_binding": opaque(required=False),
                     "nonce": opaque(),
                     "expected_head_sha": sha(),
                     "result_path": text(),

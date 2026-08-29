@@ -33,9 +33,18 @@ from dataclasses import dataclass
 from typing import Final, cast
 
 from ..domain import events as ev
+from ..domain._ruledefs import BlockKind
 from ..domain.commands import HostAction
 from ..domain.events import Event
-from ..domain.values import Awaiting, RecordEvidence, RecordKind
+from ..domain.values import (
+    Awaiting,
+    BlockContext,
+    ExternalDependencyBlock,
+    Progress,
+    ProgressBlock,
+    RecordEvidence,
+    RecordKind,
+)
 from ..schema import REGISTRY
 from ..schema.registry import SchemaDefinition, SchemaKind
 from ..transport.render import normalize_newlines
@@ -53,6 +62,11 @@ class ResultVariant:
     result_schema: SchemaKind
     event: type[Event]
     extra_event_inputs: tuple[str, ...] = ()
+    # **eventを`RecordEvidence`から組み立てられない**種別（写像はportが担う）。
+    # `extra_event_inputs`は「C-08が作らない値」を宣言するが、こちらはevidenceの
+    # **形そのもの**が違う場合である（例: `BlockResolvedIntervention`は
+    # `BlockResolutionEvidence`を受け取る）。ADR-0017 決定2 / ADR-0023 決定7
+    port_mapped: bool = False
 
     @property
     def result_definition(self) -> SchemaDefinition:
@@ -127,6 +141,14 @@ RESULT_VARIANTS: Final[Mapping[RecordKind, ResultVariant]] = {
         record_kind=RecordKind.MERGE_APPROVAL,
         result_schema=SchemaKind.MERGE_APPROVAL,
         event=ev.MergeApprovalVerified,
+    ),
+    # 膠着 / 外部依存blockの解消（`BLOCKED`での介入）。eventは`BlockResolutionEvidence`を
+    # 受け取るためevidenceだけでは組み立てられず、写像はportが担う（決定7）
+    RecordKind.BLOCK_INTERVENTION: ResultVariant(
+        record_kind=RecordKind.BLOCK_INTERVENTION,
+        result_schema=SchemaKind.BLOCK_INTERVENTION,
+        event=ev.BlockResolvedIntervention,
+        port_mapped=True,
     ),
     RecordKind.USER_CANCEL: ResultVariant(
         record_kind=RecordKind.USER_CANCEL,
@@ -230,6 +252,11 @@ def build_event(
     `evidence`以外に要る値は`extra_event_inputs`が宣言したものだけで、**過不足があれば
     構築しない**（C-08が作らない値をNoneで埋める経路を作らない。ADR-0014 決定9）。
     """
+    if variant.port_mapped:
+        raise ActionRegistryError(
+            f"{variant.record_kind.value}のeventはRecordEvidenceだけでは構築できない"
+            "（写像はRecordEventPortが担う）"
+        )
     if set(inputs) != set(variant.extra_event_inputs):
         raise ActionRegistryError(
             f"{variant.record_kind.value}のevent入力が宣言と一致しない: "
@@ -319,6 +346,83 @@ USER_REQUEST_SPECS: Final[Mapping[Awaiting, UserRequestSpec]] = {
 }
 
 
+@dataclass(frozen=True)
+class BlockRequestSpec:
+    """1つのblock介入待ちの契約（`UserRequestSpec`のblock版。ADR-0023）。
+
+    `BLOCKED`の待機に`awaiting`は無く、識別子は解除対象の**block attempt binding**である。
+    どのblockが介入を受け付けるかを決めるのは**C-01**で、この表はその写しである
+    （P-22 / P-23。contract testが`PRODUCED_RULES`との一致を固定する）。
+    """
+
+    block_kind: BlockKind
+    result_kinds: tuple[RecordKind, ...]
+    # `PROGRESS` blockはreasonまで一致しないと`BLOCK_INTERVENTION`を受理しない（P-22）。
+    # `EXTERNAL_DEPENDENCY`はreasonを持たないのでNone
+    reasons: frozenset[Progress] | None = None
+    evidence_kinds: tuple[RecordKind, ...] = ()
+
+    @property
+    def kind(self) -> str:
+        """envelopeとerror messageで使う待機種別の表示（block種別そのもの）。"""
+        return str(self.block_kind.value)
+
+    def variant_for(self, record_kind: RecordKind) -> ResultVariant | None:
+        """ユーザーが返したrecord種別の契約（当該blockで許可されない種別はNone）。"""
+        if record_kind not in self.result_kinds:
+            return None
+        return RESULT_VARIANTS[record_kind]
+
+
+# `USER_CANCEL`が入るのはP-21（awaiting不問・非terminal全state）が`BLOCKED`を覆うためで、
+# ADR-0018 決定2の導出規則をそのまま適用した結果である。
+#
+# **`LIMIT_REACHED`の膠着blockと`RECORD_INTEGRITY` blockはここに無い**。前者の出口は
+# limit引き上げ（B-LR）、後者は復元 / salvage専用evidence（fail closed）であり、C-01は
+# どちらでも`BLOCK_INTERVENTION`を受理しない。受理されない応答を提示しないため、
+# これらのblockは`Blocked`のまま返す（ADR-0019 決定19）。
+BLOCK_REQUEST_SPECS: Final[tuple[BlockRequestSpec, ...]] = (
+    BlockRequestSpec(
+        block_kind=BlockKind.PROGRESS,
+        result_kinds=(RecordKind.BLOCK_INTERVENTION, RecordKind.USER_CANCEL),
+        reasons=frozenset({Progress.NO_PROGRESS}),
+    ),
+    BlockRequestSpec(
+        block_kind=BlockKind.EXTERNAL_DEPENDENCY,
+        result_kinds=(RecordKind.BLOCK_INTERVENTION, RecordKind.USER_CANCEL),
+        # 根拠: 何を待っているかを書いた外部依存record
+        evidence_kinds=(RecordKind.EXTERNAL_DEPENDENCY,),
+    ),
+)
+
+RequestSpec = UserRequestSpec | BlockRequestSpec
+
+
+def block_binding_of(block: BlockContext) -> str | None:
+    """blockのattempt binding（`RecordIntegrityBlock`は持たないのでNone）。
+
+    `RECORD_INTEGRITY`が持つのはviolation集合であり、単一のattempt bindingではない。
+    介入requestを出さないblockなので、ここでNoneになるのは正しい。
+    """
+    if isinstance(block, (ProgressBlock, ExternalDependencyBlock)):
+        return str(block.binding.value)
+    return None
+
+
+def block_spec_for(block: BlockContext) -> BlockRequestSpec | None:
+    """介入を受け付けるblockの契約を引く（受け付けないblockはNone）。
+
+    Noneは「runが壊れている」ではなく「このblockの出口は介入ではない」である。
+    """
+    for spec in BLOCK_REQUEST_SPECS:
+        if isinstance(block, ProgressBlock) and spec.block_kind is BlockKind.PROGRESS:
+            if spec.reasons is not None and block.reason in spec.reasons:
+                return spec
+        if isinstance(block, ExternalDependencyBlock) and spec.block_kind is BlockKind.EXTERNAL_DEPENDENCY:
+            return spec
+    return None
+
+
 def user_spec_for(awaiting: Awaiting) -> UserRequestSpec | None:
     """ユーザー入力待ちの契約を引く（host actionや他のawaitingはNone）。"""
     return USER_REQUEST_SPECS.get(awaiting)
@@ -374,11 +478,44 @@ def intent_value_of(kind: RecordKind, payload: Mapping[str, object]) -> str | No
     return None if field is None else str(payload[field])
 
 
+@dataclass(frozen=True)
+class AwaitingInstance:
+    """`AWAIT_USER`の待機instance。
+
+    `since_seq`（request発行時点のchain最大seq）がinstanceを表す。同じstateとheadへ
+    再び戻ってきた次のinstanceとは、この値で区別される。
+    """
+
+    awaiting: Awaiting
+    since_seq: int
+
+
+@dataclass(frozen=True)
+class BlockInstance:
+    """`BLOCKED`での介入待ちinstance。
+
+    block attempt binding**そのもの**がinstanceである。blockへ入り直せば新しいbindingに
+    なるため、`since_seq`のような別の識別子を要しない。
+    """
+
+    block_binding: str
+
+
+# 待機instanceの直和。intent keyはこの値から作る（2経路が同じkeyを導けることが要件）
+WaitInstance = AwaitingInstance | BlockInstance
+
+
+def _instance_fields(instance: WaitInstance) -> dict[str, object]:
+    """intent keyへ入れるinstance固有のfield（種別ごとにfield集合が異なる）。"""
+    if isinstance(instance, BlockInstance):
+        return {"block": instance.block_binding}
+    return {"awaiting": instance.awaiting.value, "since": instance.since_seq}
+
+
 def intent_key(
     *,
     run_id: str,
-    awaiting: Awaiting,
-    since_seq: int,
+    instance: WaitInstance,
     head_sha: str,
     kind: RecordKind,
     intent_value: str | None = None,
@@ -388,8 +525,9 @@ def intent_key(
     `request_id`を唯一の相関keyにはできない: GitHub直接comment（経路2）は`AWAIT_USER`の
     request IDを持たないためである。両経路がcheckpointから導出できる値だけで構成する。
 
-    - `since_seq`が**awaiting instance**を表す（request発行時点のchain最大seq）。同じstateと
-      headへ再び戻ってきた次のinstanceとは、この値で区別される
+    - **待機instance**は直和である（`WaitInstance`）。`AWAIT_USER`は`awaiting` + `since_seq`、
+      `BLOCKED`での介入待ちはblock attempt bindingで、field集合が異なるので衝突しない。
+      台帳は**共通**にする（C-13が経路2で同じkeyを導けることが要件）
     - 正規化intentは**record kind**と、kindだけで決まらない種別では`intent_value`の
       digestである（`INTENT_VALUE_FIELDS`）。値の**要否はkindが決める**ため、宣言と実引数が
       食い違う呼び出しは受理しない（片方だけの経路が別のkeyを作るのを防ぐ）
@@ -403,13 +541,12 @@ def intent_key(
             f"{kind.value}のintent keyと値の宣言が一致しない（宣言: {field}、実引数: "
             f"{'あり' if intent_value is not None else 'なし'}）"
         )
-    payload = {
-        "awaiting": awaiting.value,
+    payload: dict[str, object] = {
         "head": head_sha,
         "intent": None if intent_value is None else intent_digest(intent_value),
         "kind": kind.value,
         "run": run_id,
-        "since": since_seq,
+        **_instance_fields(instance),
     }
     return INTENT_KEY_PREFIX + json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
