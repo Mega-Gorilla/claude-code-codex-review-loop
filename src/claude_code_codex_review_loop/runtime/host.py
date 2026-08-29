@@ -24,6 +24,7 @@ from ..workflow import Blocked, EngineStopped, Terminal
 from .config import SessionConfig
 from .ports import PortSet
 from .session import HostWork, StepOutcome, StepResult, step, submit_result
+from .signals import StopSignal
 
 
 class HostPort(Protocol):
@@ -65,6 +66,7 @@ def drive(
     ports: PortSet,
     clock: DriveClock,
     max_rounds: int,
+    stop: StopSignal | None = None,
 ) -> DriveResult:
     """host作業が無くなるまで`step` -> `execute` -> `submit`を繰り返す。
 
@@ -83,18 +85,40 @@ def drive(
             ports=ports,
             id_source=clock.id_source,
             issued_at=clock.issued_at(),
+            stop=stop,
         )
         outcome = result.outcome
         if isinstance(outcome, (Terminal, Blocked, EngineStopped)):
             return DriveResult(outcome=outcome, rounds=rounds, submitted=tuple(submitted))
         rounds += 1
-        accepted = submit_result(
-            host.execute(outcome),
-            paths=paths,
-            config=config,
-            ports=ports,
-            accepted_at=clock.accepted_at(),
-        )
+        # **`step`の外側**もsignalから守る。`host.execute`（3-b3ではheadless processの起動と
+        # 待機）と`submit_result`（chain取得を含む）はroundの中で最も長く、2回目の
+        # `KeyboardInterrupt`はここへ落ちやすい。`step`のcatchはこの区間を覆わない
+        try:
+            raw = host.execute(outcome)
+            if stop is not None and stop.requested:
+                # host作業中の1回目。戻り直後が最初の安全点になる
+                return _stopped_round(
+                    paths=paths, config=config, ports=ports, clock=clock, stop=stop,
+                    rounds=rounds, submitted=tuple(submitted),
+                )
+            accepted = submit_result(
+                raw,
+                paths=paths,
+                config=config,
+                ports=ports,
+                accepted_at=clock.accepted_at(),
+            )
+        except KeyboardInterrupt:
+            if stop is None or not stop.force_requested:
+                # 停止の昇格要求ではない中断は握り潰さない
+                raise
+            # 2回目がhost作業 / submit中に届いた。未submitの結果は捨て、停止は次の`step`が
+            # 完了させる（要求のdurable化と`grace = 0`の停止）
+            return _stopped_round(
+                paths=paths, config=config, ports=ports, clock=clock, stop=stop,
+                rounds=rounds, submitted=tuple(submitted),
+            )
         if isinstance(accepted, EngineStopped):
             return DriveResult(outcome=accepted, rounds=rounds, submitted=tuple(submitted))
         submitted.append(type(accepted).__name__)
@@ -103,3 +127,33 @@ def drive(
         rounds=rounds,
         submitted=tuple(submitted),
     )
+
+
+def _stopped_round(
+    *,
+    paths: StatePaths,
+    config: SessionConfig,
+    ports: PortSet,
+    clock: DriveClock,
+    stop: StopSignal,
+    rounds: int,
+    submitted: tuple[str, ...],
+) -> DriveResult:
+    """host作業中にsignalを受けた場合の締めくくり。
+
+    未submitの結果は捨てる。hostへ出したactionはcheckpointに未完了として残っており、
+    停止後にresumeすれば**同じactionが再提示される**（ADR-0014 決定22）。ここで結果だけを
+    先に受理すると、停止要求を挟んだ状態遷移がsignalの有無で変わる。
+
+    1回目（flagだけ）と2回目（`KeyboardInterrupt`）のどちらから来ても同じ経路を通る。
+    停止要求のdurable化と`grace = 0`の停止は、ここが呼ぶ`step`が行う。
+    """
+    result = step(
+        paths=paths,
+        config=config,
+        ports=ports,
+        id_source=clock.id_source,
+        issued_at=clock.issued_at(),
+        stop=stop,
+    )
+    return DriveResult(outcome=result.outcome, rounds=rounds, submitted=submitted)

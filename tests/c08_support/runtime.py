@@ -50,6 +50,8 @@ from .helpers import (
     MODEL,
     SPEAKER,
     USER_SPEAKER,
+    FakeIds,
+    FakeStopPort,
     gate_answer_payload,
     user_record_payload,
     user_submit_payload,
@@ -147,19 +149,6 @@ def runtime_env(
     return RuntimeEnv(
         paths=paths, run_dir=run_directory(paths, RUN), directory=directory, config=config
     )
-
-
-class FakeIds:
-    """決定論的なID供給（runtimeはUUIDを使うが、testは固定値で観測する）。"""
-
-    def __init__(self, prefix: str = "rid") -> None:
-        self.prefix = prefix
-        self.issued: list[str] = []
-
-    def __call__(self) -> str:
-        value = f"{self.prefix}-{len(self.issued) + 1}"
-        self.issued.append(value)
-        return value
 
 
 def fixed_clock(prefix: str = "rid") -> DriveClock:
@@ -275,6 +264,17 @@ def round_ports(env: RuntimeEnv, **overrides: object) -> PortSet:
     return replace(ports, **overrides) if overrides else ports
 
 
+def stopping_ports(env: RuntimeEnv, **overrides: object) -> PortSet:
+    """停止portだけをfakeにした束。
+
+    台帳へ置くrefはtestが組み立てた値で、**実在するprocessを指さない**。製品の
+    `TreeStopper`へ渡すと現在のOSのprocess APIを実際に叩き、他OSのref種別は
+    `ref_mismatch`で拒否される（C-03の仕様）。実停止の挙動はC-03のtestが担保する。
+    """
+    ports = replace(default_ports(env.paths, env.config), stop=FakeStopPort())
+    return replace(ports, **overrides) if overrides else ports
+
+
 def gate_host(env: RuntimeEnv) -> FakeActiveHost:
     """merge gateから3 round回るfake host（質問 -> 回答 -> cancel）。"""
     return FakeActiveHost(
@@ -327,6 +327,7 @@ __all__ = [
     "fixed_clock",
     "gate_host",
     "round_ports",
+    "stopping_ports",
     "runtime_env",
     "seed_comments",
     "session_payload",

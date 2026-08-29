@@ -14,7 +14,6 @@ engineは「次に何をすべきか」を返すstep engineで、それを呼ぶ
 
 from .config import (
     CONFIG_FILE,
-    SESSION_CONFIG_VERSION,
     ConfigUnavailable,
     SessionConfig,
     config_path,
@@ -47,7 +46,6 @@ from .session import (
 __all__ = [
     "CONFIG_FILE",
     "MAX_ENGINE_WORK",
-    "SESSION_CONFIG_VERSION",
     "ChainEvidence",
     "ChainNotIntactError",
     "ChainRecords",

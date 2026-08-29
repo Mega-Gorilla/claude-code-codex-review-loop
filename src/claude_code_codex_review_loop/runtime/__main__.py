@@ -33,6 +33,7 @@ from ..state import prepare_state_root
 from ..workflow import (
     AwaitUser,
     Blocked,
+    EmergencyStopRequired,
     EngineStopped,
     HostActionIssued,
     SubmitAccepted,
@@ -45,6 +46,7 @@ from ..workflow import (
 from .config import ConfigUnavailable, read_session_config
 from .ports import default_ports
 from .session import step, submit_result
+from .signals import StopSignal, install_stop_handler
 
 EXIT_OK = 0
 EXIT_STOPPED = 3
@@ -100,6 +102,9 @@ def _advance_payload(outcome: object) -> dict[str, object]:
         return {"outcome": "TERMINAL", "state": outcome.state.value}
     if isinstance(outcome, Blocked):
         return {"outcome": "BLOCKED", "block": type(outcome.block).__name__}
+    if isinstance(outcome, EmergencyStopRequired):  # pragma: no cover - `step`が実行してから返す
+        # `step`はこれを自分でこなすので、表示へ届くのは上限に達した場合だけである
+        return {"outcome": "EMERGENCY_STOP", "requested_at": outcome.request.requested_at}
     stopped = outcome
     assert isinstance(stopped, EngineStopped)
     return {"outcome": "STOPPED", "code": stopped.code, "detail": stopped.detail}
@@ -149,7 +154,34 @@ def _read_submit(path: Path) -> bytes | dict[str, object]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """1回のadvanceまたはsubmitを実行して結果を出す（loopを持たない）。"""
+    """1回のadvanceまたはsubmitを実行して結果を出す（loopを持たない）。
+
+    2回目のCtrl+Cは`KeyboardInterrupt`として届く（AC-C03-02の即時force要求）。停止の完了は
+    `step`が引き受けるので（`_forced_stop`）、ここは**最後の網**である。tracebackで落ちると
+    process境界の契約が崩れる。
+    """
+    stop = StopSignal()
+    try:
+        return _run(argv, stop)
+    except KeyboardInterrupt:
+        # **`StopSignal`を見て分類する**。handler設置前や`submit`中に届く通常のCtrl+Cを
+        # 「2回目の停止signal」と報告すると、停止の昇格が起きたように読める
+        forced = stop.force_requested
+        _render(
+            {
+                "outcome": "STOPPED",
+                "code": "forced_stop" if forced else "interrupted",
+                "detail": (
+                    "2回目の停止signalで中断した"
+                    if forced
+                    else "停止signalの受け取り前に中断した"
+                ),
+            }
+        )
+        return EXIT_STOPPED
+
+
+def _run(argv: Sequence[str] | None, stop: StopSignal) -> int:
     args = _parser().parse_args(argv)
     paths = prepare_state_root(Path(args.state_root).resolve())
     config = read_session_config(paths, args.run)
@@ -158,16 +190,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_STOPPED
     ports = default_ports(paths, config)
     if args.command == "advance":
-        result = step(
-            paths=paths,
-            config=config,
-            ports=ports,
-            id_source=lambda: uuid.uuid4().hex,
-            issued_at=_now(),
-        )
+        # signal handlerの設置はentry pointの責務（process全体のdispositionを変えるため）。
+        # 受け取った後に何をするかは`step`が決める（ADR-0021 決定4）
+        with install_stop_handler(stop):
+            result = step(
+                paths=paths,
+                config=config,
+                ports=ports,
+                id_source=lambda: uuid.uuid4().hex,
+                issued_at=_now(),
+                stop=stop,
+            )
         payload = _advance_payload(result.outcome)
         payload["persisted"] = list(result.trace.persisted)
         payload["halted"] = result.trace.halted
+        payload["stop_requested"] = result.trace.stop_requested
+        payload["stopped"] = result.trace.stopped
         _render(payload)
         return EXIT_STOPPED if payload["outcome"] == "STOPPED" else EXIT_OK
     if args.result is None:

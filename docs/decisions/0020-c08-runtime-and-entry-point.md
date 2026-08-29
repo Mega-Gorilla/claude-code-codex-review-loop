@@ -91,7 +91,9 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 | canonical record | **未収集** | 正本はGitHub上のcomment。localの`artifact_records`（C-07が定義）へ書くcomponentがまだ無い。`checkpoint.transaction`は永続化で消費されるため常設の代替にならない |
 | redact済みlog | **未収集** | logging機構自体が未実装 |
 
-30-b. **残り2種の収集はPR-3b2が扱う**。producerと同じPRで収集経路を入れる（対象物が無いまま収集stepだけ増やしても、`if-no-files-found: ignore`で黙って0 fileになる）。それまでPR-3bのartifact受入は**未完**として扱う。
+30-b. **残り2種の収集は後続PRが扱う**。producerと同じPRで収集経路を入れる（対象物が無いまま収集stepだけ増やしても、`if-no-files-found: ignore`で黙って0 fileになる）。それまでPR-3bのartifact受入は**未完**として扱う。
+
+> **訂正（ADR-0021 決定26）**: 当初「PR-3b2」と書いたが、3-bをさらに分割したため、redact済みlogの収集は**PR-3b3**（headless adapterのstdout / stderrがそのproducer）が扱う。canonical recordのlocal artifactはC-09以降のままである。
 30-c. **file名の対応をcontract testで固定する**（`tests/test_c08_artifact_contract.py`）。収集file名を製品定数（`CHECKPOINT_FILE_NAME` / 両`ENVELOPE_FILE`）と突き合わせ、`*.json`のようなwildcardへ広がった瞬間にfailさせる。実行するのはfake ghだけなので実credentialは存在しないが、**収集範囲を絞ることを既定にしておかないと実transportを使うPhaseで漏れる**。
 31. artifact名へOSを含め、Ubuntu / Windowsの失敗を区別する。tmp directoryは**workspace外**へ置く（`tests/test_c06_isolation.py`がreviewer用git呼び出しのconfig originを検査しており、repository配下だとrepository localの`.git/config`が混ざる）。`.`始まりの名前も使わない（`include-hidden-files`が既定falseで、hidden pathは黙って外れる）。
 
@@ -105,4 +107,4 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 - `session.json`の書き手は当面testだけである。C-12が実CLIを持つときに書き手を引き取る。全field必須なので、C-12がどの値をどこから解決するかはそのPhaseの設計として明示的に決まる
 - **未実装portの範囲がtestのfakeとして可視**になった。`ActionPayloadPort`とagent recordの本文の2つだけがfakeで、それ以外はentry pointから実物が走る
 - CIの`--basetemp`が**workspace外の固定位置**（`${{ runner.temp }}/pytest-tmp`）へ移った。ローカル実行の既定は変えていない
-- **CI artifactの収集は2/4種にとどまる**（決定30-a）。canonical recordとredact済みlogはproducerが未実装で、収集はPR-3b2が担当する。PR-3bのartifact受入は未完である
+- **CI artifactの収集は2/4種にとどまる**（決定30-a）。canonical recordとredact済みlogはproducerが未実装で、収集は後続PRが担当する（ADR-0021 決定26でPR-3b3へ確定）。PR-3bのartifact受入は未完である

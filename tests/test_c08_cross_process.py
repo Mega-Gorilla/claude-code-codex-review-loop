@@ -25,13 +25,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-from c07_support.helpers import RUN
-from c08_support.helpers import cancelling, job_object_ref, user_machine_state
+from c07_support.helpers import NUMBER, REPOSITORY, RUN
+from c08_support.helpers import cancelling, job_object_ref, machine_state, user_machine_state
 from c08_support.runtime import RuntimeEnv, runtime_env, user_submit_for
 
 from claude_code_codex_review_loop.domain.values import Awaiting, RecordKind, State
 from claude_code_codex_review_loop.runtime import __main__ as entry
-from claude_code_codex_review_loop.workflow import with_active_trees
+from claude_code_codex_review_loop.workflow import (
+    StopRequest,
+    stop_evidence,
+    with_active_trees,
+    with_stop_request,
+)
 
 MODULE = "claude_code_codex_review_loop.runtime"
 
@@ -176,6 +181,44 @@ def test_a_halt_procedure_resumes_in_another_process(tmp_path: Path) -> None:
     assert done["outcome"] == "TERMINAL"
     assert done["state"] == State.CANCELLED.value
     assert done["halted"] == 1
+
+
+def test_an_emergency_stop_resumes_in_another_process(tmp_path: Path) -> None:
+    """**AC-C08-06（緊急停止）**: 停止意図がprocessを跨いで残り、次のprocessが再停止する。
+
+    C-01は緊急停止を`NormalProcedure`のまま完了させる（C-05）ため、停止失敗時の
+    `RunFailed`はF-01で`FAILED`へ進み`HaltRun`を再発行しない。意図を`stop_request`台帳で
+    持つことで、**別processが同じ要求から停止をやり直せる**（ADR-0021）。
+    """
+    ref = job_object_ref()
+    request = StopRequest(
+        requested_at="2026-08-26T12:00:00Z",
+        evidence=stop_evidence(
+            run_id=RUN,
+            repository=REPOSITORY,
+            number=NUMBER,
+            requested_at="2026-08-26T12:00:00Z",
+        ),
+        source_state=State.APPLYING_FIXES,
+    )
+    env = runtime_env(
+        tmp_path,
+        state=machine_state(),
+        extra=with_stop_request(with_active_trees({}, [ref]), request),
+    )
+
+    # process A: treeを止められず、要求はcheckpointに残る
+    failed = _driver(env, tmp_path / "a", "advance-stop-fails", "a")
+    assert failed["outcome"] == "STOPPED"
+    assert failed["code"] == "emergency_stop_failed"
+
+    # process B: 同じ要求を読んで停止をやり直し、`CANCELLED`まで進める
+    done = _driver(env, tmp_path / "b", "advance", "b")
+    assert done["outcome"] == "TERMINAL"
+    assert done["state"] == State.CANCELLED.value
+    assert done["stopped"] == 1
+    # signalを受けたのはprocess Aだが、要求を作り直してはいない
+    assert done["stop_requested"] == 0
 
 
 def test_a_finished_run_is_reported_the_same_by_any_process(tmp_path: Path) -> None:

@@ -12,6 +12,9 @@ processとしては`__main__`と同じで、共有するのはstate rootとGitHu
 ```
 python tests/c08_support/driver.py <state-root> <command> [args...]
 ```
+
+`wait-for-signal`は実signalを受け取るためのmodeで、handlerを設置してから`READY`を1行
+出力する。呼び出し側はその行を待ってからsignalを送るので、timingに依存しない。
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
+import time
 from pathlib import Path
 
 _TESTS = Path(__file__).resolve().parents[1]
@@ -38,6 +42,10 @@ from claude_code_codex_review_loop.runtime import (  # noqa: E402
     step,
     submit_result,
 )
+from claude_code_codex_review_loop.runtime.signals import (  # noqa: E402
+    StopSignal,
+    install_stop_handler,
+)
 from claude_code_codex_review_loop.state import prepare_state_root  # noqa: E402
 from claude_code_codex_review_loop.workflow import (  # noqa: E402
     AwaitUser,
@@ -49,19 +57,25 @@ from claude_code_codex_review_loop.workflow import (  # noqa: E402
 RUN = "run-1"
 
 
-def _ports(paths, config, *, stop_fails: bool):
-    """まだ実装の無い2 portだけをfakeで補う（残りは製品実装）。"""
+def _ports(paths, config, *, stop_fails: bool, real_stop: bool = False):
+    """まだ実装の無い2 portだけをfakeで補う（残りは製品実装）。
+
+    `real_stop`は製品の`TreeStopper`をそのまま使う（AC-C03-02のE2E）。台帳へ実在する
+    treeのrefが入っている場合だけ使ってよい。
+    """
     from c08_support.runtime import QUESTION_COMMENT_ID, AgentRecordBody
 
-    stop = FakeStopPort(fails=frozenset({job_object_ref()}) if stop_fails else frozenset())
-    return dataclasses.replace(
+    ports = dataclasses.replace(
         default_ports(paths, config),
         payload=FakeActionPayloads(
             {"ANSWER_GATE_QUESTION": {"question_comment_id": QUESTION_COMMENT_ID}}
         ),
         body=AgentRecordBody(),
-        stop=stop,
     )
+    if real_stop:
+        return ports
+    stop = FakeStopPort(fails=frozenset({job_object_ref()}) if stop_fails else frozenset())
+    return dataclasses.replace(ports, stop=stop)
 
 
 def _describe(outcome: object) -> dict[str, object]:
@@ -89,6 +103,58 @@ def _describe(outcome: object) -> dict[str, object]:
     return {"outcome": type(outcome).__name__}
 
 
+@dataclasses.dataclass
+class _SlowStopSignal(StopSignal):
+    """最初の安全点へ入る**手前**で待つsignal（2回目をその窓へ届かせるための継ぎ目）。
+
+    `step`は`stop.pending`を読んだ直後に停止要求を保存する。その読み出しで待つことで、
+    2回目の`KeyboardInterrupt`が「要求を保存する前」——実装が最も落としやすい窓——へ確実に
+    落ちる。待ち時間の代わりになるのは、実際にはcheckpointのI/Oと`drive`のhost作業である。
+    """
+
+    delay: float = 0.0
+    armed: bool = False
+
+    @property
+    def pending(self) -> bool:
+        value = StopSignal.pending.fget(self)  # type: ignore[attr-defined]
+        if value and not self.armed:
+            self.armed = True
+            print("ARMED", flush=True)
+            time.sleep(self.delay)
+        return value
+
+
+def _wait_for_signal(paths, config, ports, stop: StopSignal | None = None) -> int:
+    """handlerを設置し、実signalを受け取ってから1 stepだけ進める。
+
+    `READY`を出してから待つので、呼び出し側は「handler設置済み」を確かめてsignalを送れる。
+    """
+    with install_stop_handler(stop if stop is not None else StopSignal()) as stop:
+        print("READY", flush=True)
+        while not stop.requested:
+            time.sleep(0.02)
+        try:
+            result = step(
+                paths=paths,
+                config=config,
+                ports=ports,
+                id_source=FakeIds("sig"),
+                issued_at=ISSUED_AT,
+                stop=stop,
+            )
+        except KeyboardInterrupt:
+            # 2回目のsignalが停止の外側へ届いた場合。要求は台帳へ残っており、次のresumeが
+            # 停止をやり直す（`__main__`と同じ最後の網）
+            print(json.dumps({"outcome": "STOPPED", "code": "forced_stop"}, sort_keys=True))
+            return 0
+    payload = _describe(result.outcome)
+    payload["stop_requested"] = result.trace.stop_requested
+    payload["stopped"] = result.trace.stopped
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str]) -> int:
     state_root, command = argv[1], argv[2]
     paths = prepare_state_root(Path(state_root).resolve())
@@ -106,6 +172,20 @@ def main(argv: list[str]) -> int:
         payload = _describe(result.outcome)
         payload["persisted"] = list(result.trace.persisted)
         payload["halted"] = result.trace.halted
+        payload["stop_requested"] = result.trace.stop_requested
+        payload["stopped"] = result.trace.stopped
+    elif command == "wait-for-signal":
+        return _wait_for_signal(paths, config, ports)
+    elif command == "wait-for-signal-real-stop":
+        return _wait_for_signal(paths, config, _ports(paths, config, stop_fails=False, real_stop=True))
+    elif command == "wait-for-signal-early-force":
+        # 2回目を「最初の安全点より前」へ届かせる（argv[3]は待ち秒数）
+        return _wait_for_signal(
+            paths,
+            config,
+            _ports(paths, config, stop_fails=False, real_stop=True),
+            _SlowStopSignal(delay=float(argv[3])),
+        )
     elif command == "submit":
         raw = Path(argv[3]).read_bytes()
         outcome = submit_result(

@@ -30,7 +30,6 @@ from ..state import StatePaths, run_directory
 from ..transport.gh import GhContext, RepoRef, RetryPolicy
 
 CONFIG_FILE = "session.json"
-SESSION_CONFIG_VERSION = 1
 
 
 @dataclass(frozen=True)

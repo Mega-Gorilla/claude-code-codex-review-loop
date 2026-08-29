@@ -69,11 +69,13 @@ from .checkpoint_view import (
     PendingAction,
     PendingUserRequest,
     SectionUnavailable,
+    StopRequest,
     SubmitReceipt,
     find_receipt,
     next_attempt,
     read_pending_action,
     read_receipts,
+    read_stop_request,
     read_user_section,
     with_machine_state,
     with_new_logical_action,
@@ -143,6 +145,17 @@ class HaltRequired:
 
 
 @dataclass(frozen=True)
+class EmergencyStopRequired:
+    """記録済みの緊急停止要求（実行は`emergency`）。
+
+    終端でも手続き中でもtreeは止める必要があるため、`advance`は**他のどの判定よりも先に**
+    これを返す。C-01へeventを入力するかどうかは`emergency_stop`が決める（ADR-0021）。
+    """
+
+    request: StopRequest
+
+
+@dataclass(frozen=True)
 class Blocked:
     """`BLOCKED`。解消はC-08の外から来る（limit引き上げ・ユーザー介入・integrity復旧）。
 
@@ -160,7 +173,14 @@ class Terminal:
 
 
 AdvanceOutcome = (
-    HostActionIssued | AwaitUser | PersistRequired | HaltRequired | Blocked | Terminal | EngineStopped
+    HostActionIssued
+    | AwaitUser
+    | PersistRequired
+    | HaltRequired
+    | EmergencyStopRequired
+    | Blocked
+    | Terminal
+    | EngineStopped
 )
 
 
@@ -534,6 +554,13 @@ def advance(
     loaded = load_run(paths, run_id=run_id, repository=repository, number=number)
     if isinstance(loaded, EngineStopped):
         return loaded
+    # 緊急停止要求は**terminal判定より先**に見る。走っているtreeは終端でも手続き中でも
+    # 止める必要があり、ここを後回しにすると停止意図を持ったまま素通りする（ADR-0021）
+    stop_request = read_stop_request(loaded.payload)
+    if isinstance(stop_request, SectionUnavailable):
+        return EngineStopped("stop_request_unavailable", stop_request.detail)
+    if stop_request is not None:
+        return EmergencyStopRequired(request=stop_request)
     machine_state = loaded.machine_state
     if machine_state.state in TERMINAL_STATES:
         return Terminal(state=machine_state.state)
