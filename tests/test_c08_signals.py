@@ -55,6 +55,7 @@ from claude_code_codex_review_loop.workflow import (
     StopRequest,
     Terminal,
     TreesStopped,
+    read_active_trees,
     read_machine_state,
     read_stop_request,
     stop_evidence,
@@ -403,6 +404,90 @@ class TestForceOutsideTheStop:
         )
         with pytest.raises(KeyboardInterrupt):
             self._step(env, stop, FakeStopPort())
+
+
+class TestForceDuringHostWork:
+    """`drive`の`host.execute` / `submit_result`中に2回目が届いた場合。
+
+    この2区間はroundの中で最も長く（3-b3では headless processの起動と待機になる）、
+    **`step`の外側**にある。`step`のcatchはここを覆わないので、`drive`が受け止める。
+    """
+
+    def _env(self, tmp_path):
+        return runtime_env(
+            tmp_path,
+            state=user_machine_state(Awaiting.USER_INPUT_GATE),
+            seeded=(RecordKind.FINAL_REPORT,),
+            extra=with_active_trees({}, [job_object_ref()]),
+        )
+
+    def _drive(self, env, host, stop, port):
+        return drive(
+            host,
+            paths=env.paths,
+            config=env.config,
+            ports=dataclasses.replace(round_ports(env), stop=port),
+            clock=fixed_clock(),
+            max_rounds=4,
+            stop=stop,
+        )
+
+    def test_an_interrupt_in_host_work_stops_the_tree(self, tmp_path) -> None:
+        """例外を漏らさず、停止portを`grace = 0`で呼び、台帳を消費する。"""
+        env = self._env(tmp_path)
+        stop = StopSignal()
+        host = gate_host(env)
+
+        def _interrupting(work: object) -> bytes:
+            # host作業中に1回目と2回目が続けて届いた（handlerと同じ順序）
+            stop.record(signal.SIGINT)
+            stop.record_force(signal.SIGINT)
+            raise KeyboardInterrupt
+
+        host.execute = _interrupting  # type: ignore[method-assign, assignment]
+        port = FakeStopPort()
+        result = self._drive(env, host, stop, port)
+
+        # 例外は漏れず、次の`step`が要求のdurable化と`grace = 0`の停止をやり切る
+        assert result.outcome == Terminal(state=State.CANCELLED)
+        assert result.submitted == ()  # 未submitの結果は捨てる
+        assert [grace for _, grace in port.calls] == [0.0]
+        assert _stop_request(env) is None  # 停止まで完了して消費されている
+        assert read_active_trees(_loaded(env)) == ()
+
+    def test_an_interrupt_in_submit_stops_the_tree(self, tmp_path, monkeypatch) -> None:
+        """`submit_result`はchain取得を含むため、同じ窓になる。"""
+        from claude_code_codex_review_loop.runtime import host as host_module
+
+        env = self._env(tmp_path)
+        stop = StopSignal()
+
+        def _interrupting(*args: object, **kwargs: object):
+            stop.record(signal.SIGINT)
+            stop.record_force(signal.SIGINT)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(host_module, "submit_result", _interrupting)
+        port = FakeStopPort()
+        result = self._drive(env, gate_host(env), stop, port)
+
+        assert result.outcome == Terminal(state=State.CANCELLED)
+        assert result.submitted == ()
+        assert [grace for _, grace in port.calls] == [0.0]
+        assert read_machine_state(_loaded(env)).state is State.CANCELLED
+
+    def test_an_interrupt_without_a_force_request_is_not_swallowed(self, tmp_path) -> None:
+        """1回目だけの中断（別の理由の中断）は`drive`が握り潰さない。"""
+        env = self._env(tmp_path)
+        stop = StopSignal()
+        host = gate_host(env)
+
+        def _interrupting(work: object) -> bytes:
+            raise KeyboardInterrupt
+
+        host.execute = _interrupting  # type: ignore[method-assign, assignment]
+        with pytest.raises(KeyboardInterrupt):
+            self._drive(env, host, stop, FakeStopPort())
 
 
 class TestSafePoints:

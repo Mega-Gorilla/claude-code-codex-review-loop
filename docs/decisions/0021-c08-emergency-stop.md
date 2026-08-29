@@ -69,12 +69,13 @@ PR-3b1で入れた`processes`台帳（停止対象の`TreeRef`）は1を解決�
 19-g. entry pointは`KeyboardInterrupt`を**最後の網**として構造化結果へ写す。tracebackで落ちるとprocess境界の契約が崩れる。
 19-h. **2回目が`stop_trees`の内側に届くとは限らない**。要求を保存する前・保存中・台帳の読込中・`drive`のhost作業中にも届く。最外層で報告するだけでは**controllerが終了してもtreeが残り**、保存前なら次のresumeが再停止する根拠すら無い（AC-C03-01 / 02に反する）。そこで**`step`が捕捉して停止をやり切る**（`_forced_stop`）: 要求を（未保存なら）durableにしてから、`grace = 0`で台帳のtreeを止める。
 19-i. **forced pathは`advance`を通さない**。要求が在るときの`advance`は`EmergencyStopRequired`を返すだけだが、その手前でchain gate（GitHub取得）を通る場合がある。forceは「待たずに殺せ」という要求なので、local I/Oだけで完結する2手——要求の保存とtreeの停止——へ絞る。
-19-j. **最後の網は`StopSignal`を見て分類する**。handler設置前や`submit`中に届く通常の（1回目の）`KeyboardInterrupt`まで`forced_stop`と報告すると、停止の昇格が起きたように読める。force要求が無ければ`interrupted`とする。
+19-j. **`drive`は`step`の外側も守る**。`host.execute`（3-b3ではheadless processの起動と待機）と`submit_result`（chain取得を含む）はroundの中で最も長く、2回目はここへ落ちやすい。`step`のcatchはこの区間を覆わないので、`drive`が同じ条件（force要求のときだけ）で捕捉し、未submitの結果を捨てて次の`step`へ渡す。1回目（flagだけ）と2回目（例外）が同じ経路へ合流する。
+19-k. **最後の網は`StopSignal`を見て分類する**。handler設置前や`submit`中に届く通常の（1回目の）`KeyboardInterrupt`まで`forced_stop`と報告すると、停止の昇格が起きたように読める。force要求が無ければ`interrupted`とする。
 
 ### signal経路とresume経路を台帳で合流させる
 
 20. **signalは要求を作るだけ**で、実行は必ず`advance` -> `EmergencyStopRequired` -> `emergency_stop`の1経路を通る。signal経路とcross-process resume経路が同じcodeを通り、片方だけ壊れる形を作らない。
-21. flagを見る安全点は`step`のengine作業の境目と、`drive`の各roundの前後である。`host.execute`は最も長い区間で、その最中のsignalは**戻り直後**が最初の安全点になる。
+21. flagを見る安全点は`step`のengine作業の境目と、`drive`の各roundの前後である。`host.execute`は最も長い区間で、その最中の**1回目**は戻り直後が最初の安全点になる（**2回目**は例外なので戻りを待たない。決定19-j）。
 22. **signalから要求への変換は1回だけ**行う（`StopSignal.recorded`）。flagは立ったままになるので、毎回変換すると停止を完了した直後にまた要求を作り、要求と完了を交互に繰り返す。書いた時点で持ち主は台帳へ移る。
 23. host作業中にsignalを受けた場合、**未submitの結果は捨てる**。hostへ出したactionはcheckpointに未完了として残り、resumeが同じactionを再提示する（ADR-0014 決定22）。結果だけ先に受理すると、停止要求を挟んだ状態遷移がsignalの有無で変わる。
 24. entry pointが増やす制御経路は無い（`step` / `submit`のまま。AC-C08-03）。`step`がsignal objectを受け取るだけである。
