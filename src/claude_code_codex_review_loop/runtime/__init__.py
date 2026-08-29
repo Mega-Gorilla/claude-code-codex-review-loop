@@ -21,6 +21,7 @@ from .config import (
     write_session_config,
 )
 from .host import DriveClock, DriveResult, HostPort, drive
+from .host_headless import HeadlessError, HeadlessHost
 from .ports import (
     ChainEvidence,
     ChainNotIntactError,
@@ -52,6 +53,8 @@ __all__ = [
     "ConfigUnavailable",
     "DriveClock",
     "DriveResult",
+    "HeadlessError",
+    "HeadlessHost",
     "HostPort",
     "HostWork",
     "PortSet",

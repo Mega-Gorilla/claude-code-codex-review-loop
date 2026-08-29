@@ -994,6 +994,39 @@ def _tree_entry(ref: TreeRef) -> dict[str, object]:
     return {"kind": PROCESS_GROUP_TREE, "pid": ref.pid, "pgid": ref.pgid}
 
 
+def with_tree_added(
+    payload: Mapping[str, object], ref: TreeRef
+) -> dict[str, object] | SectionUnavailable:
+    """台帳へtreeを1つ足す（既存を消さない）。
+
+    `with_active_trees`はlistを**全置換**するので、書き手が自分のrefだけを渡すと他の
+    componentのtreeが消える（C-09のreviewerとheadless coderは並走し得る）。読んでから
+    足すのがtreeを起動する側の正しい手順である（ADR-0019 決定10）。
+
+    既に同じrefが在れば足さない（登録は冪等）。
+    """
+    refs = read_active_trees(payload)
+    if isinstance(refs, SectionUnavailable):
+        return refs
+    if ref in refs:
+        return dict(payload)
+    return with_active_trees(payload, [*refs, ref])
+
+
+def with_tree_removed(
+    payload: Mapping[str, object], ref: TreeRef
+) -> dict[str, object] | SectionUnavailable:
+    """台帳からtreeを1つ外す（**停止を確認してから**呼ぶ）。
+
+    残すとpidが再利用されたときに別treeへ到達し得る（ADR-0019 決定11）。無いrefを
+    外そうとしても失敗にしない（除去は冪等）。
+    """
+    refs = read_active_trees(payload)
+    if isinstance(refs, SectionUnavailable):
+        return refs
+    return with_active_trees(payload, [item for item in refs if item != ref])
+
+
 @dataclass(frozen=True)
 class StopRequest:
     """記録済みの緊急停止要求（ADR-0021）。

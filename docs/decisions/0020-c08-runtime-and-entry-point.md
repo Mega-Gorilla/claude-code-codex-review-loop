@@ -101,7 +101,9 @@ PR-3a（ADR-0019）でPhase 8のengineは`advance` / `submit` / `persist` / `hal
 
 - **AC-C08-01 / 02 / 03 / 06が充足した**。AC-C08-06はIssue #13が挙げる3つの中断点——pending user request / pending `HOST_ACTION` / 停止procedureの途中——すべてを別processからresumeして固定した
 - **`HOST_ACTION`と停止procedureのcross-process testはtest所有のdriver processを使う**。`python -m ...runtime`は`default_ports`を使うため、まだ実装の無い2 port（action payloadとagent recordの本文）を要する経路を通せない。driverはその2つと停止portだけをfakeにして**同じ製品関数**（`step` / `submit_result`）を呼ぶ。resume機構そのものは製品codeである
-- AC-C08-02は「fakeのcounterが0」だけでなく、`runtime` packageがprocess起動もキー入力注入も**構造的に持たない**ことをAST contractで固定した。PR-3b2がspawnerを足すときはこの契約を明示的に更新することになる
+- AC-C08-02は「fakeのcounterが0」だけでなく、`runtime` packageがprocess起動もキー入力注入も**構造的に持たない**ことをAST contractで固定した
+
+> **更新（ADR-0022 決定15-a〜15-e）**: PR-3b3がheadless adapterを足したため、spawnの検査対象から`host_headless.py`を外した。代わりに「`spawn_tree`をimportするmoduleはそれ1つだけ」を固定しており、主経路への漏れは引き続き検出される。キー入力注入の禁止と`subprocess`直接importの禁止は全moduleのままである。
 - **AC-C08-04（active / headlessの同値性）は未充足**である。`HostPort`と`drive`という構造は用意したが、headless側の実装はPR-3b2が入れる
 - **緊急停止のdurableな表現とsignal handlerも未着手**である（ADR-0019 決定17がPR-3bへ送った項目のうち、PR-3b1は扱わない）
 - `session.json`の書き手は当面testだけである。C-12が実CLIを持つときに書き手を引き取る。全field必須なので、C-12がどの値をどこから解決するかはそのPhaseの設計として明示的に決まる
