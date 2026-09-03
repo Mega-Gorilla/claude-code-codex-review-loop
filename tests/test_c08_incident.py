@@ -50,7 +50,7 @@ from claude_code_codex_review_loop.domain.values import (
     RecordKind,
     State,
 )
-from claude_code_codex_review_loop.runtime import default_ports, step
+from claude_code_codex_review_loop.runtime import PortUnavailableError, default_ports, step
 from claude_code_codex_review_loop.state import (
     CheckpointLoaded,
     CheckpointStoreError,
@@ -434,6 +434,13 @@ class _RecordedQueue:
         return FakeRecordEvents(recorded_bindings=recorded).event_for(evidence, record)
 
 
+class _UnavailableBody:
+    """incident本文を作る実装が無いport（内容の構成はC-06の責務である）。"""
+
+    def body_for(self, kind: RecordKind, payload: Mapping[str, object]) -> str:
+        raise PortUnavailableError("incident本文を作る実装が無い（C-06が持つ）")
+
+
 def _drive(env: Any, ports: Any) -> Any:
     return step(
         paths=env.paths,
@@ -626,4 +633,31 @@ class TestTheDriverReportsFailures:
         result = _drive(env, ports)
         assert isinstance(result.outcome, EngineStopped)
         assert result.outcome.code == "incident_bindings_mismatch"
+        assert result.trace.incidents == 0
+
+    def test_the_default_ports_stop_instead_of_raising(self, tmp_path: Any) -> None:
+        """未実装portは**例外ではなく**構造化outcomeで返る（担当componentを名指しする）。
+
+        `step`の契約は「portが未実装なら`EngineStopped`へ写す」ことである。ここが漏れると
+        例外がCLIまで飛び、進退を構造化outcomeで決めるという前提が壊れる。
+        """
+        env = _runtime(tmp_path, _recording_state(deferred=(violation(),)))
+        result = _drive(env, env.ports())
+        assert isinstance(result.outcome, EngineStopped)
+        assert result.outcome.code == "port_unavailable"
+        assert "C-06" in result.outcome.detail
+        assert result.trace.incidents == 0
+
+    def test_an_unavailable_body_port_stops_the_same_way(self, tmp_path: Any) -> None:
+        """本文portも同じ境界の内側にある（payloadが供給できても本文で落ちる経路）。"""
+        env = _runtime(tmp_path, _recording_state(deferred=(violation(),)))
+        ports = replace(
+            _ports(env),
+            body=_UnavailableBody(),
+            records=_LiveChain(env, (violation(),)),
+        )
+        result = _drive(env, ports)
+        assert isinstance(result.outcome, EngineStopped)
+        assert result.outcome.code == "port_unavailable"
+        assert "C-06" in result.outcome.detail
         assert result.trace.incidents == 0

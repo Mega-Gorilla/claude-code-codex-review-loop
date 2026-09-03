@@ -29,7 +29,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 from ..domain import events as ev
 from ..domain.commands import Command
@@ -464,7 +463,15 @@ def _reissue(loaded: RunContext, action: PendingAction) -> HostActionIssued | En
     )
 
 
-def _procedure_outcome(procedure: Procedure, machine_state: MachineState) -> AdvanceOutcome:
+# 手続き中のrunが取り得るprocedure（`NormalProcedure`は呼び出し元が除いている）。
+# この直和で受けると、haltの2種を除いた残りが`RecordingIncidentProcedure`であることを
+# 型が保証するため、castで押し通す必要がない
+_ActiveProcedure = CancellingProcedure | HaltingForBlockProcedure | RecordingIncidentProcedure
+
+
+def _procedure_outcome(
+    procedure: _ActiveProcedure, machine_state: MachineState
+) -> AdvanceOutcome:
     """手続き中に次へ進める作業（procedureが期待値を表すのでawaitingは無い）。
 
     **pending recordより先に見る**。cancelの経路2はstale pendingを監査参照として保持する
@@ -477,7 +484,6 @@ def _procedure_outcome(procedure: Procedure, machine_state: MachineState) -> Adv
     # （C-01のI-D2 -> C-04）からも入るため、C-13へは委ねられない
     if machine_state.pending_record is not None:
         return PersistRequired(record=machine_state.pending_record)
-    procedure = cast(RecordingIncidentProcedure, procedure)
     # 記録対象が空にならないことはC-01の`INCIDENT_NEEDS_DEFERRED`不変条件が保証する
     # （`MachineState`の構築時点で強制される。その依存はtestで固定する）
     bindings = tuple(ref.binding for ref in machine_state.deferred_integrity)

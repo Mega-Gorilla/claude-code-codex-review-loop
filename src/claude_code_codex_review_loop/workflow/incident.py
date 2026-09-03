@@ -114,7 +114,7 @@ def record_incident(
         head_sha=head_sha,
     )
     payload = dict(incident_port.payload_for(context))
-    validation = validate_object(INTEGRITY_INCIDENT, dict(payload))
+    validation = validate_object(INTEGRITY_INCIDENT, payload)
     if not validation.ok:
         codes = ",".join(sorted(error.code for error in validation.errors))
         return EngineStopped("incident_payload_invalid", f"incident payloadが検証を通らない（{codes}）")
