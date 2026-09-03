@@ -207,5 +207,5 @@ floor = 100
 "src/claude_code_codex_review_loop/runtime/host_headless.py" = 217
 "tests/c08_support/headless.py" = 176
 "tests/test_c08_equivalence.py" = 174
-"tests/test_c08_incident.py" = 663
+"tests/test_c08_incident.py" = 665
 "tests/test_c08_headless.py" = 505

@@ -9,7 +9,9 @@ incident recordは**まさにchainが壊れているときに投稿するrecord*
 
 1. 記録しようとしているのが`INTEGRITY_INCIDENT` recordであること
 2. runが`RecordingIncidentProcedure`にいること
-3. chainのviolationが**すべて`deferred_integrity`に入っている**こと
+3. chainのviolationが**すべてC-01の既知**であること。既知とは`deferred_integrity`
+   （未記録）と`incident_record.recorded_bindings`（記録済みの台帳）の和である。
+   台帳を含めないと、部分記録（I-VR）の2周目で記録済みが「新しい検出」に戻る
 
 このfileはまずその判定を固定し（既定の挙動が1 bitも変わらないことを含む）、次に
 executorとend-to-endを見る。
