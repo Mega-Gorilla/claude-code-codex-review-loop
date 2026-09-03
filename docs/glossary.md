@@ -68,6 +68,8 @@
 | headless adapter | 対話型sessionが無い復旧経路のClaude coderを、Controllerがsubprocessとして起動する`HostPort`実装。engineから見たinterfaceが主経路と同一であることが、active / headlessの同値性（AC-C08-04）を構造で担保する（ADR-0022） |
 | host log | headless hostのstderrを`policy.redaction`へ通した`host.log`。CIのartifactが集めるのはこれだけで、redact前の`host.stderr`と`host.stdout`（submit envelope）は収集しない（ADR-0022） |
 | block intervention request | `BLOCKED`のrunへユーザーの介入を求める`AWAIT_USER` request。待機の識別子は`awaiting`ではなく解除対象の**block attempt binding**で、C-01が`BLOCK_INTERVENTION`を受理するblock（`NO_PROGRESS`の膠着・外部依存）でだけ発行する（ADR-0023） |
+| integrity incident record | 検出したintegrity violationをcanonical recordとして残す監査記録。全violationが検証済みのこのrecordへ含まれるまでterminalへ進まない（AC-C01-12）。**まさにchainが壊れているときに投稿するrecord**なので、chainのviolationでは拒否しない（ADR-0024） |
+| recorded violation ledger | このrunが既にincident recordへ含めたviolation bindingの台帳（checkpointの`incident_record`）。violationは記録してもchainから消えない一方、C-01は記録済みを`deferred_integrity`から外すため、台帳が無いと記録済みを新しい検出として再入力してしまう（ADR-0024 決定5） |
 | resume context | resumeがGitHubとlocal cacheの照合から組み立てる再開の判断材料（run選択・turn同一性・pending record・head binding・承認の有無・直接回答候補）。`MachineState`の完全replayではない |
 | advertised head | PRが現在advertiseしているhead SHA。C-05のPR metadata primitiveで観測し、承認のbind先と一致するかがAC-C07-03の判定になる。隔離checkout側の照合はC-09 |
 | pending reissue directive | 中断したrecordを**同一key・同一本文**で再発行するための指示（binding・完成形本文・body hash）。C-07は投稿せず、実行はC-01のR-P経由でC-08が行う |

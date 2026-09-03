@@ -27,7 +27,11 @@ from c07_support.helpers import (
 )
 
 from claude_code_codex_review_loop.domain._rules_workflow import BLOCKED_CONTINUATIONS
-from claude_code_codex_review_loop.domain.events import BlockResolvedIntervention, Event
+from claude_code_codex_review_loop.domain.events import (
+    BlockResolvedIntervention,
+    Event,
+    IntegrityIncidentVerified,
+)
 from claude_code_codex_review_loop.domain.values import (
     Awaiting,
     BlockContext,
@@ -230,11 +234,20 @@ class FakeRecordEvents:
     events: Mapping[RecordKind, Event] = field(default_factory=dict)
     # port_mappedな写像に要るblock（C-10 / C-11が所有する値の供給元）
     block: BlockContext | None = None
+    # incident recordが記録したviolation binding集合（構成・検証はC-06）
+    recorded_bindings: tuple[OpaqueBinding, ...] = ()
 
     def event_for(self, evidence: RecordEvidence, record: VerifiedRecord) -> Event:
         override = self.events.get(record.kind)
         if override is not None:
             return override
+        if record.kind is RecordKind.INTEGRITY_INCIDENT:
+            # incident recordはengine自身が作るrecordで、`RESULT_VARIANTS`（agentまたは
+            # ユーザーが返す結果のregistry）には無い。`recorded_bindings`の構成・検証は
+            # C-06の領域なので、`report` / `head`と同じくportが供給する
+            return IntegrityIncidentVerified(
+                evidence=evidence, recorded_bindings=self.recorded_bindings
+            )
         variant = RESULT_VARIANTS[record.kind]
         if variant.port_mapped:
             return _port_mapped_event(evidence, record, self.block)

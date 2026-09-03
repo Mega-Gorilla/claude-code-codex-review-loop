@@ -15,6 +15,9 @@ checkpointと同じrun directoryに置くのは、**別processが同じportを�
 
 from __future__ import annotations
 
+import dataclasses
+from typing import Final
+
 from .registry import (
     SchemaDefinition,
     SchemaKind,
@@ -32,6 +35,8 @@ def _env_map() -> Field:
     """子processへ渡す環境変数の全体（任意keyのstring map）。"""
     return Field(types=(dict,), values=text(non_empty=False))
 
+
+DEFAULT_CONTROLLER_SPEAKER: Final = "Controller"
 
 SESSION_CONFIG = SchemaDefinition(
     kind=SchemaKind.SESSION_CONFIG,
@@ -73,6 +78,11 @@ SESSION_CONFIG = SchemaDefinition(
                 "speaker": text(),
                 "model": text(),
                 "user_speaker": text(),
+                # Controller自身の記録（incident record）の表示名。optional + 宣言済み既定値
+                # なのでadditive変更である（ADR-0004 rule 2 / 12。version bumpなし）
+                "controller_speaker": dataclasses.replace(
+                    text(required=False), default=DEFAULT_CONTROLLER_SPEAKER
+                ),
                 # process tree停止のgrace period（C-03）
                 "halt_grace_ms": integer(),
             },

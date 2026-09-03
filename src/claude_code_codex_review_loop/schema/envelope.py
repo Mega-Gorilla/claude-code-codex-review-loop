@@ -513,6 +513,18 @@ _SECTIONS: dict[str, Field] = {
         },
         required=False,
     ),
+    # incident_recordはPhase 8 PR-3dのadditive追加（新しいoptional sectionのため
+    # version bumpなし。ADR-0004 rule 2 / 10）: **この runが既にincident recordへ含めた
+    # violation**の台帳である（ADR-0024 決定5）。
+    #
+    # violationは`verify_record_chain`がliveのGitHubから毎回再導出するため、記録しても
+    # chainからは消えない。一方C-01は記録済みviolationを`deferred_integrity`から外す。
+    # 台帳が無いと、記録済みのviolationを次のcycleで「新しい検出」としてC-01へ再入力し、
+    # 部分記録（I-VR）のrunが永久に循環する。
+    "incident_record": obj(
+        {"recorded_bindings": array(opaque(), required=False)},
+        required=False,
+    ),
     # stop_requestはPhase 8 PR-3b2のadditive追加: **緊急停止の意図**（ADR-0021）。
     # `processes`は「treeが在る」ことしか言わず「止めるべき」とは言わない。C-01は緊急停止を
     # `NormalProcedure`のまま完了させる（C-05 rule）ため、停止失敗時の`RunFailed`はF-01で

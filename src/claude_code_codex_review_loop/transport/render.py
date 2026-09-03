@@ -63,6 +63,25 @@ def prepare_user_body(user_body: str, *, speaker: str, route: str) -> PreparedBo
     )
 
 
+def prepare_controller_body(controller_body: str, *, speaker: str) -> PreparedBody:
+    """Controller自身の記録を公開用へ変換する: 改行正規化 -> sanitize -> redact -> header。
+
+    `prepare_public_body`はagent発言用でmodelを、`prepare_user_body`は転記用で入力経路を
+    要求するが、incident recordを書いたのは**Controller自身**でどちらでもない。存在しない
+    modelや入力経路をheaderへ書かないために別の入口を持つ（sanitize / redactは同じ単一
+    choke pointを通す）。
+    """
+    _validate_header_field("speaker", speaker)
+    sanitized = sanitize_agent_body(normalize_newlines(controller_body))
+    redacted = redact(sanitized.text)
+    text = f"**{speaker}**\n\n{redacted.text}"
+    return PreparedBody(
+        text=text,
+        redaction_hits=redacted.hits,
+        escaped_marker_count=sanitized.escaped_count,
+    )
+
+
 def prepare_public_body(agent_body: str, *, speaker: str, model: str) -> PreparedBody:
     """agent発言を公開用へ変換する: 改行正規化 -> sanitize -> redact -> headerの前置。"""
     _validate_header_field("speaker", speaker)

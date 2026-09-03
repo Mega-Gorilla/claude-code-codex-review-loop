@@ -51,6 +51,7 @@ from claude_code_codex_review_loop.workflow import (
     EngineStopped,
     HaltRequired,
     HostActionIssued,
+    IncidentRequired,
     PersistRequired,
     Terminal,
     advance,
@@ -508,8 +509,8 @@ class TestProcedureOutcomes:
         env = seed(tmp_path, state=state)
         assert _advance(env) == PersistRequired(record=record)
 
-    def test_an_incident_without_a_pending_record_stops(self, tmp_path) -> None:
-        """`RecordIntegrityIncident`の実行はC-08の責務だが、まだ実装が無い（PR-3d）。
+    def test_an_incident_without_a_pending_record_asks_for_one(self, tmp_path) -> None:
+        """pendingが無ければ`RecordIntegrityIncident`の実行を求める（PR-3d。ADR-0024）。
 
         この手続きへはMERGINGのoutcome確定だけでなく、**cancel中のintegrity検出**
         （C-01のI-D2 -> C-04）からも入るため、MERGINGを持つC-13へは委ねられない。
@@ -527,7 +528,10 @@ class TestProcedureOutcomes:
         )
         env = seed(tmp_path, state=state)
         outcome = _advance(env)
-        assert isinstance(outcome, EngineStopped) and outcome.code == "incident_executor_missing"
+        assert isinstance(outcome, IncidentRequired)
+        # 記録対象はC-01の状態から決まる（`_reissue_incident_request`と同じ導出）
+        assert outcome.violation_bindings == (OpaqueBinding("iv:gap:run-1:2"),)
+        assert outcome.audit is None
 
 
 class TestBlocked:

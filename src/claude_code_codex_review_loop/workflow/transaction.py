@@ -26,7 +26,13 @@ from dataclasses import dataclass
 from ..domain import events as ev
 from ..domain.commands import Command
 from ..domain.machine import transition
-from ..domain.values import MachineState, OpaqueBinding, RecordKind, TransitionRejected
+from ..domain.values import (
+    MachineState,
+    OpaqueBinding,
+    RecordingIncidentProcedure,
+    RecordKind,
+    TransitionRejected,
+)
 from ..identity.errors import IdentityError
 from ..identity.record_chain import (
     ChainVerification,
@@ -141,6 +147,17 @@ class ProduceRejected:
 ProduceOutcome = ProducedRecord | ProduceRejected
 
 
+def _is_integrity_audit(machine_state: MachineState, kind: RecordKind) -> bool:
+    """整合性の監査記録そのものか（incident record かつ incident記録中）。
+
+    C-01の`INCIDENT_PENDING_SCOPE`不変条件が両者を結び付けているが、`produce_record`は
+    pendingが**まだ無い**時点で呼ばれるため、ここでは手続きを直接見る。
+    """
+    return kind is RecordKind.INTEGRITY_INCIDENT and isinstance(
+        machine_state.procedure, RecordingIncidentProcedure
+    )
+
+
 def produce_record(
     machine_state: MachineState,
     *,
@@ -156,8 +173,13 @@ def produce_record(
     host actionの結果（`engine`）とユーザー入力の転記（`user_input`）は、本文の作り方と
     受理の記録だけが違い、**採番から`RecordProduced`までは同じ**である。分けて書くと
     chain gateやC-01の受理判定が2箇所へ散るため、ここへ集約する。
+
+    **incident recordだけはchainのviolationで拒否しない**（ADR-0024 決定1）。それを記録する
+    ためのrecordを「chainが壊れている」という理由で作れないのは循環だからである。取りこぼしが
+    起きないことは別の2点が担保する: `persist`が未知のviolationを投稿前にC-01へ渡すことと、
+    C-01が「全violationが検証済みrecordへ含まれるまでterminalへ進まない」こと（AC-C01-12）。
     """
-    if not chain.is_intact:
+    if not chain.is_intact and not _is_integrity_audit(machine_state, kind):
         # 壊れたchainの上でseqとprevを決めない（integrityの解消はC-01のblockが扱う）
         return ProduceRejected("chain_violation", f"chainにviolationがある（{len(chain.violations)}件）")
     issued = issue_transaction(

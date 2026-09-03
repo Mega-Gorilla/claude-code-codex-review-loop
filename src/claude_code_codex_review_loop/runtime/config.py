@@ -25,7 +25,7 @@ from ..identity.errors import IdentityError
 from ..identity.fs_permissions import replace_private_text, verify_private_file
 from ..schema.projection import canonical_json
 from ..schema.registry import validate
-from ..schema.session import SESSION_CONFIG
+from ..schema.session import DEFAULT_CONTROLLER_SPEAKER, SESSION_CONFIG
 from ..state import StatePaths, run_directory
 from ..transport.gh import GhContext, RepoRef, RetryPolicy
 
@@ -66,6 +66,8 @@ class SessionConfig:
     speaker: str
     model: str
     user_speaker: str
+    # Controller自身の記録（incident record）の表示名
+    controller_speaker: str
     halt_grace_seconds: float
 
     @property
@@ -130,6 +132,12 @@ def _env(payload: Mapping[str, object], name: str) -> dict[str, str]:
     }
 
 
+def _optional_text(payload: Mapping[str, object], name: str, fallback: str) -> str:
+    """欠けていればschemaが宣言した既定値を使う（宣言済み既定値の補完）。"""
+    value = payload.get(name)
+    return fallback if value is None else str(value)
+
+
 def read_session_config(
     paths: StatePaths, run_id: str
 ) -> SessionConfig | ConfigUnavailable:
@@ -179,6 +187,11 @@ def read_session_config(
         speaker=_text(payload, "speaker"),
         model=_text(payload, "model"),
         user_speaker=_text(payload, "user_speaker"),
+        # 既存configとの互換のためoptional。値域はschemaが宣言し、既定値もそこが正本である
+        # （ADR-0004 rule 2 / 12。version bumpなし）
+        controller_speaker=_optional_text(
+            payload, "controller_speaker", DEFAULT_CONTROLLER_SPEAKER
+        ),
         halt_grace_seconds=_seconds(payload, "halt_grace_ms"),
     )
 

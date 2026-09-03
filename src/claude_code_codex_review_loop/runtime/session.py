@@ -36,6 +36,8 @@ from ..workflow import (
     HaltFailed,
     HaltRequired,
     HostActionIssued,
+    IncidentRecorded,
+    IncidentRequired,
     IntegrityDetected,
     PersistFailed,
     PersistRequired,
@@ -46,6 +48,7 @@ from ..workflow import (
     emergency_stop,
     halt,
     persist,
+    record_incident,
     request_emergency_stop,
     submit,
 )
@@ -72,6 +75,8 @@ class StepTrace:
     # 緊急停止: 要求を記録した回数と、実行して完了した回数
     stop_requested: int = 0
     stopped: int = 0
+    # incident recordを作った回数（`RecordIntegrityIncident`の実行）
+    incidents: int = 0
 
 
 @dataclass(frozen=True)
@@ -190,9 +195,10 @@ def _run_step(
     halted = 0
     requested = 0
     stopped_count = 0
+    incidents = 0
 
     def trace() -> StepTrace:
-        return StepTrace(tuple(persisted), halted, requested, stopped_count)
+        return StepTrace(tuple(persisted), halted, requested, stopped_count, incidents)
 
     work = 0
     while True:
@@ -223,9 +229,9 @@ def _run_step(
             return StepResult(
                 EngineStopped("chain_violation", str(error)), trace()
             )
-        if isinstance(outcome, (PersistRequired, HaltRequired, EmergencyStopRequired)) and (
-            work >= MAX_ENGINE_WORK
-        ):
+        if isinstance(
+            outcome, (PersistRequired, HaltRequired, EmergencyStopRequired, IncidentRequired)
+        ) and (work >= MAX_ENGINE_WORK):
             # 上限**ちょうど**までは実行し、次の副作用を起こす前に止める
             return StepResult(
                 EngineStopped(
@@ -254,6 +260,13 @@ def _run_step(
             persisted.append(outcome.record.binding.value)
             work += 1
             continue
+        if isinstance(outcome, IncidentRequired):
+            incident = _incident(paths, config, ports)
+            if isinstance(incident, EngineStopped):
+                return StepResult(incident, trace())
+            incidents += 1
+            work += 1
+            continue
         if isinstance(outcome, HaltRequired):
             stopped = _halt(paths, config, ports, stop)
             if isinstance(stopped, EngineStopped):
@@ -269,6 +282,23 @@ def _run_step(
                 )
             continue
         return StepResult(outcome, trace())
+
+
+def _incident(
+    paths: StatePaths, config: SessionConfig, ports: PortSet
+) -> IncidentRecorded | EngineStopped:
+    """`RecordIntegrityIncident`を実行する（incident recordを1件作る）。"""
+    return record_incident(
+        paths=paths,
+        run_id=config.run_id,
+        repository=config.repository,
+        number=config.number,
+        head_sha=config.head_sha,
+        incident_port=ports.incident,
+        body_port=ports.body,
+        records_port=ports.records,
+        speaker=config.controller_speaker,
+    )
 
 
 def _emergency(

@@ -29,6 +29,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from ..domain import events as ev
 from ..domain.commands import Command
@@ -41,8 +42,10 @@ from ..domain.values import (
     HaltingForBlockProcedure,
     MachineState,
     NormalProcedure,
+    OpaqueBinding,
     PendingRecord,
     Procedure,
+    RecordingIncidentProcedure,
     RecordKind,
     TransitionRejected,
 )
@@ -165,6 +168,19 @@ class EmergencyStopRequired:
 
 
 @dataclass(frozen=True)
+class IncidentRequired:
+    """`RecordIntegrityIncident`の実行が必要（incident recordをまだ作っていない）。
+
+    payloadは`deferred_integrity`と`procedure.audit`から決まる（C-01が判断12で定めた
+    決定論的な構成で、resume経路の`_reissue_incident_request`と同じ導出である）。実行は
+    `incident.record_incident`が行い、`HaltRequired` -> `halt`と同じ形をとる。
+    """
+
+    violation_bindings: tuple[OpaqueBinding, ...]
+    audit: PendingRecord | None
+
+
+@dataclass(frozen=True)
 class Blocked:
     """`BLOCKED`。解消はC-08の外から来る（limit引き上げ・ユーザー介入・integrity復旧）。
 
@@ -187,6 +203,7 @@ AdvanceOutcome = (
     | PersistRequired
     | HaltRequired
     | EmergencyStopRequired
+    | IncidentRequired
     | Blocked
     | Terminal
     | EngineStopped
@@ -455,16 +472,16 @@ def _procedure_outcome(procedure: Procedure, machine_state: MachineState) -> Adv
     """
     if isinstance(procedure, (CancellingProcedure, HaltingForBlockProcedure)):
         return HaltRequired(procedure=procedure)
-    # RecordingIncidentProcedure: incident recordの投稿はC-08が駆動する（下のPersistRequired）。
-    # まだ実装が無いのは`RecordIntegrityIncident`（payloadの作成依頼）の実行で、これは
-    # **C-08の責務**である。この手続きへはMERGINGのoutcome確定だけでなく、cancel中の
-    # integrity検出（C-01のI-D2 -> C-04）からも入るため、C-13へは委ねられない
+    # RecordingIncidentProcedure: pendingがあれば投稿へ、無ければincident recordの作成へ。
+    # この手続きへはMERGINGのoutcome確定だけでなく、cancel中のintegrity検出
+    # （C-01のI-D2 -> C-04）からも入るため、C-13へは委ねられない
     if machine_state.pending_record is not None:
         return PersistRequired(record=machine_state.pending_record)
-    return EngineStopped(
-        "incident_executor_missing",
-        "RecordIntegrityIncidentの実行がまだ無い（C-08の責務。PR-3dが追加する）",
-    )
+    procedure = cast(RecordingIncidentProcedure, procedure)
+    # 記録対象が空にならないことはC-01の`INCIDENT_NEEDS_DEFERRED`不変条件が保証する
+    # （`MachineState`の構築時点で強制される。その依存はtestで固定する）
+    bindings = tuple(ref.binding for ref in machine_state.deferred_integrity)
+    return IncidentRequired(violation_bindings=bindings, audit=procedure.audit)
 
 
 def _describes_current_instance(

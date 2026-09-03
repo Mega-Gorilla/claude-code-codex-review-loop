@@ -22,6 +22,7 @@ C-05の`ensure_comment_posted`が入口でsearch-firstを行うため、重複�
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..domain import events as ev
@@ -33,6 +34,7 @@ from ..domain.values import (
     OpaqueBinding,
     OpaqueRef,
     RecordEvidence,
+    RecordKind,
     TransitionRejected,
 )
 from ..identity.record_chain import VerifiedRecord
@@ -50,7 +52,12 @@ from ..state import (
 from ..transport.conversation import ensure_comment_posted
 from ..transport.gh import GhContext, RepoRef, RetryPolicy, TransportError
 from .actions import ActionRegistryError
-from .checkpoint_view import SectionUnavailable, with_verified_machine_state
+from .checkpoint_view import (
+    SectionUnavailable,
+    read_recorded_violations,
+    with_recorded_violations,
+    with_verified_machine_state,
+)
 from .ports import RecordEventPort, RecordSourcePort
 from .run_context import EngineStopped, RunContext, load_run
 
@@ -140,6 +147,53 @@ def _detect_violations(
     )
 
 
+def _unknown_violations(
+    run: RunContext, violations: tuple[IntegrityEvidenceRef, ...]
+) -> tuple[IntegrityEvidenceRef, ...]:
+    """まだC-01が受理していないviolationだけを返す（ADR-0024 決定1）。
+
+    incident recordは**まさにchainが壊れているときに投稿するrecord**である。violationは
+    `verify_record_chain`がliveのGitHubから毎回再導出するため、壊れたchainは壊れたままで
+    あり、`is_intact`だけでgateするとincident recordは永久に投稿できずrunがterminalへ
+    到達しない。
+
+    そこで許すのは次の2条件が揃う場合**だけ**である。
+
+    1. 永続化を待っているのが`INTEGRITY_INCIDENT` recordであること
+    2. chainのviolationが**すべてC-01の既知**であること。既知とは`deferred_integrity`
+       （未記録）と`incident_record.recorded_bindings`（記録済み）の和である
+
+    「runが`RecordingIncidentProcedure`にいること」を別途検査しないのは、C-01の
+    `INCIDENT_PENDING_SCOPE`不変条件が「`INTEGRITY_INCIDENT`のpendingはincident記録中に
+    限る」を`MachineState`の構築時点で強制しており、条件1がそれを含意するためである
+    （その依存はtestで固定する）。
+
+    新しいviolationは従来どおり検出が優先される。ここを緩めると、記録すべきviolationを
+    取りこぼしたままterminalへ進み得る（行き止まりより悪い）。
+    """
+    pending = run.machine_state.pending_record
+    if pending is None or pending.kind is not RecordKind.INTEGRITY_INCIDENT:
+        return violations
+    return _new_violations(run, violations)
+
+
+def _new_violations(
+    run: RunContext, violations: tuple[IntegrityEvidenceRef, ...]
+) -> tuple[IntegrityEvidenceRef, ...]:
+    """C-01がまだ知らないviolation（未記録でも記録済みでもないもの）。
+
+    **記録済みを差し引くのが要点**である。C-01は記録済みviolationを`deferred_integrity`から
+    外すが、chainからは消えない。差し引かないと記録済みを「新しい検出」として再入力し、
+    部分記録（I-VR）のrunが記録と再検出を往復して終わらない。
+    """
+    recorded = read_recorded_violations(run.payload)
+    known = {ref.binding.value for ref in run.machine_state.deferred_integrity}
+    if not isinstance(recorded, SectionUnavailable):  # pragma: no cover - 上と同じ理由で
+        # 読み込めたcheckpointの台帳は壊れていない（schemaが形を保証する）
+        known |= set(recorded)
+    return tuple(violation for violation in violations if violation.binding.value not in known)
+
+
 def _post(
     directive: PendingReissueRequired,
     *,
@@ -175,6 +229,18 @@ def _post(
     return None
 
 
+def _with_recorded(
+    payload: Mapping[str, object], event: ev.Event
+) -> dict[str, object] | SectionUnavailable:
+    """検証済みincident recordが記録したviolationを台帳へunionする（ADR-0024 決定5）。
+
+    値はC-06が構成・検証した`recorded_bindings`そのもので、C-08は解釈せず台帳へ写す。
+    """
+    if not isinstance(event, ev.IntegrityIncidentVerified):
+        return dict(payload)
+    return with_recorded_violations(payload, [binding.value for binding in event.recorded_bindings])
+
+
 def _verify_and_advance(
     run: RunContext,
     transaction: PendingTransaction,
@@ -187,8 +253,9 @@ def _verify_and_advance(
 ) -> PersistOutcome:
     """投稿後のchainを検証し、当該recordのeventでstateを進める。"""
     chain = records_port.chain(run_id)
-    if not chain.is_intact:
-        return _detect_violations(run, chain.violations, paths=paths, run_id=run_id)
+    unknown = _unknown_violations(run, chain.violations)
+    if unknown:
+        return _detect_violations(run, unknown, paths=paths, run_id=run_id)
     record = next((item for item in chain.records if item.key == transaction.binding), None)
     if record is None:
         return EngineStopped(
@@ -209,7 +276,15 @@ def _verify_and_advance(
         machine_state, commands = transition(run.machine_state, event)
     except (TransitionRejected, ev.IllegalEventError) as error:
         return EngineStopped("illegal_event", f"C-01が{type(event).__name__}を受理しない: {error}")
-    payload = with_verified_machine_state(run.payload, machine_state)
+    # **検証済みincident recordが記録したviolationを台帳へ**（決定5）。次のcycleが
+    # 記録済みを「新しい検出」として再入力しないための唯一の記憶である
+    ledger = _with_recorded(run.payload, event)
+    if isinstance(ledger, SectionUnavailable):  # pragma: no cover - CHECKPOINT schemaが
+        # `incident_record.recorded_bindings`をopaque文字列のarrayへ限定しており、読み込めた
+        # checkpointの台帳は壊れていない。readerが直和を返すのはschemaを通っていないpayloadを
+        # 受け取る呼び出しがあるためで、ここは`state_not_persistable`と同じ防御として残す
+        return EngineStopped("incident_ledger_unavailable", ledger.detail)
+    payload = with_verified_machine_state(ledger, machine_state)
     if isinstance(payload, SectionUnavailable):  # pragma: no cover - PR-3aで到達可能な
         # 全非terminal stateが表現できるようになった（round-trip testが固定）。表現範囲を
         # 広げるPhaseがここを踏むまで、`_apply`と同じ防御として残す
@@ -260,8 +335,9 @@ def persist(
         )
 
     chain = records_port.chain(run_id)
-    if not chain.is_intact:
-        return _detect_violations(run, chain.violations, paths=paths, run_id=run_id)
+    unknown = _unknown_violations(run, chain.violations)
+    if unknown:
+        return _detect_violations(run, unknown, paths=paths, run_id=run_id)
 
     outcome = evaluate_pending(transaction, run_id=run_id, records=chain.records)
     if isinstance(outcome, PendingUnavailable):
