@@ -67,7 +67,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", required=True)
     parser.add_argument("--run", required=True)
     parser.add_argument("--result", help="submitの入力（submit envelope file）")
-    parser.add_argument("--active-provider", choices=("claude", "codex"), help="active hostの明示的な識別")
+    parser.add_argument(
+        "--active-provider", choices=("claude", "codex"),
+        help="選択済みrunのHOST_ACTION事前検証用。選択なしrun・submitでは未使用（provider設定は変更しない）",
+    )
     return parser
 
 

@@ -173,7 +173,7 @@ def read_session_config(
         restored = restore_selection(
             canonical_json(cast(Mapping[str, object], payload["agent_selection"])).encode("utf-8")
             if "agent_selection" in payload else None,
-            run_id=run_id, repository=str(payload["repository"]), number=int(str(payload["number"])),
+            run_id=run_id, repository=_text(payload, "repository"), number=_int(payload, "number"),
         )
         if isinstance(restored, SelectionRejected):
             return ConfigUnavailable(detail=restored.code)

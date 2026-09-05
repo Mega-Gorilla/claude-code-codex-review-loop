@@ -24,7 +24,7 @@ Issue #52のPR-B1（ADR-0025）はcodecと事前検証interfaceを実装した�
 
 7. `step`の各反復、`submit_result`の受理前、`drive`のhost呼出直前で、disk上のsession選択・呼出側のimmutable選択・checkpoint digest・対象run / repository / numberを照合する。不一致時にcheckpoint、未完了envelope、receipt、transaction本文を修復・置換しない。
 8. 旧runは3設定fieldとcheckpoint sectionの双方が無い場合に従来経路を維持する。選択の片側だけの欠落は旧run扱いにしない。旧runへproviderを後付けする初期化は拒否し、speaker / modelから推測しない。全fileを同時に書き換え／削除できる攻撃者への認証・改竄防止をhashで主張しない。
-9. `HOST_ACTION`を返す前に`AgentExecution`の明示的なactive providerと信頼済みprobe集合でpreflightする。`drive`も同じ`step`を通る。module entry pointは`--active-provider`を受け取るが、値はhostの自己申告であってactor認証ではない。既定のnative probeは存在せず、設定しただけで実CLI対応済みとしない。
+9. `HOST_ACTION`を返す前に`AgentExecution`の明示的なactive providerと信頼済みprobe集合でpreflightする。`drive`も同じ`step`を通る。module entry pointは`--active-provider`を受け取るが、値はhostの自己申告であってactor認証ではない。このflagは選択済みrunのHOST_ACTION事前検証でのみ使用し、選択なしrun・submitでは未使用とする（helpにも明記）。providerの設定・切替・旧runへの後付けを行うflagではない。既定のnative probeは存在せず、設定しただけで実CLI対応済みとしない。
 10. `AWAIT_USER`、受理済みsubmitの再送、recordの永続化、停止にCLI起動可否を要求しない。ただし設定bindingは照合する。preflight前に既存engineがenvelopeをlocal保存する場合があり、拒否時も未完了actionを残し、次回は同じnonceで再提示する。既存の未実装payload port等でpreflightより先に止まる場合もある。
 11. 設定不一致でも記録済み緊急停止はlocal停止経路で実行してから拒否を返す。設定不一致を理由にprocess treeを放置せず、停止後に通常処理へ戻らない。checkpointのtarget／state自体を復元できない場合は既存の安全側停止に従う。
 12. guardはruntimeの実行入口を対象とする。C-07のread-only resume観測はstate遷移を行わず、このPRでは変更しない。下位workflow primitiveを直接使う後続componentは、このruntime境界を通す必要がある。controller外の同一userによる同時file改変への排他的な防御や、role / provider / instanceを結果へ認証bindingする機能は本PRではない。

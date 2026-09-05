@@ -181,7 +181,8 @@ def test_partial_ready_config_requires_initial_checkpoint_hash(tmp_path):
     assert read_session_config(env.paths, RUN) == ConfigUnavailable("agent_initialization_invalid")
 
 
-def test_legacy_in_memory_caller_without_session_file_keeps_old_contract(tmp_path):
+@pytest.mark.parametrize("provider", [None, "claude", "codex"])
+def test_legacy_in_memory_caller_without_session_file_keeps_old_contract(tmp_path, provider):
     env = environment(tmp_path)
     cp = checkpoint_path(env.paths, RUN)
     payload = load_checkpoint(cp).payload
@@ -190,4 +191,4 @@ def test_legacy_in_memory_caller_without_session_file_keeps_old_contract(tmp_pat
     module.config_path(env.paths, RUN).unlink()
     config = replace(env.config, agent_selection=None)
     assert check_agent_binding(env.paths, config) is None
-    assert module.check_agent_execution(config, module.AgentExecution()) is None
+    assert module.check_agent_execution(config, module.AgentExecution(active_provider=provider)) is None

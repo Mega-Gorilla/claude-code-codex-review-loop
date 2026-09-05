@@ -68,6 +68,22 @@ def _gate_env(tmp_path: Path) -> RuntimeEnv:
 
 
 class TestAdvance:
+    @pytest.mark.parametrize("provider", ["claude", "codex"])
+    def test_active_provider_flag_does_not_change_a_legacy_run(self, tmp_path: Path, provider: str) -> None:
+        env = _gate_env(tmp_path)
+        before = (env.run_dir / "session.json").read_bytes()
+        code, payload = _run(env, "advance", "--active-provider", provider)
+        assert code == entry.EXIT_OK and payload["outcome"] == "AWAIT_USER"
+        assert (env.run_dir / "session.json").read_bytes() == before
+        checkpoint = json.loads((env.run_dir / "checkpoint.json").read_bytes())
+        assert "agent_selection" not in checkpoint
+
+    def test_help_explains_active_provider_scope(self, capsys) -> None:
+        with pytest.raises(SystemExit) as stopped:
+            entry.main(["--help"])
+        assert stopped.value.code == 0
+        assert "選択なしrun・submitでは未使用" in capsys.readouterr().out
+
     def test_a_user_request_is_reported_with_its_paths(self, tmp_path: Path) -> None:
         """hostが応答するのに必要なpathとIDが構造化出力で返る。"""
         env = _gate_env(tmp_path)
