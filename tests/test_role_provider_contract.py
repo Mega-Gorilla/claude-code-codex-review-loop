@@ -22,6 +22,7 @@ from claude_code_codex_review_loop.runtime.agent_selection import (
     restore_selection,
 )
 from claude_code_codex_review_loop.schema import REGISTRY, SchemaKind, repair_and_validate
+from claude_code_codex_review_loop.schema.validate import PublicError
 
 
 def payload():
@@ -45,6 +46,10 @@ def restored(data, **kwargs):
     target = dict(run_id="run-1", repository="owner/repo", number=12)
     target.update(kwargs)
     return restore_selection(data, **target)
+
+
+def rejected(code, role):
+    return SelectionRejected(code, (PublicError(code, role),))
 
 
 @dataclass
@@ -220,14 +225,14 @@ def test_active_provider_mismatch_stops_before_probing(active):
     selected = selection()
     probes = probes_for(selected)
     outcome = preflight_selection(selected, probes, active_provider=active)
-    assert outcome == SelectionRejected("active_provider_mismatch")
+    assert outcome == rejected("active_provider_mismatch", "coder")
     assert not any(probe.calls for probe in probes)
 
 
 def test_no_silent_conversion_from_active_to_headless():
     selected = selection(mode="headless")
     outcome = preflight_selection(selected, [], active_provider="claude")
-    assert outcome == SelectionRejected("active_host_in_headless_mode")
+    assert outcome == rejected("active_host_in_headless_mode", "coder")
 
 
 def test_invalid_typed_selection_is_revalidated_before_probing():
@@ -237,14 +242,16 @@ def test_invalid_typed_selection_is_revalidated_before_probing():
 
 
 def test_default_empty_registry_does_not_claim_native_support():
-    assert preflight_selection(selection(), [], active_provider="claude") == SelectionRejected("adapter_unavailable")
+    assert preflight_selection(selection(), [], active_provider="claude") == rejected("adapter_unavailable", "coder")
 
 
-def test_duplicate_registration_is_rejected():
+@pytest.mark.parametrize("role", [0, 1])
+def test_duplicate_registration_is_rejected(role):
     selected = selection()
     probes = probes_for(selected)
-    outcome = preflight_selection(selected, probes + [probes[0]], active_provider="claude")
-    assert outcome == SelectionRejected("adapter_duplicate")
+    outcome = preflight_selection(selected, probes + [probes[role]], active_provider="claude")
+    assert outcome == rejected("adapter_duplicate", probes[role].key.role)
+    assert not any(probe.calls for probe in probes)
 
 
 @pytest.mark.parametrize("field,value", [
@@ -255,19 +262,58 @@ def test_wrong_reviewer_adapter_key_cannot_be_used_as_fallback(field, value):
     selected = selection()
     probes = probes_for(selected)
     probes[1].key = replace(probes[1].key, **{field: value})
-    assert preflight_selection(selected, probes, active_provider="claude") == SelectionRejected("adapter_unavailable")
+    outcome = preflight_selection(selected, probes, active_provider="claude")
+    assert outcome == rejected("adapter_unavailable", "reviewer")
     assert probes[1].calls == []
 
 
 @pytest.mark.parametrize("failure", [
-    "cli_missing", "authentication_unavailable", "capability_unavailable", "version_unsupported",
+    "cli_missing", "authentication_unavailable", "capability_unavailable", "version_unsupported", "probe_error",
 ])
 @pytest.mark.parametrize("role", [0, 1])
 def test_native_readiness_failure_is_propagated_without_another_provider(failure, role):
     selected = selection()
     probes = probes_for(selected)
     probes[role].failure = failure
-    assert preflight_selection(selected, probes, active_provider="claude") == SelectionRejected(failure)
+    assert preflight_selection(selected, probes, active_provider="claude") == rejected(failure, probes[role].key.role)
     assert probes[role].calls
     if role == 0:
         assert probes[1].calls == []
+
+
+@pytest.mark.parametrize("role", [0, 1])
+@pytest.mark.parametrize("error", [
+    OSError("secret-path"), PermissionError("secret-token"), RuntimeError("secret-output"),
+    subprocess.TimeoutExpired(["secret-command"], 1, output="secret-stdout", stderr="secret-stderr"),
+], ids=["spawn", "permission", "unexpected", "timeout"])
+def test_probe_exception_is_role_bound_redacted_and_stops_probing(role, error, monkeypatch):
+    selected = selection()
+    probes = probes_for(selected)
+    calls = []
+
+    def fail(agent):
+        calls.append(agent)
+        raise error
+
+    monkeypatch.setattr(probes[role], "check", fail)
+    outcome = preflight_selection(selected, probes, active_provider="claude")
+    assert outcome == rejected("probe_error", probes[role].key.role)
+    assert "secret" not in repr(outcome)
+    assert calls == [getattr(selected, probes[role].key.role)]
+    assert probes[1].calls == []
+    assert probes[0].calls == ([] if role == 0 else [selected.coder])
+
+
+@pytest.mark.parametrize("role", [0, 1])
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+def test_probe_process_control_exceptions_are_not_swallowed(role, error_type, monkeypatch):
+    selected = selection()
+    probes = probes_for(selected)
+
+    def interrupt(agent):
+        raise error_type()
+
+    monkeypatch.setattr(probes[role], "check", interrupt)
+    with pytest.raises(error_type):
+        preflight_selection(selected, probes, active_provider="claude")
+    assert probes[1].calls == []

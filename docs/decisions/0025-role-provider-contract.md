@@ -2,7 +2,7 @@
 
 # ADR-0025: role別provider設定のcodecとadapter事前検証契約
 
-- Status: Proposed（Issue #52 PR-B1の実装案。review後に技術契約を確定する）
+- Status: Accepted（C-02 / C-08の技術契約。D-032のユーザー判断とは独立）
 - Date: 2026-09-05
 
 ## Context
@@ -16,7 +16,7 @@ D-032はcoder / reviewerへClaude Code / Codexを独立設定する拡張案で�
 
 本PRには製品の設定file保存・CLI option・agent実行・出力正規化・GitHub記録へのprovenance追加を含まない。既存の`step` / `submit_result` / `drive`へ新しい進行判断を足さない。したがって現行CLIからproviderを切り替えることはまだできない。
 
-## 契約案
+## 技術契約
 
 ### 1. C-02所有の独立schema
 
@@ -55,6 +55,10 @@ snapshotを持たない旧runは、新契約では`selection_missing_new_run_req
 
 probeは製品側が信頼する実装を渡すもので、外部JSONやagent出力から生成しない。fakeの成功はprobe interfaceの検証であり、認証やOS隔離の実証ではない。実行session・credential分離、process停止・timeout、native出力の正規化はC-09と後続adapter PRが実装する。最終報告のprovider選択も今回確定しない。
 
+`key`はI/Oせず例外を送出しない固定metadataとする。`check`は既知の未対応を`cli_missing` / `authentication_unavailable` / `capability_unavailable` / `version_unsupported`で返し、検証処理自体の失敗は`probe_error`で返す。native processのtimeout・停止・回収はprobeの責務であり、この同期interface自体は期限を強制しない。
+
+`preflight_selection`も`check`が送出した`Exception`を防御的に`probe_error`へ変換する。例外message・native出力・認証材料は公開結果へ含めず、`KeyboardInterrupt` / `SystemExit`等の`BaseException`は握り潰さない。roleに紐付く拒否は`SelectionRejected.errors`へ`PublicError(code, role)`を付け、coder / reviewerのどちらが失敗したかを固定語彙で示す。最初の失敗で停止し、後続probeの実行・別providerへのfallbackはしない。
+
 ## 検証と完了境界
 
 - 4組み合わせ × coder active/headlessのcodec・fake事前検証
@@ -62,6 +66,7 @@ probeは製品側が信頼する実装を渡すもので、外部JSONやagent出
 - 欠落・未知field・未知version・不正profile・不正mode・size / UTF-8 / JSON違反の拒否
 - 別processから同一bytesを復元、全選択項目の変更・別target・旧snapshot欠落を拒否
 - active provider不一致、未登録・重複・role違い・安全profile違い・version違いのadapterを拒否
+- role付きの未対応／probe_error拒否、例外messageの非露出、割込みの伝播
 - 既存C-02 registryの全kind検証へ新kindを含め、既存全testを回帰実行
 
 AC-RP-01 / 06 / 07 / 09の一部を準備するが、**いずれも本PR単独では完了扱いにしない**。active/headlessのengine同値性は未検証で、実CLIも起動しない。D-032はProposedを維持し、Issue #52は4組み合わせの実接続受入までopenのままとする。製品名・package名・CLI名や永続化済みCODEX識別子は変更しない。

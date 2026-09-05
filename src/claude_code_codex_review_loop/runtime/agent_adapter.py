@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from ..schema.validate import PublicError
 from .agent_selection import (
     AgentMode,
     AgentProvider,
@@ -29,7 +30,9 @@ class AdapterKey:
     contract_version: int
 
 
-ProbeFailure = Literal["cli_missing", "authentication_unavailable", "capability_unavailable", "version_unsupported"]
+ProbeFailure = Literal[
+    "cli_missing", "authentication_unavailable", "capability_unavailable", "version_unsupported", "probe_error",
+]
 
 
 @dataclass(frozen=True)
@@ -40,12 +43,16 @@ class AdapterReadiness:
 
 
 class AdapterProbe(Protocol):
-    """起動前検証だけのinterface。executeはrole別に後続PRで接続する。"""
+    """keyはI/Oしない固定metadata。checkの通常例外はprobe_errorへ変換する。"""
 
     @property
     def key(self) -> AdapterKey: ...
 
     def check(self, selection: RoleSelection) -> AdapterReadiness: ...
+
+
+def _rejected(code: str, role: AgentRole) -> SelectionRejected:
+    return SelectionRejected(code, (PublicError(code, role),))
 
 
 def preflight_selection(
@@ -64,13 +71,13 @@ def preflight_selection(
         return validated
     if selection.coder.mode == "active":
         if active_provider != selection.coder.provider:
-            return SelectionRejected("active_provider_mismatch")
+            return _rejected("active_provider_mismatch", "coder")
     elif active_provider is not None:
-        return SelectionRejected("active_host_in_headless_mode")
+        return _rejected("active_host_in_headless_mode", "coder")
     registered: dict[AdapterKey, AdapterProbe] = {}
     for probe in probes:
         if probe.key in registered:
-            return SelectionRejected("adapter_duplicate")
+            return _rejected("adapter_duplicate", probe.key.role)
         registered[probe.key] = probe
     roles: tuple[tuple[AgentRole, RoleSelection], ...] = (("coder", selection.coder), ("reviewer", selection.reviewer))
     for role, selected in roles:
@@ -83,8 +90,12 @@ def preflight_selection(
         )
         selected_probe = registered.get(key)
         if selected_probe is None:
-            return SelectionRejected("adapter_unavailable")
-        readiness = selected_probe.check(selected)
+            return _rejected("adapter_unavailable", role)
+        try:
+            readiness = selected_probe.check(selected)
+        except Exception:
+            # native出力・例外messageを公開せず、割込み等のBaseExceptionは伝播する。
+            return _rejected("probe_error", role)
         if readiness.failure is not None:
-            return SelectionRejected(readiness.failure)
+            return _rejected(readiness.failure, role)
     return None
