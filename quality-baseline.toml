@@ -218,3 +218,5 @@ floor = 100
 "src/claude_code_codex_review_loop/runtime/agent_session.py" = 130
 "tests/test_role_provider_session.py" = 233
 "tests/test_role_provider_session_errors.py" = 194
+"src/claude_code_codex_review_loop/runtime/checkout.py" = 176
+"tests/test_c09_checkout.py" = 234
