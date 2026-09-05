@@ -90,9 +90,7 @@ class TestReviewerCheckout:
         source, _, head = _source_repository(tmp_path / "source")
         checkout = _checkout(tmp_path / "checkout", source, head)
         (checkout.repository / "reviewer-temp.txt").write_text("allowed here", encoding="utf-8")
-        released = checkout.release()
-        assert released.dirty is True
-        assert released.removed is True
+        assert checkout.release().dirty is True
         assert not checkout.root.exists()
 
     def test_two_checkouts_do_not_share_review_state(self, tmp_path: Path) -> None:
@@ -109,6 +107,31 @@ class TestReviewerCheckout:
         parent = tmp_path / "private"
         parent.mkdir()
         home = prepare_reviewer_home(parent, "home")
+        with pytest.raises(CheckoutError) as stopped:
+            create_reviewer_checkout(
+                parent=parent.resolve(), source_repository=source, target_head_sha="f" * 40, git_command=_git(),
+                env=build_reviewer_env(dict(os.environ), home),
+                timeout_seconds=_TIMEOUT_SECONDS,
+                grace_seconds=_GRACE_SECONDS,
+            )
+        assert stopped.value.stage == "checkout"
+        assert list(parent.glob("reviewer-checkout-*")) == []
+
+    def test_cleanup_failure_does_not_replace_checkout_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """cleanup失敗を作成失敗より優先しない。"""
+        source, _, _ = _source_repository(tmp_path)
+        parent = tmp_path / "private"
+        parent.mkdir()
+        home = prepare_reviewer_home(parent, "home")
+        remove_tree = module._remove_tree
+
+        def remove_then_fail(root: Path) -> None:
+            remove_tree(root)
+            raise CheckoutError("remove")
+
+        monkeypatch.setattr(module, "_remove_tree", remove_then_fail)
         with pytest.raises(CheckoutError) as stopped:
             create_reviewer_checkout(
                 parent=parent.resolve(), source_repository=source, target_head_sha="f" * 40, git_command=_git(),
@@ -221,14 +244,21 @@ class TestCheckoutRejections:
             checkout.release()
         assert stopped.value.stage == "remove"
 
-        def fail(path: str) -> None:
-            raise OSError(path)
-
-        def rmtree(root: Path, *, onerror):
-            onerror(fail, str(root), (OSError, OSError(), None))
-
         monkeypatch.setattr(module, "_remove_tree", remove_tree)
-        monkeypatch.setattr(module.shutil, "rmtree", rmtree)
+        monkeypatch.setattr(module.shutil, "rmtree", lambda *args: (_ for _ in ()).throw(OSError()))
         with pytest.raises(CheckoutError) as stopped:
             module._remove_tree(tmp_path)
         assert stopped.value.stage == "remove"
+
+    def test_remove_tree_never_changes_a_symlink(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """cleanupはlink先の属性へ影響しない。"""
+        link = tmp_path / "link"
+        link.write_text("placeholder", encoding="utf-8")
+        changed: list[Path] = []
+        monkeypatch.setattr(Path, "is_symlink", lambda path: path == link)
+        monkeypatch.setattr(module.os, "chmod", lambda path, mode: changed.append(Path(path)))
+        monkeypatch.setattr(module.shutil, "rmtree", lambda *args: None)
+
+        module._remove_tree(tmp_path)
+
+        assert link not in changed

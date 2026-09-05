@@ -14,7 +14,7 @@ import re
 import shutil
 import stat
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,7 +22,7 @@ from ..identity.fs_permissions import create_private_dir, verify_private_dir
 from ..policy.permission_profile import ensure_argv_allowed
 from ..process import Completed, SpawnError, SpawnSpec, run_tree
 
-_SHA256 = re.compile(r"[0-9a-f]{40}")
+_GIT_SHA1_OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 
 
 class CheckoutError(Exception):
@@ -38,7 +38,6 @@ class CheckoutRelease:
     """破棄直前の観測結果。dirtyはreviewerの一時書込が残ったことを表す。"""
 
     dirty: bool
-    removed: bool
 
 
 @dataclass(frozen=True)
@@ -61,7 +60,7 @@ class ReviewerCheckout:
             _remove_tree(self.root)
         except OSError as error:
             raise CheckoutError("remove") from error
-        return CheckoutRelease(dirty=dirty, removed=not self.root.exists())
+        return CheckoutRelease(dirty=dirty)
 
 
 def create_reviewer_checkout(
@@ -96,7 +95,12 @@ def create_reviewer_checkout(
         _git_output(checkout, "remove_remote", "-C", str(repository), "remote", "remove", "origin")
         _verify_checkout(checkout)
     except (CheckoutError, OSError):
-        _remove_tree(root)
+        try:
+            _remove_tree(root)
+        except CheckoutError:
+            # checkout作成・検証の失敗原因を優先する。cleanupの失敗はroot内に限られ、
+            # ここでは公開可能なevidence保存先も無いため、原因を置換しない。
+            pass
         raise
     return checkout
 
@@ -110,7 +114,7 @@ def _validate_inputs(parent: Path, source_repository: Path, target_head_sha: str
         raise CheckoutError("source_repository")
     if not (source_repository / ".git").is_dir():
         raise CheckoutError("source_repository")
-    if _SHA256.fullmatch(target_head_sha) is None:
+    if _GIT_SHA1_OBJECT_ID.fullmatch(target_head_sha) is None:
         raise CheckoutError("target_head_sha")
     if not git_command or not os.path.isabs(git_command[0]):
         raise CheckoutError("git_command")
@@ -165,14 +169,12 @@ def _verify_checkout_root(root: Path, repository: Path) -> None:
 
 def _remove_tree(root: Path) -> None:
     """git cloneが付けたread-only file属性を外してから、自分のrootを破棄する。"""
-    def clear_readonly(
-        function: Callable[[str], object], path: str, error: tuple[type[BaseException], BaseException, object]
-    ) -> None:
-        del error
-        try:
-            os.chmod(path, stat.S_IWRITE)
-            function(path)
-        except OSError:
-            raise CheckoutError("remove") from None
-
-    shutil.rmtree(root, onerror=clear_readonly)
+    try:
+        for directory, directories, files in os.walk(root, topdown=False, followlinks=False):
+            for name in (*directories, *files):
+                path = Path(directory, name)
+                if not path.is_symlink():
+                    os.chmod(path, stat.S_IWRITE)
+        shutil.rmtree(root)
+    except OSError:
+        raise CheckoutError("remove") from None
