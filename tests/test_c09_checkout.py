@@ -262,3 +262,13 @@ class TestCheckoutRejections:
         module._remove_tree(tmp_path)
 
         assert link not in changed
+
+    def test_remove_tree_preserves_directory_access_while_adding_write_permission(self, tmp_path: Path) -> None:
+        """read-only fileがあっても親directoryの探索権限を失わずに削除できる。"""
+        protected = tmp_path / "read-only"
+        protected.write_text("protected", encoding="utf-8")
+        os.chmod(protected, module.stat.S_IREAD)
+
+        module._remove_tree(tmp_path)
+
+        assert not tmp_path.exists()

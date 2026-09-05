@@ -174,7 +174,7 @@ def _remove_tree(root: Path) -> None:
             for name in (*directories, *files):
                 path = Path(directory, name)
                 if not path.is_symlink():
-                    os.chmod(path, stat.S_IWRITE)
+                    os.chmod(path, path.stat().st_mode | stat.S_IWRITE)
         shutil.rmtree(root)
     except OSError:
         raise CheckoutError("remove") from None
