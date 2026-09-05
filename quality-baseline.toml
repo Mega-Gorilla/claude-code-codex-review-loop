@@ -220,3 +220,5 @@ floor = 100
 "tests/test_role_provider_session_errors.py" = 194
 "src/claude_code_codex_review_loop/runtime/checkout.py" = 180
 "tests/test_c09_checkout.py" = 274
+"src/claude_code_codex_review_loop/runtime/codex_canary.py" = 236
+"tests/test_c09_codex_canary.py" = 219
