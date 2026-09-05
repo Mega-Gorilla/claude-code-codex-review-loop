@@ -8,7 +8,7 @@
 | Baseline | [target-experience.md](target-experience.md)（Status: Agreed） |
 | Parent roadmap | Issue #2 |
 | Owner | Mega-Gorilla |
-| Last updated | 2026-08-19 |
+| Last updated | 2026-09-05 |
 
 target experienceが定義した完成状態を、どのcomponent、どの依存、どの順序で作るかを定義する。用語は[glossary](../glossary.md)、全体像は[architecture overview](../architecture/overview.md)を参照。
 
@@ -47,11 +47,11 @@ target experienceが定義した完成状態を、どのcomponent、どの依存
 
 ### 2.1 制約
 
-Controller CLIはClaude Code sessionの子processとして起動されるため、親のLLM turnを呼び戻せない。TUIへのキー入力注入も禁止されている。したがって「core engineが長時間loopを回し、必要になったらClaudeを呼ぶ」構造は成立しない。その構造はClaudeのsubprocess化（active session契約の違反）かSkill側への再実装（P-002違反）のいずれかになる。
+Controller CLIはactive coder sessionの外部toolとして呼ばれ、親のLLM turnを呼び戻せない。TUIへのキー入力注入も禁止されている。したがって「core engineが長時間loopを回し、必要になったらactive coderを呼ぶ」構造は成立しない。その構造はactive coderのsubprocess化（active session契約の違反）かhost側への再実装（P-002違反）のいずれかになる。D-032により、この制約はClaude Code / Codexの両coderへ適用する。
 
 ### 2.2 制御の反転
 
-core engineをresume可能なstep engineとして定義する。engineはClaudeを起動しない。次に何をすべきかを返し、呼び出し側が実行する。
+core engineをresume可能なstep engineとして定義する。主経路ではengineはcoderを起動しない。次に何をすべきかを返し、呼び出し側が実行する。
 
 ```text
 engine.advance(run_id) -> HOST_ACTION | AWAIT_USER | TERMINAL
@@ -79,9 +79,37 @@ engine.advance(run_id) -> HOST_ACTION | AWAIT_USER | TERMINAL
 
 | Agent | 起動主体 | 理由 |
 | --- | --- | --- |
-| Claude coder（主経路） | 起動しない。active hostがHOST_ACTIONを実行する | active sessionのcontext維持が要件 |
-| Claude coder（headless経路） | Controllerがsubprocessとして起動するadapter | 対話sessionが存在しない復旧経路のため。engineから見たinterfaceは主経路と同一 |
-| Codex reviewer / final reporter | Controllerがfresh subprocessとして起動する | read-onlyであり親contextを必要としない |
+| coder（Claude Code / Codex、主経路） | 起動しない。選択したproviderのactive hostがHOST_ACTIONを実行する | active sessionのcontext維持が要件 |
+| coder（Claude Code / Codex、headless経路） | Controllerがprovider別adapterをsubprocessとして起動する | engineから見たinterfaceは主経路と同一 |
+| reviewer / final reporter（read-only役割） | Controllerが選択providerをfresh subprocessとして起動する | coderのsession・作業領域・権限から分離する |
+
+### 2.5 role別provider選択（D-032 / Issue #52）
+
+**追加要件・未実装**。Phase 8までの完了を取り消さず、既存基盤への拡張として追跡する。coder / reviewerを独立にClaude Code / Codexへ設定し、4組み合わせを扱う。本節のAC-RPが追加分の受入条件の正本であり、Issue単独では変更しない。
+
+役割による権限・state遷移と、providerによるCLI起動・出力正規化・認証・安全profileを分離する。既存の`RequestCodexReview` / `CodexPurpose` / `CODEX_*`は実装上の識別子で、名称だけで実行providerを決めない。永続化済み文字列を変更する場合はADR-0004に基づく互換性設計を先に行う。
+
+- C-02 / C-07 / C-08: role別provider/modelと実行方式・安全profile・adapter契約versionの解決済みsnapshot、復元・設定変更の検出、head / nonce / bindingを保つ共通protocol
+- C-04 / C-06 / C-09: provider別の認証・argv・sandbox能力を検証し、reviewerの実repository／GitHub書込を禁止。同一providerでもcoder credentialやsessionを引き継がない。CLIの名称やpromptだけを安全性の根拠にしない
+- C-09: fresh reviewer共通のcheckout・停止・出力検証と、Claude / Codex固有adapterを分離。C-08のheadless基盤はenvelope入力・SUBMIT出力を要求するため、native CLIをそのまま指定して対応としない
+- C-10 / C-11 / C-12 / C-13: review以外のclarification・decision・最終報告・ユーザー説明にも選択結果を反映。C-12で設定解決し、coreへ暗黙のprovider既定値を置かない。final reporterをreviewer providerへ従わせる案は実装ADRで確定する
+- C-15: 両providerのactive入口と設定例・対応OS／CLI version表を提供。GUIキー注入やprovider別の独自round loopは作らない
+
+| ID | 追加受入条件 |
+| --- | --- |
+| AC-RP-01 | coder / reviewerを独立選択でき4組み合わせを解決する。未知provider、active hostとの不一致、必要capability欠落は実行前に構造化停止し、別providerへ無断fallbackしない |
+| AC-RP-02 | 両providerのactive経路がsession contextを維持し、TUIキー注入や選択coderの子process再起動を行わない。headless経路も単一engineを使う |
+| AC-RP-03 | 両providerのreviewerがfresh / exact headで動作し、同一providerのcoderからもsession・作業領域・権限が分離される |
+| AC-RP-04 | 両providerでrole別権限のnegative testを行い、reviewerの実repo／GitHub変更、credential漏出、危険な設定上書きを防ぐ。必要な安全機能なしはfail closed |
+| AC-RP-05 | provider別出力を共通schemaで検証し、role / provider / 実行instanceを監査可能にする。不正schema、role違い、stale head、別run、異なる内容の重複submitを受理しない |
+| AC-RP-06 | 別process resumeで解決済みsnapshot・binding・nonce・投稿冪等性を維持する。設定変更、旧checkpoint、旧CODEX識別子、投稿前後のcrashをtestする |
+| AC-RP-07 | 4組み合わせとactive/headlessのtest matrixをhermeticに検証する。headless／reviewerはfake実行file、activeは同一sessionのfakeを使い、同じ入力に対する意味上のstate／record列を比較する。provider等の監査属性の差は比較規則に明示する |
+| AC-RP-08 | ユーザー承認下の実CLI・専用検証PRで4組み合わせのreview → fix → re-reviewを完走し、CLI version、head変化、blocking修正、必須local test、重複なしを記録する。実GitHubへの書込smokeは手動のみで、必要な費用・credentialの承認を別途得る |
+| AC-RP-09 | D-032、役割・provider用語、C-09〜C-13、両active hostの配布、設定例・対応OS／CLI version・旧設定の扱いが整合し、従来の組み合わせの回帰testも成功する |
+
+**順序**: Issue #52の計画・設定／adapter契約を先に確定し、Phase 9 #14の共通runtimeとprovider adapterを実装する。Codex固有の安全性spikeは並行できるが、Codex固定のinterfaceを後続へ広げない。Phase 10以降のworkflow、Phase 16のhost入口・配布、Phase 17の4組み合わせ受入まで追跡し、fake成功だけで#52をcloseしない。既存Phase番号とcomponent IDは増やさない。
+
+本書の残るClaude coder / Codex reviewer表記は従来の組み合わせの例または既存code名として読み、役割の一般化には本節を優先する。ただしClaude固有のAuto mode等の設定語彙をCodexへ転用しない。#14が提案中のAC-C09-06 / 07の採否は別のplan変更で扱い、本節で暗黙に確定しない。
 
 ## 3. Package layout
 
@@ -121,7 +149,7 @@ src/claude_code_codex_review_loop/
 | C-06 | canonical record検証とcredential隔離 | actor解決、allowlist照合、record chain検証、検証済みcanonical recordの生成、agentごとの到達可能範囲、OS別file権限 | C-03、C-04、C-05 | 6 |
 | C-07 | resumeとretention | GitHubからのstate再構築、artifactの保持と削除 | C-02、C-05、C-06 | 7、14 |
 | C-08 | active host protocolとstep engine | Section 2のprotocol。advance / submitの境界 | C-02、C-05、C-07 | 8 |
-| C-09 | Codex fresh runtimeと隔離checkout | turnごとのread-only subprocessとexact head checkout | C-03、C-06、C-08 | 9 |
+| C-09 | fresh reviewer runtimeと隔離checkout | 選択providerのturnごとのread-only subprocessとexact head checkout（Section 2.5） | C-03、C-06、C-08 | 9 |
 | C-10 | PR mode review loop | review→fix→re-reviewのround管理 | C-08、C-09 | 10 |
 | C-11 | decision / clarification / follow-up | 判断フロー、clarification上限、follow-up許可gate | C-08、C-10 | 11 |
 | C-12 | qualificationとfinal reporter | local testとCIの確認、final reportの生成 | C-07、C-09、C-10 | 12 |
@@ -297,14 +325,14 @@ Section 2のprotocolを実装する。active host adapterとheadless adapterを�
 | ID | 受入条件 |
 | --- | --- |
 | AC-C08-01 | 同一の対話sessionのcontextを維持したまま複数roundを進行できる |
-| AC-C08-02 | 主経路でClaude subprocessを起動せず、TUIへのキー入力注入も行わない |
+| AC-C08-02 | 主経路で選択coderのsubprocessを起動せず、TUIへのキー入力注入も行わない（両providerへの拡張はAC-RP-02） |
 | AC-C08-03 | 同一runに対し、advance / submitを繰り返す以外の制御経路が存在しない |
 | AC-C08-04 | headless経路と主経路が、同一シナリオで同じstate遷移を通る |
 | AC-C08-05 | stale action、異なるhead、異なるrun、異なるaction kind、path traversal、symlink経由path、size超過result、hashの異なる重複submitを、いずれも受理せず停止する |
 | AC-C08-06 | 中断後に別processからresumeして継続できる |
 | AC-C08-07 | `HOST_ACTION`へ、検証済みrecordのcomment IDと対象head SHAを含めて渡す |
 
-### C-09 Codex fresh runtimeと隔離checkout
+### C-09 fresh reviewer runtimeと隔離checkout
 
 `durable read-only`は「隔離checkout内でのtest / build / 再現に必要な一時書込は許可し、実repositoryとGitHubへの永続変更は禁止する」を意味する。隔離checkoutは対象headから新規作成し、review後に破棄する。破棄前のdirty stateをevidenceとして記録する。session memoryを引き継がず、canonical conversationとfinding ledgerからcontextを毎回再構築する。read-only Web調査を許可するprofileでも、GitHub write credentialへ到達できないようにする。
 
@@ -498,7 +526,7 @@ schema検証は、runtime依存をゼロに保ち、必要なschema機能だけ�
 | 6 | canonical record検証とcredential隔離 | C-06 | AC-C06-01〜11 | record sequence high-water mark、既知comment ID、permission mode / profile、Permission ID、blockされたtool、要求scope、承認bind情報 |
 | 7 | resume | C-07 | AC-C07-01〜03、AC-C07-05、AC-C07-06 | run ID、state、base / observed / approved head SHA、PR lock、coder snapshot |
 | 8 | active host protocolとstep engine | C-08 | AC-C08-01〜07 | action ID、未完了`HOST_ACTION`、nonce、submit状態 |
-| 9 | Codex fresh runtimeと隔離checkout | C-09 | AC-C09-01〜05 | 隔離checkout、sandbox / network profile、実行したtest / build、dirty status、破棄結果 |
+| 9 | fresh reviewer runtimeと隔離checkout | C-09 | AC-C09-01〜05。両provider拡張はSection 2.5 / #52と協調 | 隔離checkout、sandbox / network profile、実行したtest / build、dirty status、破棄結果 |
 | 10 | PR mode review loop | C-10 | AC-C10-01〜06。**CLI経由のdogfooding開始** | round、finding ledgerとresolution、coder実行前後HEAD、push後head |
 | 11 | decision / clarification / follow-up | C-11 | AC-C11-01〜07 | clarification counter、fingerprint、未解決decision request、follow-up候補と許可record |
 | 12 | qualificationとfinal reporter | C-12 | AC-C12-01〜07 | test command / result、GitHub check名 / result / URL、artifact path |

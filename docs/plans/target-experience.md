@@ -8,16 +8,27 @@
 | Origin | bootstrap設計討議で合意した完成イメージ |
 | Approval | 新repositoryのbootstrap前にユーザー合意済み |
 | Owner | Mega-Gorilla |
-| Last updated | 2026-08-18 |
+| Last updated | 2026-09-05 |
 | Scope | Windows PowerShell 7、Linux/SSH上のPowerShell 7 |
 
 ## 1. この文書の目的
 
-この文書は、Claude Codeをcoder、Codexをread-only reviewerとして利用し、PRの実装・修正・再レビュー、ユーザーの明示的なmerge承認、merge実行・確認までを支援するloopの完成イメージを定義する。
+この文書は、coderとread-only reviewerへClaude Code / Codexを独立に設定し、PRの実装・修正・再レビュー、ユーザーの明示的なmerge承認、merge実行・確認までを支援するloopの完成イメージを定義する（D-032）。
 
 実装詳細を決める前に、ユーザーから見た操作、表示、停止条件、復旧、最終成果物を合意するためのゴールドキュメントとして使用する。
 
 この文書は本repositoryで合意済みの設計baselineである。`Decided`は合意済みの完成状態、`Proposed`はimplementation planで検証する実装詳細を示す。
+
+### 2026-09-05の拡張: roleとproviderの分離（D-032）
+
+**Behavior: Decided / Implementation: 未実装、Issue #52で追跡。** coderとreviewerは役割であり、Claude Code / Codexはその実行providerである。双方を独立に選べるため、従来のClaude coder + Codex reviewer、逆の組み合わせ、Claude同士、Codex同士の4組み合わせを対象とする。同一providerでもcoderとreviewerのsession・作業領域・権限を共有しない。
+
+- active coderは選択したproviderの既存sessionでcontextを維持する。TUIキー注入や、別provider／headlessへの無断切替をしない
+- reviewerはproviderを問わずfreshな隔離環境で動き、実repositoryとGitHubへ永続変更しない。coderは許可された作業branchの変更まで、merge等はユーザー承認後のControllerに限る
+- provider選択とmodel選択、permission profile、active/headlessの実行方式は区別する。CLI未対応や必要な隔離機能がない場合は停止し、権限を緩めて対応済みとしない
+- 第三のproviderやGUIアプリ自動操作は今回の必須範囲に含めない。両providerのactive入口・配布形式、final reporterのprovider選択、旧設定の扱いは実装ADRで確定する
+
+以下のClaude coder / Codex reviewerという固有名の手順は、D-032以前の組み合わせの例として読む。D-014 / 015 / 024 / 025 / 026 / 028等の**provider固定部分だけ**をD-032で一般化し、context維持・fresh review・権限分離・ユーザー承認の契約は維持する。Claude固有のAuto mode等をCodexへ機械的に置き換える意味ではない。配布もClaude Code Pluginだけで両host対応済みとはしない。
 
 ## 2. 用語と合意状態
 
@@ -32,9 +43,9 @@
 
 - **User**: 実行を開始し、必要な判断を行い、`READY_FOR_HUMAN_MERGE`で質問・修正依頼または明示的なmerge承認を入力する
 - **Controller**: LLMを内包せず、GitHub、worktree、agent、test、CI、state、logと、明示承認後のmergeを決定論的に調整する
-- **Claude Code host / coder**: 既存の対話型PowerShell sessionでSkillを実行し、会話contextを維持したまま実装・修正・test・commit・push・PR更新、判断事項と説明の作成、ユーザー入力の構造化を担当する
-- **Codex reviewer**: 既存の対話sessionを再利用せず、各review turnをfreshなdurable read-only subprocessとして実行する。exact headの隔離checkout内ではtest・build・再現確認に必要な一時書込を許可するが、実repository、commit、push、GitHubを変更しない
-- **Codex final reporter**: 承認済みheadの変更と検証履歴をread-onlyで説明する
+- **host / coder（Claude CodeまたはCodex）**: 既存の対話型sessionで会話contextを維持したまま実装・修正・test・commit・push、判断事項と説明の作成、ユーザー入力の構造化を担当する。GitHubへのworkflow記録はControllerが行う
+- **reviewer（Claude CodeまたはCodex）**: 既存の対話sessionを再利用せず、各review turnをfreshなdurable read-only subprocessとして実行する。exact headの隔離checkout内ではtest・build・再現確認に必要な一時書込を許可するが、実repository、commit、push、GitHubを変更しない
+- **final reporter（read-only役割）**: 承認済みheadの変更と検証履歴を説明する。reviewer providerに従わせる案を実装ADRで確定する
 
 ## 3. 完成状態の要約
 
@@ -876,3 +887,4 @@ IDは[implementation plan](implementation-plan.md)のtraceabilityから参照す
 | D-029 | 2026-08-19 | MVPの正式検証対象は公式MSI installerで配布されるPowerShell 7（`Microsoft.PowerShell` winget packageによる導入を含む）とする。Windows Store版は未検証riskとして明記し、必要になった時点でCodex確認後に別Issue作成の許可を改めて求める | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
 | D-030 | 2026-08-19 | GitHub canonical conversation transportは新しい公開interfaceを設計し、参考実装を一括移植・一括破棄せず、実績あるalgorithmとtestをcomponent単位で評価して、出典・license・理由・testを記録したうえで選択移植する | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
 | D-031 | 2026-08-19 | GitHub上のユーザー判断を受理できる主体は、repository / user設定で明示したGitHub login allowlistとの完全一致を必須とする。`authorAssociation`とrepository permissionは補助条件とし、単独では承認根拠にしない | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
+| D-032 | 2026-09-05 | coderとreviewerにClaude Code / Codexを独立に設定し、同一provider同士を含む4組み合わせへ対応する。roleによる権限分離、active coderのcontext維持、fresh reviewer、単一engineとhuman merge gateは維持する。実行adapter・resume互換性・両host配布を含めて実装し、設定項目やfake testだけで対応完了としない | Decided | ユーザーのrole別provider設定の要望。[Issue #52](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52)で実装を追跡 |

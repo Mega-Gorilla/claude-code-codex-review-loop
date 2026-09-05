@@ -24,7 +24,7 @@ componentは次の15項目です。一覧と依存とPhaseはimplementation plan
 | C-06 | canonical record検証とcredential隔離 |
 | C-07 | resumeとretention |
 | C-08 | active host protocolとstep engine |
-| C-09 | Codex fresh reviewer runtimeと隔離checkout |
+| C-09 | fresh reviewer runtimeと隔離checkout（Claude Code / Codex拡張はD-032 / Issue #52） |
 | C-10 | PR mode review loop |
 | C-11 | decision / clarification / follow-up protocol |
 | C-12 | test・CI qualificationとfinal reporter |

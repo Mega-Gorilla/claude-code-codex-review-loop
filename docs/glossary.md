@@ -46,6 +46,14 @@
 | review thread | PRのfile / line固有のfinding議論のthread。解決状態（isResolved）を持ち、replyはthread先頭commentへ行う |
 | fallback comment | threadへのreplyが恒久的に不可能な場合に、元comment URLを前置して投稿するconversation comment |
 
+## roleとprovider（D-032、拡張はIssue #52で実装予定）
+
+| 用語 | 定義 |
+| --- | --- |
+| role | agentの責務と権限。coderは許可された実装・test・commit・pushを、reviewerはfreshな隔離環境での検証を担当する。providerが同じでも権限とsessionは共有しない |
+| provider | roleを実行するCLI製品（Claude Code / Codex）。modelや表示名とは別で、coder / reviewerへ独立に設定する。選択機能は未実装 |
+| provider adapter | 各CLIの起動・出力正規化・安全profileの違いを共通protocolへ接続する層。単一engineの進行判断を複製せず、未対応capabilityでは停止する |
+
 ## identity（canonical record検証）
 
 | 用語 | 定義 |
