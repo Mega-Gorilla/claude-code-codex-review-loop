@@ -11,7 +11,9 @@
 
 ## 何をするものか
 
-GitHubのIssueまたはPRを指定して起動すると、Claude Codeが実装し、Codexがread-onlyでreviewし、両者の発言をGitHubへ記録しながら、人間が明示的にmergeを承認するまで進みます。
+GitHubのIssueまたはPRを指定して起動すると、選択したcoderが実装し、reviewerがread-onlyでreviewし、両者の発言をGitHubへ記録しながら、人間が明示的にmergeを承認するまで進む設計です。
+
+合意済みbaselineはClaude Code coder / Codex reviewerです。両roleへClaude Code / Codexを独立設定し、同一provider同士を含む4組み合わせへ拡張するD-032は**Proposed・未実装でIssue #52が追跡します**（[implementation plan](../plans/implementation-plan.md)のD-032拡張案）。GitHub上のユーザー明示合意record取得まではbaselineを置き換えません。以下はroleで責務を表し、provider選択部分は採択時の案を示します。Phase 8までの実行基盤の完成と、両providerの実接続完了は区別します。
 
 ## 役割
 
@@ -19,28 +21,28 @@ GitHubのIssueまたはPRを指定して起動すると、Claude Codeが実装�
 | --- | --- | --- |
 | ユーザー | 実行開始、判断、mergeの明示承認 | — |
 | Controller | 決定論的なstate machine。GitHub投稿、process起動、schema検証、merge実行 | LLMを内包しない。意味的な要約や推奨を作らない |
-| Claude Code（active host） | 実装、test、commit、push、説明、ユーザー入力の構造化 | GitHubへ直接書き込まない。mergeしない |
-| Codex（fresh reviewer / final reporter） | 隔離checkout内でのreview、test、再現、read-only Web調査、承認済みheadのfinal report | 実repositoryとGitHubを変更しない |
+| coder（Claude Code / Codex、active host） | 実装、test、commit、push、説明、ユーザー入力の構造化 | GitHubへのworkflow記録を直接投稿しない。mergeしない |
+| reviewer / final reporter（read-only役割） | 隔離checkout内でのreview、test、再現、read-only Web調査、承認済みheadのfinal report | 実repositoryとGitHubを変更しない。coderと同一providerでもsession・権限を共有しない |
 
 ## 主経路: advance / submit
 
-Controller CLIはClaude Code sessionの子processとして起動されるため、親のLLM turnを呼び戻せません。そのためcore engineはClaudeを起動せず、**次に何をすべきかを返す**step engineとして動きます。
+Controller CLIはactive coder sessionの外部toolとして呼ばれ、親のLLM turnを呼び戻せません。そのため主経路のcore engineはcoderを起動せず、**次に何をすべきかを返す**step engineとして動きます。
 
 ```mermaid
 sequenceDiagram
     actor User as ユーザー
-    participant Host as active Claude Code session
+    participant Host as active coder session
     participant Ctrl as Controller CLI
     participant GH as GitHub
-    participant Codex as Codex reviewer
+    participant Reviewer as fresh reviewer
 
     User->>Host: /cc-review pr 512 --repo OWNER/REPO
     loop 1回のadvanceで1 action
         Host->>Ctrl: cc-review advance
         Ctrl->>GH: canonical conversationからstate再構築
         opt reviewが必要なstate
-            Ctrl->>Codex: fresh read-only subprocessを起動
-            Codex-->>Ctrl: findings
+            Ctrl->>Reviewer: 選択providerのfresh read-only subprocessを起動
+            Reviewer-->>Ctrl: findings
             Ctrl->>GH: 投稿してread-after-write確認
         end
         Ctrl-->>Host: HOST_ACTION / AWAIT_USER / TERMINAL
@@ -52,7 +54,7 @@ sequenceDiagram
     Host-->>User: state、次action、GitHub URLを表示
 ```
 
-主経路でControllerが直接起動するのはCodex reviewerとfinal reporterだけです。Claude coderは主経路では常にactive host側で動作し、会話contextを保ちます（headless復旧経路に限り、ControllerがClaude coder adapterをsubprocessとして起動します）。
+主経路でControllerが直接起動するagentはreviewerとfinal reporterだけです。coderは主経路ではactive host側で動作し、会話contextを保ちます（headless復旧経路ではControllerが選択providerのcoder adapterをsubprocessとして起動します）。provider別CLIの入出力変換と権限制御はadapter側へ置き、round loopを複製しません。
 
 ## Component map
 
@@ -62,7 +64,7 @@ sequenceDiagram
 基盤        domain -> protocol schema -> security policy
             process abstraction
 永続化      GitHub transport -> canonical record検証 / credential隔離 -> resume / retention
-実行基盤    active host protocol -> Codex fresh runtime
+実行基盤    active host protocol -> fresh reviewer runtime（provider別adapter）
 workflow    PR mode -> decision / clarification / follow-up
                     -> qualification / final reporter -> human merge gate
                     -> Issue mode
@@ -74,8 +76,8 @@ workflow    PR mode -> decision / clarification / follow-up
 | 不変条件 | 意味 |
 | --- | --- |
 | GitHub canonical | workflowへ影響する各turnは、次のagentを起動する前にGitHubへ投稿しread-after-writeで確認する。未永続化の出力を根拠にしない |
-| fresh Codex | reviewerはturnごとに新規起動し、前roundのsession memoryへ依存しない |
-| active Claude | 主経路ではClaude coderをsubprocess化せず、対話sessionのcontextを維持する |
+| fresh reviewer | providerを問わずturnごとに新規起動し、前roundやcoderのsession memoryへ依存しない |
+| active coder | 主経路では選択coderをsubprocess化せず、対話sessionのcontextを維持する |
 | durable read-only | reviewerは隔離checkout内の一時書込だけを行い、実repositoryとGitHubを変更しない |
 | head binding | review承認とmerge承認は特定のhead SHAへ結び付き、headが変われば失効する |
 | human merge gate | mergeはユーザーの明示承認後にControllerだけが実行する。曖昧な肯定を承認と解釈しない |

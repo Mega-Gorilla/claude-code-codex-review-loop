@@ -6,14 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-planningは完了し（target experienceとimplementation planは承認済み）、実装は未着手です（`src/claude_code_codex_review_loop/`はversion stubのみ）。
+既存baselineは承認済みで、Phase 8までの実行基盤が実装されています。両providerへの実接続と後続workflowの完成とは区別してください。role別provider選択の追加案D-032は`Proposed`・未実装で、Issue #52 / PR #53が追跡します（2026-09-05時点）。
 
 | 正本 | 役割 |
 | --- | --- |
-| `docs/plans/target-experience.md`（Status: **Agreed**） | 何を作るか。user-visible behaviorと合意済み制約。decision log（D-001〜D-031）を含む |
-| `docs/plans/implementation-plan.md`（Status: **Accepted**） | どう作るか。設計原則P-002〜P-015、component C-01〜C-15、Phase 0〜17、受入条件AC-CNN-NN |
+| `docs/plans/target-experience.md`（Status: **Agreed**） | 何を作るか。user-visible behaviorと合意済み制約。decision log（D-001〜D-032、D-032はProposed）を含む |
+| `docs/plans/implementation-plan.md`（Status: **Accepted**） | どう作るか。設計原則P-002〜P-015、component C-01〜C-15、Phase 0〜17、受入条件AC-CNN-NNと横断条件案AC-RP-NN |
 
-親roadmapはIssue #2、実装子IssueはPhase 0〜17に対応する#5〜#22です。次の作業はIssue #5（Phase 0: 基盤と品質ゲート）から、dependency順に進めます。
+親roadmapはIssue #2、実装子IssueはPhase 0〜17に対応する#5〜#22です。最新の進捗を各Issueで確認し、dependency順に進めます。Phase 9 #14のruntime契約は追加案#52と調整します。
 
 ## Commands
 
@@ -62,23 +62,23 @@ CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3
 | `Research` | informative。判断材料であり要件ではない |
 | `Non-normative example` | 例示。正本と食い違えば正本を優先 |
 
-文書は正本を複製せず、安定ID（`D-NNN` / `AC-CNN-NN` / `DOD-NN` / `MVP-NN` / `P-NNN`）とlinkで参照します。節番号は編集で変わるため参照に使いません。
+文書は正本を複製せず、安定ID（`D-NNN` / `AC-CNN-NN` / `AC-RP-NN` / `DOD-NN` / `MVP-NN` / `P-NNN`）とlinkで参照します。`AC-RP-NN`はrole / provider横断の受入条件で、単一の所有componentを持たず、Issue #52で横断追跡します（D-032の合意までは条件案）。節番号は編集で変わるため参照に使いません。
 
 ## Architecture（設計上の中心的な制約）
 
-製品は、Claude Codeをcoder、Codexをread-only reviewerとして、GitHub Issue / PRを正式な会話履歴に据え、人間の明示承認までを進めるdevelopment loopです。
+製品は、coderとread-only reviewerがGitHub Issue / PRを正式な会話履歴に据え、人間の明示承認までを進めるdevelopment loopです。承認済みbaselineはClaude Code coder / Codex reviewerです。両roleへClaude Code / Codexを独立設定するD-032は`Proposed`であり、GitHub上の明示合意recordを得るまでbaselineを置き換えません。以下のrole名による説明はprovider対応済みを意味しません。
 
-**5つのrole**: User（実行開始と明示承認）/ Controller（LLMを内包しない決定論的state machine）/ Claude Code host・coder（既存の対話型sessionのまま実装を担当）/ Codex reviewer（turnごとに新規起動するdurable read-only subprocess）/ Codex final reporter（承認済みheadの変更と検証履歴をread-onlyで説明）。
+**5つのrole**: User（実行開始と明示承認）/ Controller（LLMを内包しない決定論的state machine）/ host・coder（既存の対話型sessionのまま実装を担当）/ reviewer（turnごとに新規起動するdurable read-only subprocess）/ final reporter（承認済みheadの変更と検証履歴をread-onlyで説明）。同一providerでもcoderとreviewerのsession・権限を共有しないことがD-032案の条件です。
 
-**起動主体**: 主経路のClaude coderはactive hostが実行し、Controllerは起動しない。headless復旧経路のClaude coderだけはControllerがsubprocess adapterとして起動する。Codex reviewerとfinal reporterはControllerがfresh subprocessとして起動する。
+**起動主体**: 主経路のcoderはactive hostが実行し、Controllerは起動しない。headless復旧経路のcoderだけはControllerがsubprocess adapterとして起動する。reviewerとfinal reporterはControllerがfresh subprocessとして起動する。
 
-**active host protocol**（implementation planの「active host protocol」節）: Controller CLIはClaude Code sessionの子processであり、親のLLM turnを呼び戻せない。そのためcore engineはClaudeを起動せず、`advance`で次の`HOST_ACTION`を返し、active hostが自分のcontextで実行して`submit`で結果を返すstep engineとする。この制御反転は全workflowの前提であり、覆すと全体の書き直しになる。
+**active host protocol**（implementation planの「active host protocol」節）: Controller CLIはactive coder sessionの外部toolとして呼ばれ、親のLLM turnを呼び戻せない。そのため主経路のcore engineはcoderを起動せず、`advance`で次の`HOST_ACTION`を返し、active hostが自分のcontextで実行して`submit`で結果を返すstep engineとする。この制御反転は全workflowの前提であり、覆すと全体の書き直しになる。
 
 **6つの不変条件**（`docs/architecture/overview.md`）:
 
 - GitHub canonical: workflowへ影響する各turnは、次agentを起動する前にGitHubへ投稿しread-after-writeで確認する。未永続化の出力を根拠にしない
-- fresh Codex: reviewerはturnごとに新規起動し、前roundのsession memoryへ依存しない
-- active Claude: 主経路ではClaude coderをsubprocess化しない
+- fresh reviewer: reviewerはturnごとに新規起動し、前roundやcoderのsession memoryへ依存しない
+- active coder: 主経路ではcoderをsubprocess化せず、対話sessionのcontextを維持する
 - durable read-only: reviewerは隔離checkout内の一時書込だけを行い、実repositoryとGitHubを変更しない
 - head binding: review承認とmerge承認は特定のhead SHAへ結び付き、headが変われば失効する
 - human merge gate: mergeはユーザーの明示承認後にControllerだけが実行する。曖昧な肯定を承認と解釈しない
@@ -87,7 +87,7 @@ CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3
 
 **state model**: 17 state（`RUNNING_REVIEW`〜`MERGED` / `MERGE_FAILED` / `BLOCKED` / `FAILED` / `CANCELLED` / `REPORT_FAILED`）。遷移図はtarget-experienceの「State model」節。agentまたはユーザーの発言を伴う全遷移はGitHub永続化gateを通過する。
 
-**除外事項**: PR自動検知 / watcher / webhook、対話型TUIへのキー入力注入、既存Codex対話sessionの再利用、無人auto-merge、MCP serverとしての実装・配布（D-026）、独自daemon。
+**除外事項**: PR自動検知 / watcher / webhook、対話型TUIへのキー入力注入、既存対話sessionのreviewerとしての再利用、無人auto-merge、MCP serverとしての実装・配布（D-026）、独自daemon。
 
 ## Working conventions
 
