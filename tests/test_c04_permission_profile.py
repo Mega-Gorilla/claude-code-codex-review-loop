@@ -63,6 +63,11 @@ def _forbidden_variants() -> list[str]:
         skip.replace("-", "_") + "_permissions",
         ("Dangerously " + "Skip " + "Permissions"),
         "--flag=" + bypass + "-Permissions",
+        "--dangerously-" + bypass + "-approvals-and-sandbox",
+        "--dangerously-" + bypass + "-hook-trust",
+        "danger-full-access",
+        "shell_environment_policy.inherit=all",
+        'sandbox_permissions=["disk-full-read-access"]',
     ]
 
 
