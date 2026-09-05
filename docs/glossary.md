@@ -50,10 +50,10 @@
 
 | 用語 | 定義 |
 | --- | --- |
-| record chain | 同一run内の内部recordがmarker payloadの`seq`（1始まり通し番号）と`prev`（直前recordの本文hash）で連結された系列。specの正本はADR-0008 |
+| record chain | 同一run内の内部recordがmarker payloadの`seq`（1始まり通し番号）と`prev`（先行recordの完成本文hash）で連結された系列。通常はseq-1へ、`audit_prev`を持つincidentは同keyが示す直近の検証済み先行recordへ連結する（先行recordなしは0・`prev`省略）。specの正本はADR-0008 / ADR-0024 |
 | state root | 同一マシンの全worktreeから同じ場所を指すper-user領域。`runs/<run ID>/checkpoint.json`と`locks/<repository digest>/<番号>.lock`を持つ。既定pathの解決はC-12（ADR-0011） |
 | PR lock | 同一PRへの同時runを検出するためのfile。回収はpid非生存・host一致・run一致の3条件が揃った場合のみで、拒否のworkflow動作はAC-C10-03（C-10） |
-| checkpoint transaction | 投稿前 / 投稿成否不明で中断したrecordを**同一key**で再発行するためにcheckpointへ保存する値（binding・payload hash・render済み本文・seq・head） |
+| checkpoint transaction | 投稿前 / 投稿成否不明で中断したrecordを**同一key**で再発行するためにcheckpointへ保存する値（binding・payload hash・render済み本文・完成本文hash・seq・head等）。incidentでは`audit_prev` / `audit_prev_hash`も保存し、同じ監査linkを再構成する（先行recordなしは0・hash省略。ADR-0024） |
 | AWAIT_USER request | ユーザー入力待ちをhostへ提示するenvelope。対象awaiting・head・受理可能なrecord種別・根拠record・one-time nonce・awaiting instance（`since_seq`）を持ち、応答は`USER_SUBMIT`で戻る（ADR-0018） |
 | user intent key | ユーザー入力の正規化intentを表す決定論的key（run / awaiting / awaiting instance / 対象head / record種別）。転記とGitHub直接commentの2経路が同じ値を導出でき、同一intentの二重recordを防ぐ（ADR-0018） |
 | input route | user-input recordがどの経路で入ったかの語彙。`host_transcript`（対話型sessionの入力をControllerが転記）と`github_comment`（ユーザーの直接comment。C-06がexternal evidenceとして受理）の2値 |
@@ -68,6 +68,8 @@
 | headless adapter | 対話型sessionが無い復旧経路のClaude coderを、Controllerがsubprocessとして起動する`HostPort`実装。engineから見たinterfaceが主経路と同一であることが、active / headlessの同値性（AC-C08-04）を構造で担保する（ADR-0022） |
 | host log | headless hostのstderrを`policy.redaction`へ通した`host.log`。CIのartifactが集めるのはこれだけで、redact前の`host.stderr`と`host.stdout`（submit envelope）は収集しない（ADR-0022） |
 | block intervention request | `BLOCKED`のrunへユーザーの介入を求める`AWAIT_USER` request。待機の識別子は`awaiting`ではなく解除対象の**block attempt binding**で、C-01が`BLOCK_INTERVENTION`を受理するblock（`NO_PROGRESS`の膠着・外部依存）でだけ発行する（ADR-0023） |
+| integrity incident record | 検出したintegrity violationをcanonical recordとして残す監査記録。全violationが検証済みのこのrecordへ含まれるまでterminalへ進まない（AC-C01-12）。**まさにchainが壊れているときに投稿するrecord**なので、chainのviolationでは拒否しない（ADR-0024） |
+| recorded violation ledger | このrunが既にincident recordへ含めたviolation bindingの台帳（checkpointの`incident_record`）。violationは記録してもchainから消えない一方、C-01は記録済みを`deferred_integrity`から外すため、台帳が無いと記録済みを新しい検出として再入力してしまう（ADR-0024 決定5） |
 | resume context | resumeがGitHubとlocal cacheの照合から組み立てる再開の判断材料（run選択・turn同一性・pending record・head binding・承認の有無・直接回答候補）。`MachineState`の完全replayではない |
 | advertised head | PRが現在advertiseしているhead SHA。C-05のPR metadata primitiveで観測し、承認のbind先と一致するかがAC-C07-03の判定になる。隔離checkout側の照合はC-09 |
 | pending reissue directive | 中断したrecordを**同一key・同一本文**で再発行するための指示（binding・完成形本文・body hash）。C-07は投稿せず、実行はC-01のR-P経由でC-08が行う |

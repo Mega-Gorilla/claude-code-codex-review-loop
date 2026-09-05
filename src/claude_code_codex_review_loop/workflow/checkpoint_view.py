@@ -747,6 +747,41 @@ _PENDING_USER_KEYS = (
 )
 
 
+_INCIDENT_SECTION = "incident_record"
+_RECORDED_KEY = "recorded_bindings"
+
+
+def read_recorded_violations(payload: Mapping[str, object]) -> tuple[str, ...] | SectionUnavailable:
+    """このrunが既にincident recordへ含めたviolation bindingを読む（ADR-0024 決定5）。
+
+    violationは記録してもchainから消えない一方、C-01は記録済みを`deferred_integrity`から
+    外す。台帳が無いと記録済みを「新しい検出」として再入力し、部分記録のrunが循環する。
+    """
+    section = payload.get(_INCIDENT_SECTION)
+    if section is None:
+        return ()
+    if not isinstance(section, dict):
+        return SectionUnavailable(detail="incident_recordがobjectでない")
+    entries = section.get(_RECORDED_KEY)
+    if entries is None:
+        return ()
+    if not isinstance(entries, list) or not all(isinstance(item, str) for item in entries):
+        return SectionUnavailable(detail="incident_record.recorded_bindingsが文字列listでない")
+    return tuple(entries)
+
+
+def with_recorded_violations(
+    payload: Mapping[str, object], bindings: Sequence[str]
+) -> dict[str, object] | SectionUnavailable:
+    """記録済みviolationを台帳へunionする（冪等。binding昇順で正規化する）。"""
+    known = read_recorded_violations(payload)
+    if isinstance(known, SectionUnavailable):
+        return known
+    updated = dict(payload)
+    updated[_INCIDENT_SECTION] = {_RECORDED_KEY: sorted(set(known) | set(bindings))}
+    return updated
+
+
 def read_user_request(
     payload: Mapping[str, object],
 ) -> PendingUserRequest | SectionUnavailable | None:

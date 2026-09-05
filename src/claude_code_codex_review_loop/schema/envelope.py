@@ -389,6 +389,9 @@ _SECTIONS: dict[str, Field] = {
             "payload_hash": opaque(),
             "body": text(max_len=MAX_PENDING_BODY_CHARS),
             "body_hash": _optional_opaque(),
+            # Incidentの連結先を投稿前に固定する（ADR-0024、Issue #50）。
+            "audit_prev": integer(required=False),
+            "audit_prev_hash": _optional_sha(),
             # projectionはPhase 7 PR-4のadditive追加: 中断したrecordをmarkerごと
             # 再composeするために要る（同一seqで本文がbyte一致しないとC-06のseq conflictに
             # なる。ADR-0010 決定13）。keyの定義はC-02の`projection`が正本で、ここは
@@ -511,6 +514,18 @@ _SECTIONS: dict[str, Field] = {
                 max_items=MAX_ACTIVE_TREES,
             ),
         },
+        required=False,
+    ),
+    # incident_recordはPhase 8 PR-3dのadditive追加（新しいoptional sectionのため
+    # version bumpなし。ADR-0004 rule 2 / 10）: **この runが既にincident recordへ含めた
+    # violation**の台帳である（ADR-0024 決定5）。
+    #
+    # violationは`verify_record_chain`がliveのGitHubから毎回再導出するため、記録しても
+    # chainからは消えない。一方C-01は記録済みviolationを`deferred_integrity`から外す。
+    # 台帳が無いと、記録済みのviolationを次のcycleで「新しい検出」としてC-01へ再入力し、
+    # 部分記録（I-VR）のrunが永久に循環する。
+    "incident_record": obj(
+        {"recorded_bindings": array(opaque(), required=False)},
         required=False,
     ),
     # stop_requestはPhase 8 PR-3b2のadditive追加: **緊急停止の意図**（ADR-0021）。

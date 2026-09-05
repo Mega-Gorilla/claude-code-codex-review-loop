@@ -43,6 +43,23 @@ def _validate_header_field(label: str, value: str) -> None:
         raise TransportError("render", f"{label}は非空の1行でなければならない", ErrorCategory.PERMANENT)
 
 
+def _prepared(body: str, *, header: str) -> PreparedBody:
+    """本文をrenderの単一pipelineへ通し、headerを前置する。
+
+    改行正規化 -> sanitize -> redactの順序はADR-0007のchoke pointである。公開本文を作る
+    3つの入口（agent発言 / ユーザー転記 / Controller自身の記録）で違うのは**headerだけ**で、
+    そこを引数にしておくと、入口が増えてもpipelineの複製が増えない。headerはController
+    自身が組み立てる1行なのでredactへ通さない（本文だけが外部由来である）。
+    """
+    sanitized = sanitize_agent_body(normalize_newlines(body))
+    redacted = redact(sanitized.text)
+    return PreparedBody(
+        text=f"{header}\n\n{redacted.text}",
+        redaction_hits=redacted.hits,
+        escaped_marker_count=sanitized.escaped_count,
+    )
+
+
 def prepare_user_body(user_body: str, *, speaker: str, route: str) -> PreparedBody:
     """ユーザー入力の転記を公開用へ変換する: 改行正規化 -> sanitize -> redact -> header。
 
@@ -53,25 +70,23 @@ def prepare_user_body(user_body: str, *, speaker: str, route: str) -> PreparedBo
     """
     _validate_header_field("speaker", speaker)
     _validate_header_field("route", route)
-    sanitized = sanitize_agent_body(normalize_newlines(user_body))
-    redacted = redact(sanitized.text)
-    text = f"**{speaker}**（入力経路: {route}）\n\n{redacted.text}"
-    return PreparedBody(
-        text=text,
-        redaction_hits=redacted.hits,
-        escaped_marker_count=sanitized.escaped_count,
-    )
+    return _prepared(user_body, header=f"**{speaker}**（入力経路: {route}）")
+
+
+def prepare_controller_body(controller_body: str, *, speaker: str) -> PreparedBody:
+    """Controller自身の記録を公開用へ変換する: 改行正規化 -> sanitize -> redact -> header。
+
+    `prepare_public_body`はagent発言用でmodelを、`prepare_user_body`は転記用で入力経路を
+    要求するが、incident recordを書いたのは**Controller自身**でどちらでもない。存在しない
+    modelや入力経路をheaderへ書かないために別の入口を持つ（sanitize / redactは同じ単一
+    choke pointを通す）。
+    """
+    _validate_header_field("speaker", speaker)
+    return _prepared(controller_body, header=f"**{speaker}**")
 
 
 def prepare_public_body(agent_body: str, *, speaker: str, model: str) -> PreparedBody:
     """agent発言を公開用へ変換する: 改行正規化 -> sanitize -> redact -> headerの前置。"""
     _validate_header_field("speaker", speaker)
     _validate_header_field("model", model)
-    sanitized = sanitize_agent_body(normalize_newlines(agent_body))
-    redacted = redact(sanitized.text)
-    text = f"**{speaker}**（model: {model}）\n\n{redacted.text}"
-    return PreparedBody(
-        text=text,
-        redaction_hits=redacted.hits,
-        escaped_marker_count=sanitized.escaped_count,
-    )
+    return _prepared(agent_body, header=f"**{speaker}**（model: {model}）")

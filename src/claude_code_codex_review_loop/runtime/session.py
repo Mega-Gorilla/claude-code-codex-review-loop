@@ -36,6 +36,8 @@ from ..workflow import (
     HaltFailed,
     HaltRequired,
     HostActionIssued,
+    IncidentRecorded,
+    IncidentRequired,
     IntegrityDetected,
     PersistFailed,
     PersistRequired,
@@ -46,6 +48,7 @@ from ..workflow import (
     emergency_stop,
     halt,
     persist,
+    record_incident,
     request_emergency_stop,
     submit,
 )
@@ -56,6 +59,15 @@ from .signals import StopSignal
 # 1 stepでこなすengine側の作業の上限。C-01が同じ作業を返し続けるのは不変条件の破れなので、
 # 上限へ達したら推測して回し続けずに停止する（record 1件の永続化 + 停止1回が現実的な最大）
 MAX_ENGINE_WORK: Final = 8
+
+# 次に**副作用**（GitHubへの投稿 / process停止）を起こすoutcome。上限に達したら、
+# これらを実行する前に止める
+SIDE_EFFECT_OUTCOMES: Final = (
+    PersistRequired,
+    IncidentRequired,
+    HaltRequired,
+    EmergencyStopRequired,
+)
 
 # host側の作業（呼び出し側が実行して`submit`で返す）
 HostWork = HostActionIssued | AwaitUser
@@ -72,6 +84,8 @@ class StepTrace:
     # 緊急停止: 要求を記録した回数と、実行して完了した回数
     stop_requested: int = 0
     stopped: int = 0
+    # incident recordを作った回数（`RecordIntegrityIncident`の実行）
+    incidents: int = 0
 
 
 @dataclass(frozen=True)
@@ -190,9 +204,10 @@ def _run_step(
     halted = 0
     requested = 0
     stopped_count = 0
+    incidents = 0
 
     def trace() -> StepTrace:
-        return StepTrace(tuple(persisted), halted, requested, stopped_count)
+        return StepTrace(tuple(persisted), halted, requested, stopped_count, incidents)
 
     work = 0
     while True:
@@ -223,9 +238,7 @@ def _run_step(
             return StepResult(
                 EngineStopped("chain_violation", str(error)), trace()
             )
-        if isinstance(outcome, (PersistRequired, HaltRequired, EmergencyStopRequired)) and (
-            work >= MAX_ENGINE_WORK
-        ):
+        if isinstance(outcome, SIDE_EFFECT_OUTCOMES) and work >= MAX_ENGINE_WORK:
             # 上限**ちょうど**までは実行し、次の副作用を起こす前に止める
             return StepResult(
                 EngineStopped(
@@ -254,6 +267,13 @@ def _run_step(
             persisted.append(outcome.record.binding.value)
             work += 1
             continue
+        if isinstance(outcome, IncidentRequired):
+            incident = _incident(paths, config, ports)
+            if isinstance(incident, EngineStopped):
+                return StepResult(incident, trace())
+            incidents += 1
+            work += 1
+            continue
         if isinstance(outcome, HaltRequired):
             stopped = _halt(paths, config, ports, stop)
             if isinstance(stopped, EngineStopped):
@@ -269,6 +289,31 @@ def _run_step(
                 )
             continue
         return StepResult(outcome, trace())
+
+
+def _incident(
+    paths: StatePaths, config: SessionConfig, ports: PortSet
+) -> IncidentRecorded | EngineStopped:
+    """`RecordIntegrityIncident`を実行する（incident recordを1件作る）。
+
+    payload portも本文portも未実装であり得るため、`_persist` / `submit_result`と同じ
+    変換境界をここへ置く。例外が`step`の外へ飛ぶと、構造化outcomeで進退を決めるという
+    前提が壊れてCLIが例外終了する。
+    """
+    try:
+        return record_incident(
+            paths=paths,
+            run_id=config.run_id,
+            repository=config.repository,
+            number=config.number,
+            head_sha=config.head_sha,
+            incident_port=ports.incident,
+            body_port=ports.body,
+            records_port=ports.records,
+            speaker=config.controller_speaker,
+        )
+    except PortUnavailableError as error:
+        return EngineStopped("port_unavailable", str(error))
 
 
 def _emergency(

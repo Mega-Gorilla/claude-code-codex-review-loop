@@ -30,11 +30,13 @@ from claude_code_codex_review_loop.runtime import (
     RegistryRecordEvents,
     TreeStopper,
     UnavailableActionPayload,
+    UnavailableIncidentPayload,
     UserInputBody,
 )
 from claude_code_codex_review_loop.workflow.ports import (
     ActionContext,
     BlockRequestContext,
+    IncidentContext,
     UserRequestContext,
 )
 
@@ -216,6 +218,21 @@ class TestUnavailableActionPayload:
         )
         with pytest.raises(PortUnavailableError, match="C-10"):
             UnavailableActionPayload().payload_for(context)
+
+
+class TestUnavailableIncidentPayload:
+    def test_names_the_owning_component(self) -> None:
+        """incident record内容の構成はC-06の責務である（ADR-0024 決定12）。"""
+        context = IncidentContext(
+            violation_bindings=(OpaqueBinding("violation-1"),),
+            audit=None,
+            run_id=RUN,
+            repository=REPOSITORY,
+            number=NUMBER,
+            head_sha=HEAD,
+        )
+        with pytest.raises(PortUnavailableError, match="C-06"):
+            UnavailableIncidentPayload().payload_for(context)
 
 
 def test_default_ports_binds_the_same_chain_source(tmp_path) -> None:

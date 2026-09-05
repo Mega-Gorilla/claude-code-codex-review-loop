@@ -31,6 +31,7 @@ from .ports import (
     RegistryRecordEvents,
     TreeStopper,
     UnavailableActionPayload,
+    UnavailableIncidentPayload,
     UserInputBody,
     default_ports,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "StepTrace",
     "TreeStopper",
     "UnavailableActionPayload",
+    "UnavailableIncidentPayload",
     "UserInputBody",
     "config_path",
     "default_ports",

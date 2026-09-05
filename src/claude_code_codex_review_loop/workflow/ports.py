@@ -21,7 +21,14 @@ from typing import Protocol
 
 from ..domain.commands import HostAction
 from ..domain.events import Event
-from ..domain.values import Awaiting, BlockContext, RecordEvidence, RecordKind
+from ..domain.values import (
+    Awaiting,
+    BlockContext,
+    OpaqueBinding,
+    PendingRecord,
+    RecordEvidence,
+    RecordKind,
+)
 from ..identity.record_chain import ChainVerification, VerifiedRecord
 from ..process import StopResult, TreeRef
 
@@ -77,6 +84,35 @@ class ActionPayloadPort(Protocol):
     """`HOST_ACTION.payload`を供給する（`HOST_ACTION_PAYLOADS`が検証する形）。"""
 
     def payload_for(self, context: ActionContext) -> Mapping[str, object]: ...
+
+
+@dataclass(frozen=True)
+class IncidentContext:
+    """incident recordの内容を組み立てる文脈（ADR-0024）。
+
+    記録対象は**C-01が`MachineState`から決定論的に構成する**値である（`deferred_integrity`と
+    cancelで未完了になったturnの監査参照）。portはこの2つを所与として内容を構成し、engineは
+    返ってきたpayloadが同じ値を指していることを照合する。
+    """
+
+    violation_bindings: tuple[OpaqueBinding, ...]
+    audit: PendingRecord | None
+    run_id: str
+    repository: str
+    number: int
+    head_sha: str
+
+
+class IncidentPayloadPort(Protocol):
+    """`INTEGRITY_INCIDENT.payload`を供給する（内容の構成はC-06。Phase 1計画の責務表）。
+
+    engineは返ってきたpayloadを`INTEGRITY_INCIDENT` schemaで検証し、さらに
+    `violation_bindings`と`audit_reference`が`IncidentContext`と完全一致することを要求する。
+    記録範囲がC-01の指示と違うrecordを投稿すると、coverage判定（COMPLETE / REMAINDER）が
+    意図しない値になるためである。
+    """
+
+    def payload_for(self, context: IncidentContext) -> Mapping[str, object]: ...
 
 
 class EvidencePort(Protocol):

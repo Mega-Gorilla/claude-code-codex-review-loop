@@ -51,7 +51,7 @@ from ..workflow import (
     spec_for,
     user_spec_for,
 )
-from ..workflow.ports import ActionContext, BlockRequestContext
+from ..workflow.ports import ActionContext, BlockRequestContext, IncidentContext, IncidentPayloadPort
 from .config import SessionConfig
 
 
@@ -226,10 +226,21 @@ class UnavailableActionPayload:
 
 
 @dataclass(frozen=True)
+class UnavailableIncidentPayload:
+    """incident recordの内容の構成はC-06の責務である（Phase 1計画の責務表）。"""
+
+    def payload_for(self, context: IncidentContext) -> Mapping[str, object]:
+        raise PortUnavailableError(
+            f"incident payloadを供給する実装が無い（C-06が持つ。対象{len(context.violation_bindings)}件）"
+        )
+
+
+@dataclass(frozen=True)
 class PortSet:
     """engineへ渡すportの束。呼び出し側が差し替えられるよう1つにまとめる。"""
 
     payload: ActionPayloadPort
+    incident: IncidentPayloadPort
     evidence: EvidencePort
     records: RecordSourcePort
     body: RecordBodyPort
@@ -242,6 +253,7 @@ def default_ports(paths: StatePaths, config: SessionConfig) -> PortSet:
     records = ChainRecords(paths=paths, config=config)
     return PortSet(
         payload=UnavailableActionPayload(),
+        incident=UnavailableIncidentPayload(),
         evidence=ChainEvidence(records=records),
         records=records,
         body=UserInputBody(),

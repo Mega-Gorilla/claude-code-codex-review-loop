@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from ..domain.values import RecordKind
 from ..identity.errors import IdentityError
-from ..identity.record_chain import VerifiedRecord, compose_record_marker_payload
+from ..identity.record_chain import VerifiedRecord, audit_link_error, compose_record_marker_payload
 from ..schema.projection import PROJECTION_KEYS
 from ..transport.conversation import body_hash_of
 from ..transport.gh import TransportError
@@ -42,6 +42,8 @@ class PendingTransaction:
     body: str
     projection: dict[str, str | int]
     body_hash: str | None = None
+    audit_prev: int | None = None
+    audit_prev_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,16 @@ def read_transaction(payload: Mapping[str, object]) -> PendingTransaction | Pend
         kind = RecordKind(values["kind"])
     except ValueError:
         return PendingUnavailable(detail="transactionのkindが未知の種別")
+    anchor = section.get("audit_prev")
+    anchor_hash = section.get("audit_prev_hash")
+    if "audit_prev" in section:
+        error = audit_link_error(kind, seq, anchor, anchor_hash)
+        if error is not None:
+            return PendingUnavailable(detail=error)
+        if not isinstance(body_hash, str) or not body_hash:
+            return PendingUnavailable(detail="incident linkは完成本文hashを必要とする")
+    elif "audit_prev_hash" in section:
+        return PendingUnavailable(detail="audit_prev_hashにはaudit_prevが必要")
     return PendingTransaction(
         binding=values["binding"],
         kind=kind,
@@ -130,6 +142,8 @@ def read_transaction(payload: Mapping[str, object]) -> PendingTransaction | Pend
         body=values["body"],
         projection=projection,
         body_hash=body_hash if isinstance(body_hash, str) else None,
+        audit_prev=anchor if isinstance(anchor, int) else None,
+        audit_prev_hash=anchor_hash if isinstance(anchor_hash, str) else None,
     )
 
 
@@ -138,8 +152,8 @@ def evaluate_pending(
 ) -> PendingOutcome:
     """中断中recordの再発行可否を判定する（pure）。
 
-    `records`は当該runの**検証済み**record列。まず`prev`（直前seqのbody hash。GitHub由来）
-    からmarkerを再構成し、期待する完成形を求める。
+    通常は直前seqの検証済みhash、incidentの明示linkは保存済みanchor/hashから再構成する。
+    明示anchorも現在の検証済み先行recordと照合し、変化していれば投稿前に停止する。
 
     - 同一`seq`を別bindingのrecordが占有していればseq conflictとして停止する
     - 同一bindingのrecordがあっても、**本文が期待する完成形と一致しなければ停止する**。
@@ -156,7 +170,19 @@ def evaluate_pending(
             detail=f"seq {transaction.seq}を別bindingのrecordが占有している（{occupant.key}）"
         )
     previous: str | None = None
-    if transaction.seq >= 2:
+    if transaction.audit_prev is not None:
+        error = audit_link_error(transaction.kind, transaction.seq, transaction.audit_prev, transaction.audit_prev_hash)
+        if error is not None:
+            return PendingUnavailable(detail=error)
+        anchor = max((n for n in by_seq if n < transaction.seq), default=0)
+        if anchor != transaction.audit_prev:
+            return PendingUnavailable(detail="incidentの保存済みanchorが検証済み先行recordと一致しない")
+        previous = transaction.audit_prev_hash
+        if anchor and by_seq[anchor].body_hash != previous:
+            return PendingUnavailable(detail="incidentの保存済みanchor hashが一致しない")
+        if transaction.body_hash is None:
+            return PendingUnavailable(detail="incident linkは完成本文hashを必要とする")
+    elif transaction.seq >= 2:
         earlier = by_seq.get(transaction.seq - 1)
         if earlier is None:
             return PendingUnavailable(detail=f"直前のseq {transaction.seq - 1}がchainに無い")
@@ -170,6 +196,7 @@ def evaluate_pending(
             seq=transaction.seq,
             prev_body_hash=previous,
             projection=transaction.projection,
+            audit_prev=transaction.audit_prev,
         )
         body = attach_marker(transaction.body, payload)
     except (IdentityError, TransportError) as error:

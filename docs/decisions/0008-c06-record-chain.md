@@ -58,6 +58,14 @@ implementation planはC-06を「C-05が取得した未検証metadataから検証
 
 ## Consequences
 
+### Phase 8のincident監査link（ADR-0024 決定15〜20）
+
+`INTEGRITY_INCIDENT`に限り、optional構造key `audit_prev`で検証済み先行recordのseqを明示できる。
+`prev`はそのrecordの完成本文hashで、先行recordが無い場合のみ`audit_prev=0`かつ`prev`欠如とする。
+verifierは直近の検証済み先行recordとの一致を求める。通常recordとkeyのない既存incidentは従来のseq-1規則のままである。
+このlinkは壊れた末尾を監査するためのもので、gapやmissingの検出、既存承認の失効、salvageの要件を緩めない。
+marker versionはoptional key追加としてv1を維持するが、旧実装は新keyを拒否する（downgrade互換は保証しない）。
+
 - C-08はrecord投稿時に`compose_record_marker_payload`で`seq` / `prev`を構成し、C-07はresume時に`verify_record_chain`の`is_intact`をgateにする。chain specの変更は本ADRの改訂を要する
 - 書込権限を持つ第三者が予約tokenを含むcommentを書くだけで条件2のviolationとなりBLOCKED化するDoS面は、仕様が要求するfail closed（silent repairせず差分提示）の帰結として受け入れる（緩和はユーザー承認済みのsalvage手順 = C-07で行う）
 - 参考実装のround_state（markerがあればauthorを確認せずrecordを復元する）は選択移植しない（reference assessment「再利用しない」判定の履行）。producer照合・chain検証・binding導出はすべて新規実装である
