@@ -17,7 +17,7 @@
 
 実装詳細を決める前に、ユーザーから見た操作、表示、停止条件、復旧、最終成果物を合意するためのゴールドキュメントとして使用する。
 
-この文書は本repositoryで合意済みの設計baselineである。`Decided`は合意済みの完成状態、`Proposed`はユーザー合意または技術検証を待つ推奨案を示す。文書全体の`Agreed`は、個別の`Proposed`を合意済みにするものではない。
+この文書は本repositoryで合意済みの設計baselineである。labelの定義は「用語と合意状態」の表を参照する。`Proposed`から`Decided`への変更にはGitHub上のユーザー明示合意recordを要する。文書全体の`Agreed`は、個別の`Proposed`を合意済みにするものではない。
 
 ### 2026-09-05の拡張案: roleとproviderの分離（D-032）
 
