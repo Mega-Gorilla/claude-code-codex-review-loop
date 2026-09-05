@@ -380,6 +380,22 @@ REPRESENTATIVE: dict[SchemaKind, dict[str, object]] = {
 }
 
 
+REPRESENTATIVE[SchemaKind.AGENT_SELECTION] = {
+    "schema_version": 1,
+    "run_id": "run-1",
+    "repository": "owner/repo",
+    "number": 12,
+    "coder": {
+        "provider": "claude", "model": "test-coder", "mode": "active",
+        "safety_profile": "coder_workspace", "adapter_contract_version": 1,
+    },
+    "reviewer": {
+        "provider": "codex", "model": "test-reviewer", "mode": "fresh",
+        "safety_profile": "reviewer_isolated", "adapter_contract_version": 1,
+    },
+}
+
+
 REPRESENTATIVE[SchemaKind.RUN_LOCK] = {
     "schema_version": 1,
     "run_id": "run-1",
