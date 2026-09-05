@@ -635,6 +635,7 @@ def _envelope_fields(host_action: Field) -> dict[str, Field]:
         "repository": text(),
         "number": integer(),
         **_SECTIONS,
+        "agent_selection": obj({"digest": sha()}, required=False),
         "host_action": host_action,
         # user_requestはPhase 8 PR-2cのadditive追加（新しいoptional sectionのため
         # version bumpなし。ADR-0004 rule 2 / 10）。v1 / v2の双方へ同じ形で入る

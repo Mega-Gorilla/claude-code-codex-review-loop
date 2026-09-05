@@ -91,7 +91,7 @@ roleによる責務は既存baselineを維持する。表の両providerへの拡
 
 ### 2.5 role別provider選択（D-032 / Issue #52）
 
-**追加要件案・Proposed・未実装**。D-032のGitHub上の明示合意record取得までは、既存baselineを置き換えず、以下を採択時の計画案として扱う。Phase 8までの完了を取り消さず、既存基盤への拡張として追跡する。coder / reviewerを独立にClaude Code / Codexへ設定し、4組み合わせを扱う。本節でAC-RPの条件案を管理し、D-032採択後に追加分の受入条件の正本とする。Issue単独では確定・変更しない。
+**追加要件案・Proposed**。設定契約・永続化・runtime照合は実装済み（ADR-0025 / 0026）、native adapterは未実装。D-032のGitHub上の明示合意record取得までは、既存baselineを置き換えず、以下を採択時の計画案として扱う。Phase 8までの完了を取り消さず、既存基盤への拡張として追跡する。coder / reviewerを独立にClaude Code / Codexへ設定し、4組み合わせを扱う。本節でAC-RPの条件案を管理し、D-032採択後に追加分の受入条件の正本とする。Issue単独では確定・変更しない。
 
 product名`Claude Code–Codex Review Loop`、repository / package名`claude-code-codex-review-loop`、Python package名`claude_code_codex_review_loop`、CLI名`cc-review`はD-032の一般化対象外であり、変更しない（`tests/test_repository_contract.py`の命名契約を維持）。
 

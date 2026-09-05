@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-既存baselineは承認済みで、Phase 8までの実行基盤が実装されています。両providerへの実接続と後続workflowの完成とは区別してください。role別provider選択の追加案D-032は`Proposed`・未実装で、Issue #52 / PR #53が追跡します（2026-09-05時点）。
+既存baselineは承認済みで、Phase 8までの実行基盤が実装されています。両providerへの実接続と後続workflowの完成とは区別してください。role別provider選択の追加案D-032は`Proposed`です。設定契約・永続化・runtime照合は実装済み（ADR-0025 / 0026）、native adapterは未実装で、Issue #52が追跡します（2026-09-05時点）。
 
 | 正本 | 役割 |
 | --- | --- |

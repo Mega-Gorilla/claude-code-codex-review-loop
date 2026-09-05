@@ -18,11 +18,14 @@ from __future__ import annotations
 import dataclasses
 from typing import Final
 
+from .agents import AGENT_SELECTION
 from .registry import (
     SchemaDefinition,
     SchemaKind,
     array,
+    enum_field,
     integer,
+    obj,
     opaque,
     schema_version_field,
     sha,
@@ -85,6 +88,10 @@ SESSION_CONFIG = SchemaDefinition(
                 ),
                 # process tree停止のgrace period（C-03）
                 "halt_grace_ms": integer(),
+                # 旧runは3 field不在。新runは組で必須（runtimeで意味検証）。ADR-0026。
+                "agent_selection": obj(AGENT_SELECTION.versions[1].fields, required=False),
+                "agent_initialization": enum_field(("preparing", "ready"), required=False),
+                "agent_initial_checkpoint": sha(required=False),
             },
         )
     },

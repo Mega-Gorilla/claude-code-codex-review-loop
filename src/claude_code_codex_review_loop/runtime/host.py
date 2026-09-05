@@ -21,6 +21,7 @@ from typing import Protocol
 
 from ..state import StatePaths
 from ..workflow import Blocked, EngineStopped, Terminal
+from .agent_session import AgentExecution, check_agent_binding
 from .config import SessionConfig
 from .ports import PortSet
 from .session import HostWork, StepOutcome, StepResult, step, submit_result
@@ -67,6 +68,7 @@ def drive(
     clock: DriveClock,
     max_rounds: int,
     stop: StopSignal | None = None,
+    execution: AgentExecution | None = None,
 ) -> DriveResult:
     """host作業が無くなるまで`step` -> `execute` -> `submit`を繰り返す。
 
@@ -86,6 +88,7 @@ def drive(
             id_source=clock.id_source,
             issued_at=clock.issued_at(),
             stop=stop,
+            execution=execution,
         )
         outcome = result.outcome
         if isinstance(outcome, (Terminal, Blocked, EngineStopped)):
@@ -95,6 +98,9 @@ def drive(
         # 待機）と`submit_result`（chain取得を含む）はroundの中で最も長く、2回目の
         # `KeyboardInterrupt`はここへ落ちやすい。`step`のcatchはこの区間を覆わない
         try:
+            denied = check_agent_binding(paths, config)
+            if denied is not None:
+                return DriveResult(denied, rounds, tuple(submitted))
             raw = host.execute(outcome)
             if stop is not None and stop.requested:
                 # host作業中の1回目。戻り直後が最初の安全点になる
