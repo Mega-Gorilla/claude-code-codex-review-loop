@@ -354,6 +354,9 @@ def persist(
     if detected is not None:
         return detected
 
+    # 旧実装の誤採番transactionや、発行後に占有された番号を再投稿しない（ADR-0024 決定19）。
+    # 同一bindingが検証済みなら投稿後crashからの再開なので、既存recordの照合へ進む。
+    # それ以外は欠番も含めて既知・観測済み範囲を再利用せず、汚染を広げる前に停止する。
     if transaction.kind is RecordKind.INTEGRITY_INCIDENT and not any(
         record.key == transaction.binding for record in chain.records
     ) and transaction.seq <= max(chain.max_seq, chain.assurance_high_water):

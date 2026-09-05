@@ -48,12 +48,14 @@ incident recordは**まさにchainが壊れているときに投稿するrecord*
 ### 壊れた末尾の採番と連結（Issue #50）
 
 15. **incidentのseqは、検証済み列の最大seq・観測最大seq・checkpointの`assurance_high_water`の最大値 + 1**とする。改変済みrecordは検証済み列から外れ、削除済みrecordは観測最大からも外れるため、検証済み列だけでは番号を再利用してしまう。既存番号を埋めず、元のgap / missingは監査記録を投稿しても検出され続ける。
+    - **保証範囲**: 観測最大はmarker解析・producer allowlist検査を通った候補のseqに限る。actor違反・marker解析失敗のcommentの主張だけを根拠に番号を予約せず、後からallowlistを拡張したりmarkerの受理規則を変更したりした場合の遡及的なseq衝突回避は保証しない。
 16. **incidentだけに構造key `audit_prev`（先行する検証済みrecordのseq）を追加する**。producerは検証済み末尾を選び、`prev`にその完成本文hashを置く。先行recordが無い場合は`audit_prev=0`を明示して`prev`を省略する。これはgenesisや新baselineではなく、欠落した過去を保持した監査記録である。通常recordのseq-1連結規則は変えない。
 17. verifierは`audit_prev`をincident以外で拒否し、整数・`0 <= audit_prev < seq`・hashの有無を検査する。linkは検証済み先行recordの末尾へ限り、健全なrecordを飛び越せない。hash不一致は通常と同じchain violationとなる。gap / edited / missing等の既存検出条件は緩めない。
 18. **投稿前にtransactionへ`audit_prev`と`audit_prev_hash`を保存する**（0の場合hashは省略）。完成本文hashは引き続き必須。C-07はその保存値から同じmarkerを再構成し、現在のanchor・hashおよび保存済み完成本文hashと照合する。anchorが後から改変・消失した場合は推測で連結し直さず停止する。同一bindingの本文を作り直すmigrationは行わない。
 19. 投稿前に、incidentの番号が既知・観測済み範囲と重なり、同一bindingの検証済みrecordが無ければ`incident_sequence_occupied`で停止する。旧実装の誤採番transactionも再投稿せず停止する。既に汚染されたseqを本修正で消したり再利用したりしない。
 20. checkpointはoptional fieldのadditive追加（ADR-0004）。markerもoptional構造keyの追加でv1を維持し、keyのない既存record・transactionは旧規則で読む。古い実装は新keyを拒否するため、新incidentを記録したrunを古い実装へdowngradeして継続できるとは保証しない。
 21. 受入testは実際のfake gh上の改変・削除をC-06へ通し、通常実行と投稿前／投稿後・checkpoint消費前からの別process resumeで検証する。terminalだけでなく、元の違反集合・既存番号の不使用・監査台帳・canonical検証・重複なしを確認する（PR #51の18ケース）。
+    - 実chainでの部分記録（I-VR）も確認し、2件目のincidentが1件目のseq・完成本文hashへ連結され、両方が検証済み列に残り、元の違反集合を消さないことを固定する。
 
 ## Consequences
 

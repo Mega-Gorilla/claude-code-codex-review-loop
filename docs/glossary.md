@@ -50,10 +50,10 @@
 
 | 用語 | 定義 |
 | --- | --- |
-| record chain | 同一run内の内部recordがmarker payloadの`seq`（1始まり通し番号）と`prev`（直前recordの本文hash）で連結された系列。specの正本はADR-0008 |
+| record chain | 同一run内の内部recordがmarker payloadの`seq`（1始まり通し番号）と`prev`（先行recordの完成本文hash）で連結された系列。通常はseq-1へ、`audit_prev`を持つincidentは同keyが示す直近の検証済み先行recordへ連結する（先行recordなしは0・`prev`省略）。specの正本はADR-0008 / ADR-0024 |
 | state root | 同一マシンの全worktreeから同じ場所を指すper-user領域。`runs/<run ID>/checkpoint.json`と`locks/<repository digest>/<番号>.lock`を持つ。既定pathの解決はC-12（ADR-0011） |
 | PR lock | 同一PRへの同時runを検出するためのfile。回収はpid非生存・host一致・run一致の3条件が揃った場合のみで、拒否のworkflow動作はAC-C10-03（C-10） |
-| checkpoint transaction | 投稿前 / 投稿成否不明で中断したrecordを**同一key**で再発行するためにcheckpointへ保存する値（binding・payload hash・render済み本文・seq・head） |
+| checkpoint transaction | 投稿前 / 投稿成否不明で中断したrecordを**同一key**で再発行するためにcheckpointへ保存する値（binding・payload hash・render済み本文・完成本文hash・seq・head等）。incidentでは`audit_prev` / `audit_prev_hash`も保存し、同じ監査linkを再構成する（先行recordなしは0・hash省略。ADR-0024） |
 | AWAIT_USER request | ユーザー入力待ちをhostへ提示するenvelope。対象awaiting・head・受理可能なrecord種別・根拠record・one-time nonce・awaiting instance（`since_seq`）を持ち、応答は`USER_SUBMIT`で戻る（ADR-0018） |
 | user intent key | ユーザー入力の正規化intentを表す決定論的key（run / awaiting / awaiting instance / 対象head / record種別）。転記とGitHub直接commentの2経路が同じ値を導出でき、同一intentの二重recordを防ぐ（ADR-0018） |
 | input route | user-input recordがどの経路で入ったかの語彙。`host_transcript`（対話型sessionの入力をControllerが転記）と`github_comment`（ユーザーの直接comment。C-06がexternal evidenceとして受理）の2値 |

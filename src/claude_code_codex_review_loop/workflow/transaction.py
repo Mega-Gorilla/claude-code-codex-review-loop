@@ -96,8 +96,8 @@ def issue_transaction(
     previous: str | None = None
     anchor: int | None = None
     if audit_chain is not None:
-        seq = max(seq - 1, audit_chain.max_seq, audit_chain.assurance_high_water) + 1
         anchor = max((record.seq for record in records), default=0)
+        seq = max(anchor, audit_chain.max_seq, audit_chain.assurance_high_water) + 1
         previous = next((record.body_hash for record in records if record.seq == anchor), None)
     elif seq >= 2:
         earlier = {record.seq: record for record in records}.get(seq - 1)

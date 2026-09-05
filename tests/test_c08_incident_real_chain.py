@@ -14,9 +14,11 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from c06_support.helpers import make_comment
 from c07_support.helpers import RUN, chain_comments_of, conversation_section
 from c08_support.runtime import RuntimeEnv, runtime_env
 from test_c08_incident import (
@@ -25,11 +27,13 @@ from test_c08_incident import (
     _incident_kwargs,
     _payload,
     _ports,
+    _RecordedQueue,
     _recording_state,
     violation,
 )
 
 from claude_code_codex_review_loop.domain.values import RecordKind, State
+from claude_code_codex_review_loop.identity.record_chain import ChainPayload, parse_record_marker
 from claude_code_codex_review_loop.runtime import SessionConfig, read_session_config
 from claude_code_codex_review_loop.state import checkpoint_path, prepare_state_root, run_directory, save_checkpoint
 from claude_code_codex_review_loop.workflow import (
@@ -171,3 +175,48 @@ def test_incident_resume_preserves_sequence_and_records_once(
     assert again["terminal"] is True, again
     assert again["persisted"] == []
     _assert_completed(env, count, bindings, deleted)
+
+
+def test_serial_incidents_link_to_the_previous_verified_incident(tmp_path: Path) -> None:
+    env = _damaged_env(tmp_path, count=2, damaged_index=1, deleted=True)
+    before = env.ports().records.chain(RUN)
+    first, remaining = before.violations
+    # gapを受理して作成したrecordの永続化前に、同じ実chainからmissingも検出する。
+    # 違反は捏造せず、C-01の既知集合だけを先行する検出時点へ設定する。
+    save_checkpoint(
+        checkpoint_path(env.paths, RUN),
+        with_machine_state(_payload(env), _recording_state(deferred=(first,))),
+    )
+    payloads = FakeIncidentPayloads()
+    produced = record_incident(**_incident_kwargs(env, payloads))
+    assert isinstance(produced, IncidentRecorded), produced
+    events = _RecordedQueue((first.binding,), (remaining.binding,))
+    ports = replace(_ports(env, incident=payloads), events=events)
+    result = _drive(env, ports)
+    assert result.outcome == Terminal(state=State.CANCELLED), result
+    assert result.trace.incidents == 1  # 1件目は上で作成済み。I-VRで残余の1件を追加する。
+    assert len(set(result.trace.persisted)) == events.calls == 2
+    assert [call.violation_bindings for call in payloads.calls] == [
+        (first.binding,), (remaining.binding,),
+    ]
+    after = env.ports().records.chain(RUN)
+    assert after.violations == before.violations
+    assert [(record.seq, record.kind) for record in after.records] == [
+        (1, RecordKind.REVIEW_RESULT),
+        (3, RecordKind.INTEGRITY_INCIDENT),
+        (4, RecordKind.INTEGRITY_INCIDENT),
+    ]
+    for previous, incident in zip(after.records, after.records[1:], strict=False):
+        marker = parse_record_marker(make_comment(int(incident.comment_id), incident.body))
+        assert isinstance(marker, ChainPayload)
+        assert marker.audit_prev == previous.seq
+        assert marker.prev == previous.body_hash
+    payload = _payload(env)
+    assert read_recorded_violations(payload) == tuple(ref.binding.value for ref in before.violations)
+    assert read_machine_state(payload).deferred_integrity == ()
+    assert "transaction" not in payload
+    assert len(env.comments()) == 3
+    again = _drive(env, ports)
+    assert again.outcome == Terminal(state=State.CANCELLED)
+    assert again.trace.persisted == ()
+    assert len(env.comments()) == 3
