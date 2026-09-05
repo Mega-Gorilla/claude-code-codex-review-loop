@@ -224,8 +224,8 @@ class TestCheckoutRejections:
         def fail(path: str) -> None:
             raise OSError(path)
 
-        def rmtree(root: Path, *, onexc):
-            onexc(fail, str(root), OSError())
+        def rmtree(root: Path, *, onerror):
+            onerror(fail, str(root), (OSError, OSError(), None))
 
         monkeypatch.setattr(module, "_remove_tree", remove_tree)
         monkeypatch.setattr(module.shutil, "rmtree", rmtree)

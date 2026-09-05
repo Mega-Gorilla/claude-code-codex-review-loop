@@ -14,7 +14,7 @@ import re
 import shutil
 import stat
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -165,12 +165,14 @@ def _verify_checkout_root(root: Path, repository: Path) -> None:
 
 def _remove_tree(root: Path) -> None:
     """git cloneが付けたread-only file属性を外してから、自分のrootを破棄する。"""
-    def clear_readonly(function: object, path: str, error: BaseException) -> None:
+    def clear_readonly(
+        function: Callable[[str], object], path: str, error: tuple[type[BaseException], BaseException, object]
+    ) -> None:
         del error
         try:
             os.chmod(path, stat.S_IWRITE)
-            function(path)  # type: ignore[operator]
+            function(path)
         except OSError:
             raise CheckoutError("remove") from None
 
-    shutil.rmtree(root, onexc=clear_readonly)
+    shutil.rmtree(root, onerror=clear_readonly)
