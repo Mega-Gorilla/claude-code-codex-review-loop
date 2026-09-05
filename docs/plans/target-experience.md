@@ -21,7 +21,7 @@
 
 ### 2026-09-05の拡張案: roleとproviderの分離（D-032）
 
-**Behavior: Proposed / Implementation: 未実装、Issue #52で追跡。** 会話でのユーザー要望を受けた提案であり、GitHub上のユーザー明示合意recordは未取得。Issue #52自体を合意根拠とは扱わず、同IssueまたはPR #53でD-032への明示合意を得た後、そのcomment URLをdecision logへ記録して`Decided`へ変更する。それまでは既存の合意済みbaselineを置き換えない。以下は採択時の拡張内容である。
+**Behavior: Proposed / Implementation: 設定契約・永続化・runtime照合まで実装、native adapter未実装（ADR-0025 / 0026）、Issue #52で追跡。** 会話でのユーザー要望を受けた提案であり、GitHub上のユーザー明示合意recordは未取得。Issue #52自体を合意根拠とは扱わず、同IssueまたはPR #53でD-032への明示合意を得た後、そのcomment URLをdecision logへ記録して`Decided`へ変更する。それまでは既存の合意済みbaselineを置き換えない。以下は採択時の拡張内容である。
 
 coderとreviewerは役割であり、Claude Code / Codexはその実行providerである。双方を独立に選べるため、従来のClaude coder + Codex reviewer、逆の組み合わせ、Claude同士、Codex同士の4組み合わせを対象とする。同一providerでもcoderとreviewerのsession・作業領域・権限を共有しない。
 

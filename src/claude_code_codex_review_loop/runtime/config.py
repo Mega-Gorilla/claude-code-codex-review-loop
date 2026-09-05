@@ -28,6 +28,7 @@ from ..schema.registry import validate
 from ..schema.session import DEFAULT_CONTROLLER_SPEAKER, SESSION_CONFIG
 from ..state import StatePaths, run_directory
 from ..transport.gh import GhContext, RepoRef, RetryPolicy
+from .agent_selection import AgentSelection, SelectionRejected, restore_selection
 
 CONFIG_FILE = "session.json"
 
@@ -69,6 +70,7 @@ class SessionConfig:
     # Controller自身の記録（incident record）の表示名
     controller_speaker: str
     halt_grace_seconds: float
+    agent_selection: AgentSelection | None = None
 
     @property
     def repo(self) -> RepoRef:
@@ -162,6 +164,20 @@ def read_session_config(
     payload = result.payload
     if payload.get("run_id") != run_id:
         return ConfigUnavailable(detail="session configのrun IDが一致しない")
+    selected: AgentSelection | None = None
+    if any(key in payload for key in ("agent_selection", "agent_initialization", "agent_initial_checkpoint")):
+        if payload.get("agent_initialization") != "ready":
+            return ConfigUnavailable(detail="agent_initialization_incomplete")
+        if "agent_initial_checkpoint" not in payload:
+            return ConfigUnavailable(detail="agent_initialization_invalid")
+        restored = restore_selection(
+            canonical_json(cast(Mapping[str, object], payload["agent_selection"])).encode("utf-8")
+            if "agent_selection" in payload else None,
+            run_id=run_id, repository=_text(payload, "repository"), number=_int(payload, "number"),
+        )
+        if isinstance(restored, SelectionRejected):
+            return ConfigUnavailable(detail=restored.code)
+        selected = restored
     since = payload["search_since"]
     return SessionConfig(
         run_id=run_id,
@@ -193,6 +209,7 @@ def read_session_config(
             payload, "controller_speaker", DEFAULT_CONTROLLER_SPEAKER
         ),
         halt_grace_seconds=_seconds(payload, "halt_grace_ms"),
+        agent_selection=selected,
     )
 
 

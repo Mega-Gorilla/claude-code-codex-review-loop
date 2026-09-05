@@ -52,6 +52,7 @@ from ..workflow import (
     request_emergency_stop,
     submit,
 )
+from .agent_session import AgentExecution, check_agent_binding, check_agent_execution
 from .config import SessionConfig
 from .ports import ChainNotIntactError, PortSet, PortUnavailableError
 from .signals import StopSignal
@@ -125,6 +126,7 @@ def step(
     id_source: Callable[[], str],
     issued_at: str,
     stop: StopSignal | None = None,
+    execution: AgentExecution | None = None,
 ) -> StepResult:
     """次にhostがすべきことまで進める（engine側の作業は途中でこなす）。
 
@@ -137,9 +139,9 @@ def step(
     のがここの責務である（ADR-0021 決定19-h）。
     """
     if stop is None:
-        return _run_step(paths, config, ports, id_source, issued_at, None)
+        return _run_step(paths, config, ports, id_source, issued_at, None, execution)
     try:
-        return _run_step(paths, config, ports, id_source, issued_at, stop)
+        return _run_step(paths, config, ports, id_source, issued_at, stop, execution)
     except KeyboardInterrupt:
         if not stop.force_requested:
             # 停止の昇格要求ではない中断は握り潰さない
@@ -198,6 +200,7 @@ def _run_step(
     id_source: Callable[[], str],
     issued_at: str,
     stop: StopSignal | None,
+    execution: AgentExecution | None,
 ) -> StepResult:
     """`step`の本体（`KeyboardInterrupt`の扱いは呼び出し側が持つ）。"""
     persisted: list[str] = []
@@ -227,6 +230,17 @@ def _run_step(
             stop.mark_recorded()
             if not recorded.already_recorded:
                 requested += 1
+        binding_error = check_agent_binding(paths, config)
+        if binding_error is not None:
+            # 設定破損でも記録済み緊急停止は妨げない。local停止だけ行い、通常処理へ戻らない。
+            safety = _emergency(paths, config, ports, stop)
+            if isinstance(safety, EmergencyStopCompleted):
+                stopped_count += 1
+            elif isinstance(safety, EmergencyStopFailed):
+                return StepResult(EngineStopped("emergency_stop_failed", safety.detail), trace())
+            elif safety.code != "no_stop_request":
+                return StepResult(safety, trace())
+            return StepResult(binding_error, trace())
         try:
             outcome = _advance(paths, config, ports, id_source, issued_at)
         except PortUnavailableError as error:
@@ -288,6 +302,10 @@ def _run_step(
                     trace(),
                 )
             continue
+        if isinstance(outcome, HostActionIssued):
+            denied = check_agent_execution(config, execution or AgentExecution())
+            if denied is not None:
+                return StepResult(denied, trace())
         return StepResult(outcome, trace())
 
 
@@ -371,6 +389,9 @@ def submit_result(
     raw: bytes, *, paths: StatePaths, config: SessionConfig, ports: PortSet, accepted_at: str
 ) -> SubmitOutcome:
     """hostの応答をengineへ渡す（`step`と並ぶもう1つの制御経路。AC-C08-03）。"""
+    denied = check_agent_binding(paths, config)
+    if denied is not None:
+        return denied
     try:
         return submit(
             raw,

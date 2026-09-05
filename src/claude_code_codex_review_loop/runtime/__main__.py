@@ -43,6 +43,7 @@ from ..workflow import (
     UserInputReplayed,
     UserIntentAlreadyRecorded,
 )
+from .agent_session import AgentExecution
 from .config import ConfigUnavailable, read_session_config
 from .ports import default_ports
 from .session import step, submit_result
@@ -66,6 +67,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", required=True)
     parser.add_argument("--run", required=True)
     parser.add_argument("--result", help="submitの入力（submit envelope file）")
+    parser.add_argument(
+        "--active-provider", choices=("claude", "codex"),
+        help="選択済みrunのHOST_ACTION事前検証用。選択なしrun・submitでは未使用（provider設定は変更しない）",
+    )
     return parser
 
 
@@ -207,6 +212,7 @@ def _run(argv: Sequence[str] | None, stop: StopSignal) -> int:
                 id_source=lambda: uuid.uuid4().hex,
                 issued_at=_now(),
                 stop=stop,
+                execution=AgentExecution(active_provider=args.active_provider),
             )
         payload = _advance_payload(result.outcome)
         payload["persisted"] = list(result.trace.persisted)
