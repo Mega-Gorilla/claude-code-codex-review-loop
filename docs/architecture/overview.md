@@ -13,7 +13,7 @@
 
 GitHubのIssueまたはPRを指定して起動すると、選択したcoderが実装し、reviewerがread-onlyでreviewし、両者の発言をGitHubへ記録しながら、人間が明示的にmergeを承認するまで進む設計です。
 
-coder / reviewerにはClaude Code / Codexを独立設定し、同一provider同士を含む4組み合わせへ拡張します（D-032、[implementation plan](../plans/implementation-plan.md) Section 2.5）。**この拡張は未実装でIssue #52が追跡します**。Phase 8までの実行基盤の完成と、両providerの実接続完了は区別します。
+合意済みbaselineはClaude Code coder / Codex reviewerです。両roleへClaude Code / Codexを独立設定し、同一provider同士を含む4組み合わせへ拡張するD-032は**Proposed・未実装でIssue #52が追跡します**（[implementation plan](../plans/implementation-plan.md)のD-032拡張案）。GitHub上のユーザー明示合意record取得まではbaselineを置き換えません。以下はroleで責務を表し、provider選択部分は採択時の案を示します。Phase 8までの実行基盤の完成と、両providerの実接続完了は区別します。
 
 ## 役割
 

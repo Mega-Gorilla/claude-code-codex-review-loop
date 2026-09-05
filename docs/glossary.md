@@ -46,7 +46,9 @@
 | review thread | PRのfile / line固有のfinding議論のthread。解決状態（isResolved）を持ち、replyはthread先頭commentへ行う |
 | fallback comment | threadへのreplyが恒久的に不可能な場合に、元comment URLを前置して投稿するconversation comment |
 
-## roleとprovider（D-032、拡張はIssue #52で実装予定）
+## roleとprovider（D-032: Proposed、拡張案はIssue #52で追跡）
+
+以下のprovider独立選択は採択時の案で、GitHub上の明示合意record取得までは既存baselineを置き換えない。
 
 | 用語 | 定義 |
 | --- | --- |

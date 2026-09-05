@@ -14,6 +14,10 @@ target experienceが定義した完成状態を、どのcomponent、どの依存
 
 本書はcomponentの責務境界とPhaseの正本である。API詳細は各子IssueのPRで設計する。target behaviorを本書で変更しない。変更が必要な場合はdecision briefを提示し、ユーザー合意後にtarget experienceのdecision logへ反映する。
 
+### 安定IDの規約
+
+`AC-CNN-NN`はcomponent別の受入条件、`AC-RP-NN`はrole / provider横断の受入条件である。後者は単一の所有componentを持たず、Issue #52が横断追跡し、担当componentと完了時期はD-032の拡張案に示す。D-032が`Proposed`の間、AC-RPは条件案であり、既存のACやPhase完了条件を置き換えない。
+
 ## 1. 設計原則
 
 原則はtarget experienceが要求する性質と、それが破れたときの失敗から導出する。参考実装の観測はこれらを補強する材料であり、根拠そのものではない。観測の詳細は[reference implementation assessment](../research/reference-implementation-assessment.md)にある。
@@ -47,7 +51,7 @@ target experienceが定義した完成状態を、どのcomponent、どの依存
 
 ### 2.1 制約
 
-Controller CLIはactive coder sessionの外部toolとして呼ばれ、親のLLM turnを呼び戻せない。TUIへのキー入力注入も禁止されている。したがって「core engineが長時間loopを回し、必要になったらactive coderを呼ぶ」構造は成立しない。その構造はactive coderのsubprocess化（active session契約の違反）かhost側への再実装（P-002違反）のいずれかになる。D-032により、この制約はClaude Code / Codexの両coderへ適用する。
+Controller CLIはactive coder sessionの外部toolとして呼ばれ、親のLLM turnを呼び戻せない。TUIへのキー入力注入も禁止されている。したがって「core engineが長時間loopを回し、必要になったらactive coderを呼ぶ」構造は成立しない。その構造はactive coderのsubprocess化（active session契約の違反）かhost側への再実装（P-002違反）のいずれかになる。D-032では、この制約をClaude Code / Codexの両coderへ適用する案を示す。
 
 ### 2.2 制御の反転
 
@@ -77,6 +81,8 @@ engine.advance(run_id) -> HOST_ACTION | AWAIT_USER | TERMINAL
 
 ### 2.4 agentごとの起動主体
 
+roleによる責務は既存baselineを維持する。表の両providerへの拡張はD-032（Proposed）の採択時の案で、現行の独立選択対応を示すものではない。
+
 | Agent | 起動主体 | 理由 |
 | --- | --- | --- |
 | coder（Claude Code / Codex、主経路） | 起動しない。選択したproviderのactive hostがHOST_ACTIONを実行する | active sessionのcontext維持が要件 |
@@ -85,7 +91,9 @@ engine.advance(run_id) -> HOST_ACTION | AWAIT_USER | TERMINAL
 
 ### 2.5 role別provider選択（D-032 / Issue #52）
 
-**追加要件・未実装**。Phase 8までの完了を取り消さず、既存基盤への拡張として追跡する。coder / reviewerを独立にClaude Code / Codexへ設定し、4組み合わせを扱う。本節のAC-RPが追加分の受入条件の正本であり、Issue単独では変更しない。
+**追加要件案・Proposed・未実装**。D-032のGitHub上の明示合意record取得までは、既存baselineを置き換えず、以下を採択時の計画案として扱う。Phase 8までの完了を取り消さず、既存基盤への拡張として追跡する。coder / reviewerを独立にClaude Code / Codexへ設定し、4組み合わせを扱う。本節でAC-RPの条件案を管理し、D-032採択後に追加分の受入条件の正本とする。Issue単独では確定・変更しない。
+
+product名`Claude Code–Codex Review Loop`、repository / package名`claude-code-codex-review-loop`、Python package名`claude_code_codex_review_loop`、CLI名`cc-review`はD-032の一般化対象外であり、変更しない（`tests/test_repository_contract.py`の命名契約を維持）。
 
 役割による権限・state遷移と、providerによるCLI起動・出力正規化・認証・安全profileを分離する。既存の`RequestCodexReview` / `CodexPurpose` / `CODEX_*`は実装上の識別子で、名称だけで実行providerを決めない。永続化済み文字列を変更する場合はADR-0004に基づく互換性設計を先に行う。
 
@@ -109,7 +117,7 @@ engine.advance(run_id) -> HOST_ACTION | AWAIT_USER | TERMINAL
 
 **順序**: Issue #52の計画・設定／adapter契約を先に確定し、Phase 9 #14の共通runtimeとprovider adapterを実装する。Codex固有の安全性spikeは並行できるが、Codex固定のinterfaceを後続へ広げない。Phase 10以降のworkflow、Phase 16のhost入口・配布、Phase 17の4組み合わせ受入まで追跡し、fake成功だけで#52をcloseしない。既存Phase番号とcomponent IDは増やさない。
 
-本書の残るClaude coder / Codex reviewer表記は従来の組み合わせの例または既存code名として読み、役割の一般化には本節を優先する。ただしClaude固有のAuto mode等の設定語彙をCodexへ転用しない。#14が提案中のAC-C09-06 / 07の採否は別のplan変更で扱い、本節で暗黙に確定しない。
+D-032採択前は本書のClaude coder / Codex reviewer表記が既存baselineである。採択後は従来の組み合わせの例または既存code名として読み、役割の一般化には本節を優先する。ただしClaude固有のAuto mode等の設定語彙をCodexへ転用しない。#14が提案中のAC-C09-06 / 07の採否は別のplan変更で扱い、本節で暗黙に確定しない。
 
 ## 3. Package layout
 
