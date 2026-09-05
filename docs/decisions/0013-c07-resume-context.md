@@ -54,6 +54,10 @@ Phase 7はPR-1（ADR-0010: recordのcanonical projection）、PR-2（ADR-0011: c
 
 ## Consequences
 
+Phase 8 PR-3d（ADR-0024、Issue #50）でincident transactionへoptionalな`audit_prev` / `audit_prev_hash`を追加した。
+通常recordは直前seqから再構成する。incidentの明示linkは投稿前に保存したanchorとhashを使い、現在の検証済みanchorと完成本文hashを照合する。
+anchorが変化していれば停止し、同じbindingのまま本文や連結先を作り直さない。旧transactionへ新しいanchorを推測するmigrationは行わない。
+
 - C-08はturnの節目で`save_checkpoint`し、投稿前に`transaction`（projection込み）を保存してから`PersistRecord`を実行する。resume時は`PendingReissueRequired.body`をそのまま`ensure_comment_posted`へ渡せばよい
 - C-10は`ResumeContext`をstateと組み合わせてC-01 eventを構築し、`ResumeStopped`はeventを発行せず理由を提示する。停止結果に同梱された`pending`（R-P用のdirective）と`direct_answer`は、停止の提示と同時に扱える。直接回答の`DecisionContext`（期待するuser-input record種別・head・fingerprint）と、候補本文の意味解釈（`APPROVE_MERGE`か否か）はC-10 / C-11が決め、解釈結果だけを`external_approvals`として注入する
 - Phase 7の受入条件（AC-C07-01 / 02 / 03 / 05 / 06）が揃う。AC-C07-04（retention / cleanup）はPhase 14（#19）が扱う

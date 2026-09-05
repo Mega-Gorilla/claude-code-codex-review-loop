@@ -14,8 +14,8 @@ render済みbody -> build_record_projection -> derive_record_binding
 計算でき、省略する理由が無い。これによりresume側（C-07の`evaluate_pending`）の完成形照合が
 常に効く。
 
-保存する`body`は**marker付加前**のredact済みrender出力である（C-07の`read_transaction`が
-そう読む）。marker行はresume時に`projection`と直前recordのbody hashから再構成する。
+保存する`body`は**marker付加前**のredact済みrender出力である。通常は直前recordから、
+incidentは保存済みaudit_prevとhashからmarkerを再構成する（ADR-0024）。
 """
 
 from __future__ import annotations
@@ -58,6 +58,8 @@ class IssuedTransaction:
     projection: dict[str, str | int]
     body_hash: str
     marked_body: str
+    audit_prev: int | None = None
+    audit_prev_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,15 +85,21 @@ def issue_transaction(
     head_sha: str,
     body: str,
     records: Sequence[VerifiedRecord],
+    audit_chain: ChainVerification | None = None,
 ) -> TransactionOutcome:
     """検証済みpayloadとrender済み本文からtransactionを発行する（pure）。
 
-    `records`は当該runの検証済みrecord列（seq昇順）。直前recordのbody hashがmarkerの
-    `prev`になるため、chainに欠けがあるとtransactionを発行しない。
+    通常は検証済み列の末尾へ連結する。incident用audit_chainを渡す場合は、観測最大と
+    checkpointのhigh-waterを超えて採番し、検証済み末尾を明示anchorとして固定する。
     """
     seq = next_sequence(records)
     previous: str | None = None
-    if seq >= 2:
+    anchor: int | None = None
+    if audit_chain is not None:
+        seq = max(seq - 1, audit_chain.max_seq, audit_chain.assurance_high_water) + 1
+        anchor = max((record.seq for record in records), default=0)
+        previous = next((record.body_hash for record in records if record.seq == anchor), None)
+    elif seq >= 2:
         earlier = {record.seq: record for record in records}.get(seq - 1)
         if earlier is None:  # pragma: no cover - next_sequenceの定義上到達しない
             return TransactionUnavailable(detail=f"直前のseq {seq - 1}がchainに無い")
@@ -110,6 +118,7 @@ def issue_transaction(
             seq=seq,
             prev_body_hash=previous,
             projection=projection,
+            audit_prev=anchor,
         )
         marked = attach_marker(body, marker)
     except (ProjectionError, IdentityError, TransportError) as error:
@@ -124,6 +133,8 @@ def issue_transaction(
         projection=projection,
         body_hash=body_hash_of(marked),
         marked_body=marked,
+        audit_prev=anchor,
+        audit_prev_hash=previous if anchor is not None else None,
     )
 
 
@@ -189,6 +200,7 @@ def produce_record(
         head_sha=head_sha,
         body=body,
         records=chain.records,
+        audit_chain=chain if _is_integrity_audit(machine_state, kind) else None,
     )
     if isinstance(issued, TransactionUnavailable):
         return ProduceRejected("transaction_unavailable", issued.detail)
@@ -203,7 +215,7 @@ def produce_record(
 
 def transaction_section(issued: IssuedTransaction) -> dict[str, object]:
     """checkpointの`transaction` sectionへ保存する形（C-07の`read_transaction`が読む）。"""
-    return {
+    section: dict[str, object] = {
         "binding": issued.binding,
         "kind": issued.kind.value,
         "seq": issued.seq,
@@ -213,3 +225,8 @@ def transaction_section(issued: IssuedTransaction) -> dict[str, object]:
         "body_hash": issued.body_hash,
         "projection": dict(issued.projection),
     }
+    if issued.audit_prev is not None:
+        section["audit_prev"] = issued.audit_prev
+        if issued.audit_prev_hash is not None:
+            section["audit_prev_hash"] = issued.audit_prev_hash
+    return section

@@ -354,6 +354,11 @@ def persist(
     if detected is not None:
         return detected
 
+    if transaction.kind is RecordKind.INTEGRITY_INCIDENT and not any(
+        record.key == transaction.binding for record in chain.records
+    ) and transaction.seq <= max(chain.max_seq, chain.assurance_high_water):
+        return EngineStopped("incident_sequence_occupied", "incidentの番号が観測済み・既知の範囲と衝突する")
+
     outcome = evaluate_pending(transaction, run_id=run_id, records=chain.records)
     if isinstance(outcome, PendingUnavailable):
         return EngineStopped("pending_unavailable", outcome.detail)

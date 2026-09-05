@@ -7,7 +7,7 @@ markerはControllerだけが付加する機械metadataで、HTML commentとし�
 「Controller以外が付加したmarker」を判定する（共有仕様点）。
 
 - 形式: `<!-- CC_REVIEW_META:v1 {compact JSON} -->`（sorted keys、payload<=2048 bytes）
-- payloadは構造key（`key` / `kind` / `run` / `head` / `seq` / `prev`）と、C-02が定義する
+- payloadは構造key（`key` / `kind` / `run` / `head` / `seq` / `prev` / `audit_prev`）と、C-02が定義する
   projection key（検証済みpayloadからのscalar射影。ADR-0010）だけを持つ
 - agent生成本文中の予約token（大小無視）は`CC~REVIEW~META`へ置換してescapeする
   （AC-C05-04）。redactionとは別の変換であり、順序はsanitize -> redact -> render ->
@@ -35,7 +35,7 @@ ESCAPED_TOKEN: Final = "CC~REVIEW~META"
 MAX_PAYLOAD_BYTES: Final = 2048
 
 # chainの構造key（識別・順序・連結）。意味情報は持たない
-STRUCTURAL_PAYLOAD_KEYS: Final = frozenset({"key", "kind", "run", "head", "seq", "prev"})
+STRUCTURAL_PAYLOAD_KEYS: Final = frozenset({"key", "kind", "run", "head", "seq", "prev", "audit_prev"})
 # markerへ載せてよいkeyの許可集合。credentialを想起させる語や本文を持ち込まない。
 # projection keyの定義と語彙はC-02（schema.projection）が所有する（ADR-0010）
 ALLOWED_PAYLOAD_KEYS: Final = STRUCTURAL_PAYLOAD_KEYS | PROJECTION_KEYS

@@ -389,6 +389,9 @@ _SECTIONS: dict[str, Field] = {
             "payload_hash": opaque(),
             "body": text(max_len=MAX_PENDING_BODY_CHARS),
             "body_hash": _optional_opaque(),
+            # Incidentの連結先を投稿前に固定する（ADR-0024、Issue #50）。
+            "audit_prev": integer(required=False),
+            "audit_prev_hash": _optional_sha(),
             # projectionはPhase 7 PR-4のadditive追加: 中断したrecordをmarkerごと
             # 再composeするために要る（同一seqで本文がbyte一致しないとC-06のseq conflictに
             # なる。ADR-0010 決定13）。keyの定義はC-02の`projection`が正本で、ここは

@@ -99,7 +99,7 @@ class ChainCheckpoint:
 
 @dataclass(frozen=True)
 class ChainPayload:
-    """正規形式markerから解析したchain payload。prevはgenesisのみNone。"""
+    """正規形式marker。prev欠如はgenesisまたはincidentのaudit_prev=0のみ。"""
 
     key: str
     kind: RecordKind
@@ -108,6 +108,7 @@ class ChainPayload:
     seq: int
     prev: str | None
     projection: DecodedProjection
+    audit_prev: int | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,7 @@ def compose_record_marker_payload(
     seq: int,
     prev_body_hash: str | None,
     projection: Mapping[str, str | int] | None = None,
+    audit_prev: int | None = None,
 ) -> dict[str, str | int]:
     """chain recordのmarker payloadを合成する（`attach_marker`へ渡す形。ADR-0008）。
 
@@ -174,7 +176,11 @@ def compose_record_marker_payload(
             raise IdentityError("compose", f"{name}は空にできない")
     if seq < 1:
         raise IdentityError("compose", "seqは1始まりの正の整数でなければならない")
-    if (seq == 1) != (prev_body_hash is None):
+    if audit_prev is not None:
+        error = audit_link_error(kind, seq, audit_prev, prev_body_hash)
+        if error is not None:
+            raise IdentityError("compose", error)
+    elif (seq == 1) != (prev_body_hash is None):
         raise IdentityError("compose", "prevはgenesis（seq=1）でのみ欠如し、seq>=2では必須")
     payload: dict[str, str | int] = {
         "key": key,
@@ -183,6 +189,8 @@ def compose_record_marker_payload(
         "head": head_sha,
         "seq": seq,
     }
+    if audit_prev is not None:
+        payload["audit_prev"] = audit_prev
     if prev_body_hash is not None:
         if _HASH_PATTERN.fullmatch(prev_body_hash) is None:
             raise IdentityError("compose", "prevはSHA-256 hex（64桁小文字）でなければならない")
@@ -195,6 +203,19 @@ def compose_record_marker_payload(
     if len(encoded.encode("utf-8")) > MAX_PAYLOAD_BYTES:
         raise IdentityError("compose", "marker payloadが上限byte数を超える")
     return payload
+
+
+def audit_link_error(kind: RecordKind, seq: int, anchor: object, previous: object) -> str | None:
+    """incident専用の明示anchor。0は検証済み先行recordが無いことを表す。"""
+    if kind is not RecordKind.INTEGRITY_INCIDENT:
+        return "audit_prevはINTEGRITY_INCIDENTに限る"
+    if isinstance(anchor, bool) or not isinstance(anchor, int) or not 0 <= anchor < seq:
+        return "audit_prevは0以上かつseq未満の整数でなければならない"
+    if anchor == 0:
+        return None if previous is None else "audit_prev=0はprevを持たない"
+    if not isinstance(previous, str) or _HASH_PATTERN.fullmatch(previous) is None:
+        return "audit_prev>0はprevのSHA-256 hashを必要とする"
+    return None
 
 
 def parse_record_marker(comment: UnverifiedComment) -> ChainPayload | str:
@@ -235,16 +256,23 @@ def parse_record_marker(comment: UnverifiedComment) -> ChainPayload | str:
     if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
         return "markerのseqが1始まりの整数でない"
     prev = payload.get("prev")
-    if seq == 1:
+    try:
+        kind = RecordKind(values["kind"])
+    except ValueError:
+        return "markerのkindが未知の種別"
+    anchor = payload.get("audit_prev")
+    if "audit_prev" in payload:
+        error = audit_link_error(kind, seq, anchor, prev)
+        if error is not None:
+            return error
+        if anchor == 0 and "prev" in payload:
+            return "audit_prev=0はprevを持たない"
+    elif seq == 1:
         if "prev" in payload:
             return "genesis record（seq=1）はprevを持たない"
         prev = None
     elif not isinstance(prev, str) or _HASH_PATTERN.fullmatch(prev) is None:
         return "markerのprevがSHA-256 hexでない"
-    try:
-        kind = RecordKind(values["kind"])
-    except ValueError:
-        return "markerのkindが未知の種別"
     # 意味情報（projection）の正規性判定はC-02へ委譲する（定義を1箇所に保つ。ADR-0010）
     projection = decode_record_projection(kind, payload)
     if isinstance(projection, str):
@@ -257,6 +285,7 @@ def parse_record_marker(comment: UnverifiedComment) -> ChainPayload | str:
         seq=seq,
         prev=prev if isinstance(prev, str) else None,
         projection=projection,
+        audit_prev=anchor if isinstance(anchor, int) else None,
     )
 
 
@@ -445,21 +474,6 @@ def verify_record_chain(
                 _violation("gap", run_id, f"s{seq:08d}", detection_head, seq=seq, high_water=high_water)
             )
 
-    # hash chain（条件6）。前seqが欠番・違反済みならskip（二重報告しない）
-    chain_broken: set[int] = set()
-    for seq in sorted(reliable):
-        if seq < 2 or (seq - 1) not in reliable:
-            continue
-        expected = reliable[seq - 1].comment.body_hash
-        if reliable[seq].payload.prev != expected:
-            chain_broken.add(seq)
-            violations.append(
-                _violation(
-                    "chain", run_id, f"s{seq:08d}", detection_head,
-                    seq=seq, expected=expected, observed=reliable[seq].payload.prev,
-                )
-            )
-
     # 既知recordの実在（条件7 + AC-C06-08）と本文改変（条件3）
     tampered_ids: set[str] = set()
     for known in known_records:
@@ -482,6 +496,34 @@ def verify_record_chain(
                     expected=known.body_hash, observed=current.body_hash,
                 )
             )
+
+    # 通常recordは従来のseq-1。incidentは明示した検証済みanchorへ連結する。
+    chain_broken: set[int] = set()
+    for seq in sorted(reliable):
+        candidate = reliable[seq]
+        anchor = candidate.payload.audit_prev
+        previous_seq = seq - 1 if anchor is None else anchor
+        if anchor is not None:
+            eligible = [
+                n for n in reliable if n < seq and n not in chain_broken
+                and reliable[n].comment.comment_id not in tampered_ids
+            ]
+            if anchor != max(eligible, default=0):
+                chain_broken.add(seq)
+                violations.append(_violation(
+                    "chain", run_id, f"s{seq:08d}", detection_head,
+                    seq=seq, expected_anchor=max(eligible, default=0), observed_anchor=anchor,
+                ))
+                continue
+        if previous_seq < 1 or previous_seq not in reliable:
+            continue
+        expected = reliable[previous_seq].comment.body_hash
+        if candidate.payload.prev != expected:
+            chain_broken.add(seq)
+            violations.append(_violation(
+                "chain", run_id, f"s{seq:08d}", detection_head,
+                seq=seq, expected=expected, observed=candidate.payload.prev,
+            ))
 
     records = tuple(
         VerifiedRecord(

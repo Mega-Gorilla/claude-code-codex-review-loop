@@ -45,6 +45,16 @@ incident recordは**まさにchainが壊れているときに投稿するrecord*
 13. **本文はControllerの発言として整える**（`prepare_controller_body`）。`prepare_public_body`はagent用でmodelを、`prepare_user_body`は転記用で入力経路を要求するが、incident recordを書いたのはController自身でどちらでもない。存在しないmodelや入力経路をheaderへ書かないために別の入口を持ち、sanitize / redactは同じ単一choke pointを通す。表示名は`session.json`の`controller_speaker`（optional + 宣言済み既定値。ADR-0004 rule 2 / 12）。
 14. **`RESULT_VARIANTS`へは入れない**。同表は「agentまたはユーザーが**返す**結果」のregistryで、incident recordはengine自身が作るものである（`head_source`を持たない点も表の前提と合わない）。record -> eventの写像は`RecordEventPort`が担い、`recorded_bindings`は`report` / `head`と同じくportが供給する。
 
+### 壊れた末尾の採番と連結（Issue #50）
+
+15. **incidentのseqは、検証済み列の最大seq・観測最大seq・checkpointの`assurance_high_water`の最大値 + 1**とする。改変済みrecordは検証済み列から外れ、削除済みrecordは観測最大からも外れるため、検証済み列だけでは番号を再利用してしまう。既存番号を埋めず、元のgap / missingは監査記録を投稿しても検出され続ける。
+16. **incidentだけに構造key `audit_prev`（先行する検証済みrecordのseq）を追加する**。producerは検証済み末尾を選び、`prev`にその完成本文hashを置く。先行recordが無い場合は`audit_prev=0`を明示して`prev`を省略する。これはgenesisや新baselineではなく、欠落した過去を保持した監査記録である。通常recordのseq-1連結規則は変えない。
+17. verifierは`audit_prev`をincident以外で拒否し、整数・`0 <= audit_prev < seq`・hashの有無を検査する。linkは検証済み先行recordの末尾へ限り、健全なrecordを飛び越せない。hash不一致は通常と同じchain violationとなる。gap / edited / missing等の既存検出条件は緩めない。
+18. **投稿前にtransactionへ`audit_prev`と`audit_prev_hash`を保存する**（0の場合hashは省略）。完成本文hashは引き続き必須。C-07はその保存値から同じmarkerを再構成し、現在のanchor・hashおよび保存済み完成本文hashと照合する。anchorが後から改変・消失した場合は推測で連結し直さず停止する。同一bindingの本文を作り直すmigrationは行わない。
+19. 投稿前に、incidentの番号が既知・観測済み範囲と重なり、同一bindingの検証済みrecordが無ければ`incident_sequence_occupied`で停止する。旧実装の誤採番transactionも再投稿せず停止する。既に汚染されたseqを本修正で消したり再利用したりしない。
+20. checkpointはoptional fieldのadditive追加（ADR-0004）。markerもoptional構造keyの追加でv1を維持し、keyのない既存record・transactionは旧規則で読む。古い実装は新keyを拒否するため、新incidentを記録したrunを古い実装へdowngradeして継続できるとは保証しない。
+21. 受入testは実際のfake gh上の改変・削除をC-06へ通し、通常実行と投稿前／投稿後・checkpoint消費前からの別process resumeで検証する。terminalだけでなく、元の違反集合・既存番号の不使用・監査台帳・canonical検証・重複なしを確認する（PR #51の18ケース）。
+
 ## Consequences
 
 - **Phase 8の行き止まりがすべて閉じた**。cancel起点（C-04）とMERGING起点（I-46 / I-47）の両方で、violationを抱えたrunがterminalへ到達する
