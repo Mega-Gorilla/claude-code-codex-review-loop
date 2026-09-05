@@ -7,6 +7,7 @@ migration policyはADR-0004に従う。
 """
 
 from .action import HOST_ACTION, HOST_ACTION_KINDS, HOST_FAILURE, SUBMIT
+from .agents import AGENT_SELECTION
 from .decision import (
     DECISION_BRIEF,
     DECISION_RECORD,
@@ -99,6 +100,7 @@ _DEFINITIONS: tuple[SchemaDefinition, ...] = (
     USER_SUBMIT,
     PERMISSION_RESUME,
     SESSION_CONFIG,
+    AGENT_SELECTION,
     PERMISSION_BLOCK,
     CI_TIMEOUT,
     CI_CODE_FAILURE,
@@ -146,6 +148,7 @@ __all__ = [
     "INPUT_ROUTES",
     "PERMISSION_RESUME",
     "SESSION_CONFIG",
+    "AGENT_SELECTION",
     "USER_INPUT_AWAITINGS",
     "USER_REQUEST",
     "USER_SUBMIT",
