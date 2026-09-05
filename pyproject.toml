@@ -47,6 +47,7 @@ select = ["E", "F", "W", "I", "UP", "B"]
 [tool.mypy]
 # 対象はsrc配下のpackageとし、strictから開始する。対象は広げる方向のみ変更可。
 files = ["src"]
+python_version = "3.11"
 strict = true
 
 [tool.coverage.run]

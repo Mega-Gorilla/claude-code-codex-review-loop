@@ -28,6 +28,9 @@ KEY_INJECTION_MODULES = frozenset({"pyautogui", "pywinauto", "keyboard", "pynput
 # （implementation plan Section 4: 「Claude coder（headless経路）はControllerが
 # subprocessとして起動するadapter」。ADR-0022）
 HEADLESS_MODULE = "host_headless.py"
+# reviewer用の独立processでのみcheckoutを作るadapter。active hostの主経路ではないため、
+# C-09固有のfilesystem操作はこの契約の対象外とする。
+CHECKOUT_MODULE = "checkout.py"
 
 
 def _gate_env(tmp_path: Path) -> RuntimeEnv:
@@ -106,13 +109,14 @@ class TestNoSpawnNoKeyInjection:
         """**主経路のmoduleはprocessを起動する手段を持たない**（counterではなく構造）。
 
         AC-C08-02が禁じるのは主経路でのsubprocess起動であって、headless経路の起動ではない
-        （headlessはControllerが起動する設計。implementation plan Section 4）。そこで
-        `host_headless.py`だけを対象外にし、**他のどのmoduleにも起動手段が無い**ことを固定する。
+        （headlessはControllerが起動する設計。implementation plan Section 4）。またC-09の
+        `checkout.py`は隔離reviewer runtimeを準備するadapterでありactive hostではない。そこで
+        これらだけを対象外にし、**他のどのmoduleにも起動手段が無い**ことを固定する。
         `host_headless.py`へ起動が集まっていること自体が、主経路に起動が無いことの裏返しになる。
         """
         offending: dict[str, set[str]] = {}
         for source in _runtime_modules():
-            if source.name == HEADLESS_MODULE:
+            if source.name in {HEADLESS_MODULE, CHECKOUT_MODULE}:
                 continue
             hits = _imported_modules(source) & SPAWN_MODULES
             if hits:
