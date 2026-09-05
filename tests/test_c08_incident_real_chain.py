@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""実際のcomment改変を通したincidentの完走・別process resume（Phase 8 PR-3d）。
+"""実際のcomment改変・削除を通したincidentの完走・別process resume（Phase 8 PR-3d）。
 
 fake ghの本文と更新日時を変更し、製品のChainRecordsが違反と検証済みrecord列を
 導出する。violationsだけの差し替えでは、末尾recordの除外による採番衝突を見逃す。
+削除時はcheckpointへ既知recordとhigh-water markを保存し、incidentが欠番を埋めて
+liveのgapを消す経路も検査する。重複投稿は未観測だが、再開の回帰条件として検査する。
 未実装のpayload・本文・event portだけを既存のfakeで補い、chain検証は差し替えない。
 """
 
@@ -15,7 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from c07_support.helpers import RUN
+from c07_support.helpers import RUN, chain_comments_of, conversation_section
 from c08_support.runtime import RuntimeEnv, runtime_env
 from test_c08_incident import (
     FakeIncidentPayloads,
@@ -40,26 +42,39 @@ from claude_code_codex_review_loop.workflow import (
 )
 
 CASES = [(1, 0), (2, 1), (3, 1)]
-CASE_IDS = ["edited-only-record", "edited-tail", "edited-middle-control"]
+CASE_IDS = ["only-record", "tail", "middle-control"]
 
 
-def _edited_env(tmp_path: Path, count: int, edited_index: int) -> RuntimeEnv:
+def _damaged_env(tmp_path: Path, count: int, damaged_index: int, deleted: bool) -> RuntimeEnv:
+    kinds = (RecordKind.REVIEW_RESULT,) * count
     env = runtime_env(
         tmp_path,
         state=_recording_state(deferred=(violation(),)),
-        seeded=(RecordKind.REVIEW_RESULT,) * count,
+        seeded=kinds,
+        extra={"conversation": conversation_section(chain_comments_of(list(kinds)))} if deleted else None,
     )
     comments = env.comments()
-    comment = comments[edited_index]
+    comment = comments[damaged_index]
     assert isinstance(comment, dict)
-    comment["body"] = "改変された本文\n" + str(comment["body"])
-    comment["updated_at"] = "2026-09-05T00:00:00Z"
+    if deleted:
+        del comments[damaged_index]
+    else:
+        comment["body"] = "改変された本文\n" + str(comment["body"])
+        comment["updated_at"] = "2026-09-05T00:00:00Z"
     env.seed(comments)
     chain = env.ports().records.chain(RUN)
-    assert len(chain.violations) == 1
-    assert chain.violations[0].binding.value.startswith("iv:edited:")
+    if deleted:
+        assert len(chain.violations) == 2
+        assert chain.violations[0].binding.value.startswith("iv:gap:")
+        assert chain.violations[1].binding.value.startswith("iv:missing:")
+        assert chain.assurance_high_water == count
+        if damaged_index == count - 1:
+            assert chain.max_seq == count - 1 < chain.assurance_high_water
+    else:
+        assert len(chain.violations) == 1
+        assert chain.violations[0].binding.value.startswith("iv:edited:")
     assert [record.seq for record in chain.records] == [
-        seq for seq in range(1, count + 1) if seq != edited_index + 1
+        seq for seq in range(1, count + 1) if seq != damaged_index + 1
     ]
     # C-01が受理済みの違反集合を保存する。値は製品のchain検証から得たものだけ。
     save_checkpoint(
@@ -74,33 +89,35 @@ def _current_ports(env: RuntimeEnv):
     return _ports(env, recorded=tuple(ref.binding for ref in state.deferred_integrity))
 
 
-def _assert_completed(env: RuntimeEnv, count: int, original_bindings: tuple[str, ...]) -> None:
+def _assert_completed(env: RuntimeEnv, count: int, original_bindings: tuple[str, ...], deleted: bool) -> None:
     payload = _payload(env)
     assert read_machine_state(payload).state is State.CANCELLED
     assert read_machine_state(payload).deferred_integrity == ()
     assert read_recorded_violations(payload) == original_bindings
     assert "transaction" not in payload
     chain = env.ports().records.chain(RUN)
+    # 台帳へ残るだけでは足りない。投稿で欠番を埋め、liveのgapを消してはならない。
     assert tuple(ref.binding.value for ref in chain.violations) == original_bindings
     incidents = [record for record in chain.records if record.kind is RecordKind.INTEGRITY_INCIDENT]
     assert len(incidents) == 1
-    assert incidents[0].seq > count  # 改変された末尾の番号も再利用しない。
-    assert len(env.comments()) == count + 1
+    assert incidents[0].seq > count  # 改変・削除された末尾の番号も再利用しない。
+    assert len(env.comments()) == count + 1 - int(deleted)
 
 
-@pytest.mark.parametrize(("count", "edited_index"), CASES, ids=CASE_IDS)
-def test_an_edited_chain_records_its_incident_and_finishes(
-    tmp_path: Path, count: int, edited_index: int
+@pytest.mark.parametrize(("count", "damaged_index"), CASES, ids=CASE_IDS)
+@pytest.mark.parametrize("deleted", [False, True], ids=["edited", "deleted-known"])
+def test_a_damaged_chain_records_its_incident_without_reusing_sequence(
+    tmp_path: Path, count: int, damaged_index: int, deleted: bool
 ) -> None:
-    env = _edited_env(tmp_path, count, edited_index)
+    env = _damaged_env(tmp_path, count, damaged_index, deleted)
     bindings = tuple(ref.binding.value for ref in env.ports().records.chain(RUN).violations)
     result = _drive(env, _current_ports(env))
     assert result.outcome == Terminal(state=State.CANCELLED), result
-    _assert_completed(env, count, bindings)
+    _assert_completed(env, count, bindings, deleted)
     again = _drive(env, _current_ports(env))
     assert again.outcome == Terminal(state=State.CANCELLED)
     assert again.trace.persisted == ()
-    _assert_completed(env, count, bindings)
+    _assert_completed(env, count, bindings, deleted)
 
 
 def _resume_in_child(root: str, directory: str) -> None:
@@ -130,12 +147,13 @@ def _child(env: RuntimeEnv, cwd: Path) -> dict[str, object]:
     return json.loads(completed.stdout.splitlines()[-1])
 
 
-@pytest.mark.parametrize(("count", "edited_index"), CASES, ids=CASE_IDS)
+@pytest.mark.parametrize(("count", "damaged_index"), CASES, ids=CASE_IDS)
+@pytest.mark.parametrize("deleted", [False, True], ids=["edited", "deleted-known"])
 @pytest.mark.parametrize("after_post", [False, True], ids=["before-post", "after-post-before-checkpoint"])
-def test_incident_resume_in_another_process_does_not_duplicate(
-    tmp_path: Path, count: int, edited_index: int, after_post: bool
+def test_incident_resume_preserves_sequence_and_records_once(
+    tmp_path: Path, count: int, damaged_index: int, deleted: bool, after_post: bool
 ) -> None:
-    env = _edited_env(tmp_path, count, edited_index)
+    env = _damaged_env(tmp_path, count, damaged_index, deleted)
     bindings = tuple(ref.binding.value for ref in env.ports().records.chain(RUN).violations)
     produced = record_incident(**_incident_kwargs(env, FakeIncidentPayloads()))
     assert isinstance(produced, IncidentRecorded), produced
@@ -144,12 +162,12 @@ def test_incident_resume_in_another_process_does_not_duplicate(
         # 投稿後・checkpoint消費前のcrashを再現する。実投稿経路でfake ghへ書き、
         # durable stateだけを投稿前へ戻す。childは投稿済みrecordを再利用する必要がある。
         _drive(env, _current_ports(env))
-        assert len(env.comments()) == count + 1
+        assert len(env.comments()) == count + 1 - int(deleted)
         save_checkpoint(checkpoint_path(env.paths, RUN), pending)
     result = _child(env, tmp_path / "resume")
     assert result["terminal"] is True, result
-    _assert_completed(env, count, bindings)
+    _assert_completed(env, count, bindings, deleted)
     again = _child(env, tmp_path / "resume-again")
     assert again["terminal"] is True, again
     assert again["persisted"] == []
-    _assert_completed(env, count, bindings)
+    _assert_completed(env, count, bindings, deleted)
