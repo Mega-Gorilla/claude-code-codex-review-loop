@@ -209,4 +209,4 @@ floor = 100
 "tests/test_c08_equivalence.py" = 174
 "tests/test_c08_incident.py" = 665
 "tests/test_c08_headless.py" = 505
-"tests/test_c08_incident_real_chain.py" = 155
+"tests/test_c08_incident_real_chain.py" = 173
