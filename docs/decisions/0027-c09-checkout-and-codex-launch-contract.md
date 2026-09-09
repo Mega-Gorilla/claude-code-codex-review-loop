@@ -24,17 +24,21 @@ Issue #14は「実装前に固定する契約」を`codex-cli 0.149.1`の実測�
 ### Codex起動契約（PR #57）
 
 6. sandboxは**`default_permissions`と`[permissions.<name>]`だけ**で構成し、`-s / --sandbox`と旧`sandbox_mode` / `sandbox_workspace_write`を使わない。公式契約上、旧sandbox設定が**いずれかの読込済みconfigに1つでもあれば**permission profileは無視されるため、両者の併用は境界を壊す。Issue #14 §2の表が`-s`を挙げていたのは0.149.1時点の確認済みflagの列挙であり、本ADRで方式を置き換える。
-7. `--ignore-user-config`を**使わない**。専用`CODEX_HOME`の`config.toml`が唯一のpolicy sourceであり、同flagはそれを読まなくする。代わりに`CODEX_HOME`自体をcredentialを含まないprivate directoryへ差し替え、user / project execpolicyは`--ignore-rules`で遮断する。
+7. `--ignore-user-config`を**使わない**。専用`CODEX_HOME`の`config.toml`は**本製品が供給するuser / project層のpolicy source**であり、同flagはそれを読まなくする。代わりに`CODEX_HOME`自体をcredentialを含まないprivate directoryへ差し替え、user / project execpolicyは`--ignore-rules`で遮断する。ただし隔離されるのはuser / project層だけで、**system config**（Unixは`/etc/codex/config.toml`。Windowsの所在は公式文書に無い）と**managed requirements**（`requirements.toml`。`allowed_permission_profiles`でprofileを制限し、特定のapproval policyを禁止できる）は別layerとして残る。そのlayerに旧sandbox設定が1つでもあればprofileは無視されるため、専用configだけを見てeffective policyを断定しない（決定13）。
 8. 隔離checkoutを生成configで`[projects."<canonical path>"] trust_level = "untrusted"`へ固定する。trusted projectの`.codex/config.toml`はuser configより優先され、旧sandbox設定を含めばprofileごと置き換わる。未登録projectは現版では読み込まれないが、「未登録の既定」に依存しない。`trust_level`の値域は`trusted` / `untrusted`の2値で、不正値はconfig loadを失敗させる。
 9. argvは`<codex> exec --ephemeral --ignore-rules -C <checkout> -`に固定し、promptはstdinで渡す。任意argv・`-c`上書き・`--add-dir`・`-p`の入口をAPIに持たせない。既存のargv choke point（P-006）へCodex固有の禁止語彙（approval / sandbox迂回、full access、`shell_environment_policy.inherit=all`、`sandbox_permissions`のfull read）を追加し、`-c`で到達できる既知の危険値も拒否する。
 10. reviewer envにC-04の`TOKEN_ENV_NAMES`が1つでもあれば構成を拒否し、値は診断へ出さない。生成configはSHA-256 digestで再照合し、改竄・metadata不整合は起動前に停止する。
-11. approval policyは生成configのtop-levelで`approval_policy = "never"`に固定する（**次のprocess facade PRで追加**）。`codex exec`は0.153.4で`-a / --ask-for-approval`を持たず（Issue #14 §2の表は古い）、approvalはconfigからしか与えられない。untrusted projectの既定は`UnlessTrusted`だが、top-levelの明示値は`Never`へ解決されることを`codex doctor --json`で確認した。非対話実行では承認へ答えられないため、`on-request` / `on-failure`は待機か昇格のどちらかになる。`never`はsandboxを唯一の強制点にする設定であり、**preflightで強制が成立した場合にだけ**許される。
+11. approval policyは生成configのtop-levelで`approval_policy = "never"`に固定する（**次のprocess facade PRで追加**）。`-a / --ask-for-approval`は0.153.4では**top-level option**であり、`codex -a never exec`は受理されるが`codex exec -a never`は引数errorになる（Issue #14 §2の表は`exec`のoptionとして挙げており古い）。builderのargvは`<codex> exec ...`で`exec`より前にoptionを置かない固定形なので、flagではなく管理下configで固定する。非対話実行では`never`を使うという公式案内に合わせ、他の値は採らない。untrusted projectの既定は`UnlessTrusted`だが、top-levelの明示値は`Never`へ解決されることを`codex doctor --json`で確認した。`never`はsandboxを唯一の強制点にする設定であり、**preflightで強制が成立し、effective configのapproval policyが`Never`である場合にだけ**許される。managed requirementsが`never`を禁止していればeffective configがそれを示すため、起動しない。
 
 ### canaryの2段階分割
 
 12. **第1段階（PR #57）は純粋builder**であり、設定とargvを構築するだけでsandboxの強制を保証しない。呼出側からの「実測済み」申告値を受け取る入口を持たない（未検証boolは保証の偽装口になる）。
-13. **第2段階（process facade PR）がpreflightを担う**。facade自身が`codex sandbox -P <profile> -C <checkout> -- <probe>`を専用`CODEX_HOME`で実行し、隔離checkoutへの書込成功、protected rootへの書込失敗、credential領域の読取失敗、shell networkの失敗を**実測**してからreviewerをspawnする。1つでも成立しなければspawn前にfail closedする。`codex sandbox`は認証を要求しないため、この実測はcredentialなしで行える。
-14. preflightのevidenceはfacadeが取得した実測だけを認め、呼出側の申告値・configの解釈結果（`codex doctor`）・過去の実測で代替しない。実測結果は固定stageで公開し、native出力は共通redaction registryを通す。
+13. **第2段階（process facade PR）がpreflightを担い、次の2つを両方必須にする**。片方はもう片方の代替にならない。
+    - **effective configの照合**: 実起動と同じcanonical executable・同じ`CODEX_HOME`・同じcwd（隔離checkout）で`codex doctor --json`（または同等のeffective-config出力）を取得し、config loadが成功、approval policyが`Never`、filesystem / network sandboxが`restricted`、denied-read restrictionsが有効、旧sandbox設定によるfallbackが無いことを確認する。これは「probeしたprofileが実起動でも選ばれる」ことの確認であり、system / managed layerを含めた解決結果を同じCLIから得る。
+    - **OS強制の実測**: `codex sandbox -P <profile> --include-managed-config -C <checkout> -- <probe>`を専用`CODEX_HOME`で実行し、隔離checkoutへの書込成功、protected rootへの書込失敗、credential領域の読取失敗、shell networkの失敗を実測する。`--include-managed-config`はmanaged requirementsを含めてprofileを解決するoptionで、実起動と同じstackで測るために付ける。`codex sandbox`は認証を要求しないため、この実測はcredentialなしで行える。
+
+    どちらか1つでも成立しなければspawn前にfail closedする。managed layerの所在をfile pathで探索・検出しようとはしない（Windowsでは文書化されていない）。effective configが専用configと異なるprofile・approval・sandboxを示した時点で差異ありとみなし、起動しない。
+14. preflightのevidenceはfacadeが取得した実測だけを認め、呼出側の申告値・過去の実測・configの解釈結果だけの確認で代替しない。evidenceは少なくとも**canonical executable pathと`codex --version`の出力、config digest（`CodexCanaryHome.configuration_digest`）、profile名、workspace root、protected roots、`CODEX_HOME`、reviewer envのdigest**にbindし、spawn直前に同じ条件を再検証して1つでも違えば起動しない。evidenceはreview turnごとに取り直し、前のturnの結果を再利用しない（fresh reviewer）。実測結果は固定stageで公開し、native出力は共通redaction registryを通す。
 
 ## 実測（2026-09-09、codex-cli 0.153.4、Windows 11 非昇格user）
 
@@ -43,7 +47,16 @@ Issue #14は「実装前に固定する契約」を`codex-cli 0.149.1`の実測�
 | 生成config（`:root` / `:tmpdir` / `:slash_tmp` / protected rootをdeny） | 適用不可: `Restricted read-only access requires the elevated Windows sandbox backend` |
 | deny entryを全て`read`へ緩めた変種（workspace write、`network.enabled = false`） | workspace外への書込: **拒否**。protected root・`CODEX_HOME/config.toml`の読取: **許可**。TCP 443: **許可**（`--sandbox-state-disable-network`を付けても許可） |
 
-非昇格backendが強制するのは**filesystemの書込制限だけ**である。read denyとnetwork禁止はelevated backendを要求する。生成configはこの環境で適用できないため、決定13のpreflightは**fail closedになる**。これは設計どおりの挙動であり、緩めるかどうかは次節のOpenである。
+非昇格backendが強制するのは**filesystemの書込制限だけ**である。read denyとnetwork禁止はelevated backendを要求する（`codex doctor --json`の`sandbox.helpers`も`managed denied-read requirements need the elevated Windows sandbox backend`と報告する）。生成configはこの環境で適用できないため、決定13のpreflightは**fail closedになる**。これは設計どおりの挙動であり、緩めるかどうかは次節のOpenである。
+
+approval policyの配置は次のとおり確認した。
+
+| 呼び方 | 結果 |
+| --- | --- |
+| `codex exec -a never --help` | 引数error（exit 2） |
+| `codex -a never exec --help` | 受理（exit 0） |
+| 生成configのtop-levelに`approval_policy = "never"` | `codex doctor --json`のapproval policyが`Never`（untrusted project固定のまま） |
+| 同上を`[projects.<checkout>]`の中に置く | 無視され`UnlessTrusted`のまま（table内のkeyはtop-levelではない） |
 
 elevated backendはadmin権限による設定を要するため未実測。POSIX backendも未実測（CIにCodexは無く、開発機はWindows）。
 
