@@ -4,17 +4,21 @@
 これはnative reviewer adapterではない。実Codexの起動、認証材料の複製、API呼出、
 GitHub mutationを行わず、手動canaryへ渡す設定とargvだけを安全側で組み立てる。
 専用homeのconfigはpermission profileを唯一のsandbox設定源とし、旧CLI sandbox
-flagやuser/project execpolicyへ依存しない。
+flagやuser/project execpolicyへ依存しない。隔離checkoutはconfig上でuntrustedに
+固定し、PR head由来の`.codex/`層（config・hook・rule）を読ませない。
+
+このmoduleはsandboxの強制を保証しない。permission profileをOS / CLIが強制して
+いるかの実測evidenceは、実Codexを起動するprocess facadeが起動前に取得して
+fail closedする責務であり、純粋builderである本moduleは未検証の保証値を公開しない。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Final
 
 from ..identity.fs_permissions import (
@@ -59,14 +63,6 @@ class CodexCanaryInvocation:
     cwd: Path
 
 
-@dataclass(frozen=True)
-class CanarySandboxCapability:
-    """実測したpermission profileの強制可否。未確認・片側欠落は起動不可である。"""
-
-    filesystem_enforced: bool
-    shell_network_disabled: bool
-
-
 def prepare_codex_canary_home(
     *,
     private_root: Path,
@@ -108,7 +104,6 @@ def build_codex_canary_invocation(
     home: CodexCanaryHome,
     codex_executable: Path,
     reviewer_env: Mapping[str, str],
-    sandbox_capability: CanarySandboxCapability,
 ) -> CodexCanaryInvocation:
     """専用configを読む最小の`codex exec` argvを構築する。
 
@@ -116,18 +111,16 @@ def build_codex_canary_invocation(
     repository由来のexecpolicyはignore-rulesで遮断する。任意argvや`-c`上書きの入口は
     このAPIに持たせず、promptは次段のprocess facadeがstdinで渡す。
     """
-    if not sandbox_capability.filesystem_enforced or not sandbox_capability.shell_network_disabled:
-        raise CanaryError("sandbox_unavailable")
     _verify_home(home)
     executable = _canonical_file(codex_executable, "executable")
     env = _build_environment(reviewer_env, home)
     argv = (
-        os.fspath(executable),
+        str(executable),
         "exec",
         "--ephemeral",
         "--ignore-rules",
         "-C",
-        os.fspath(home.workspace_root),
+        str(home.workspace_root),
         "-",
     )
     ensure_argv_allowed(argv)
@@ -140,8 +133,16 @@ def redact_canary_diagnostic(text: str) -> RedactionResult:
 
 
 def _validate_name(name: str) -> None:
-    if not name or name in {".", ".."} or "/" in name or "\\" in name or os.path.isabs(name):
+    """private root直下の単一componentだけを許す。
+
+    区切りだけでなく、Windowsのdrive相対名（`C:foo`）のようにjoinでroot外へ出る形も
+    両flavourで拒否する。
+    """
+    if not name or name in {".", ".."}:
         raise CanaryError("name")
+    for candidate in (PurePosixPath(name), PureWindowsPath(name)):
+        if candidate.anchor or candidate.parts != (name,):
+            raise CanaryError("name")
 
 
 def _validate_private_root(path: Path) -> None:
@@ -173,7 +174,7 @@ def _canonical_protected_roots(protected_roots: Iterable[Path], workspace: Path)
     for path in protected:
         if path.is_relative_to(workspace) or workspace.is_relative_to(path):
             raise CanaryError("protected_root")
-    return tuple(sorted(protected, key=os.fspath))
+    return tuple(sorted(protected, key=str))
 
 
 def _render_configuration(workspace: Path, protected_roots: tuple[Path, ...]) -> str:
@@ -189,7 +190,7 @@ def _render_configuration(workspace: Path, protected_roots: tuple[Path, ...]) ->
         '":tmpdir" = "deny"',
         '":slash_tmp" = "deny"',
     ]
-    lines.extend(f"{_toml_string(os.fspath(path))} = \"deny\"" for path in protected_roots)
+    lines.extend(f"{_toml_string(str(path))} = \"deny\"" for path in protected_roots)
     lines.extend(
         (
             "",
@@ -198,6 +199,12 @@ def _render_configuration(workspace: Path, protected_roots: tuple[Path, ...]) ->
             "",
             f"[permissions.{_PROFILE_NAME}.network]",
             "enabled = false",
+            "",
+            # trusted projectの`.codex/config.toml`はuser configより優先され、そこに旧sandbox
+            # 設定があればpermission profileごと置き換わる。checkoutを明示的にuntrustedへ
+            # 固定し、PR headが持ち込む`.codex/`層を読まない状態を「未登録の既定」に頼らず作る。
+            f"[projects.{_toml_string(str(workspace))}]",
+            'trust_level = "untrusted"',
             "",
         )
     )
@@ -232,5 +239,5 @@ def _build_environment(reviewer_env: Mapping[str, str], home: CodexCanaryHome) -
     forbidden = {name.upper() for name in env} & set(TOKEN_ENV_NAMES)
     if forbidden:
         raise CanaryError("environment")
-    env["CODEX_HOME"] = os.fspath(home.root)
+    env["CODEX_HOME"] = str(home.root)
     return env

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import tomllib
@@ -15,13 +16,10 @@ from claude_code_codex_review_loop.identity import create_private_dir
 from claude_code_codex_review_loop.runtime import codex_canary as module
 from claude_code_codex_review_loop.runtime.codex_canary import (
     CanaryError,
-    CanarySandboxCapability,
     build_codex_canary_invocation,
     prepare_codex_canary_home,
     redact_canary_diagnostic,
 )
-
-_SANDBOX_READY = CanarySandboxCapability(filesystem_enforced=True, shell_network_disabled=True)
 
 
 def _paths(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -69,7 +67,16 @@ class TestPrepareCodexCanaryHome:
         assert "sandbox_mode" not in raw
         assert "sandbox_workspace_write" not in raw
 
-    @pytest.mark.parametrize("name", ("", ".", "..", "nested/home", "nested\\home"))
+    def test_isolated_checkout_is_pinned_untrusted_so_its_codex_layer_is_not_loaded(self, tmp_path: Path) -> None:
+        """trusted projectの`.codex/config.toml`はuser configより優先され、旧sandbox設定が
+        あればprofileごと置き換わる（実CLI 0.153.4で実測）。checkoutだけをuntrustedに固定する。
+        """
+        home = _home(tmp_path)
+        with home.config_path.open("rb") as handle:
+            config = tomllib.load(handle)
+        assert config["projects"] == {os.fspath(home.workspace_root): {"trust_level": "untrusted"}}
+
+    @pytest.mark.parametrize("name", ("", ".", "..", "nested/home", "nested\\home", "C:home", "C:", "/abs", "\\abs"))
     def test_invalid_home_name_is_rejected(self, tmp_path: Path, name: str) -> None:
         private, workspace, real_repository, state_root = _paths(tmp_path)
         with pytest.raises(CanaryError) as stopped:
@@ -77,11 +84,24 @@ class TestPrepareCodexCanaryHome:
                 private_root=private, name=name, workspace_root=workspace, protected_roots=(real_repository, state_root)
             )
         assert stopped.value.stage == "name"
+        assert not any(private.iterdir())
 
-    @pytest.mark.parametrize("private_mode", ("relative", "public"))
-    def test_non_private_root_is_rejected(self, tmp_path: Path, private_mode: str) -> None:
+    @pytest.mark.parametrize("private_mode", ("relative", "not_private"))
+    def test_non_private_root_is_rejected(
+        self, tmp_path: Path, private_mode: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         private, workspace, real_repository, state_root = _paths(tmp_path)
-        candidate = Path("relative") if private_mode == "relative" else tmp_path
+        if private_mode == "relative":
+            candidate = Path("relative")
+        else:
+            # OSごとのtemp dir権限（pytestのPOSIX temp dirは0700）に依存せず、backendの
+            # 検証失敗が同じstageへ分類されることを固定する。
+            candidate = private
+            monkeypatch.setattr(
+                module,
+                "verify_private_dir",
+                lambda *args: (_ for _ in ()).throw(module.FsPermissionError("verify", "test")),
+            )
         with pytest.raises(CanaryError) as stopped:
             prepare_codex_canary_home(
                 private_root=candidate, name="codex-home", workspace_root=workspace,
@@ -126,7 +146,6 @@ class TestCodexCanaryInvocation:
             home=home,
             codex_executable=Path(sys.executable).resolve(),
             reviewer_env={"PATH": "safe"},
-            sandbox_capability=_SANDBOX_READY,
         )
         assert invocation.cwd == home.workspace_root
         assert invocation.env == {"PATH": "safe", "CODEX_HOME": os.fspath(home.root)}
@@ -146,7 +165,6 @@ class TestCodexCanaryInvocation:
                 home=home,
                 codex_executable=Path(sys.executable).resolve(),
                 reviewer_env={},
-                sandbox_capability=_SANDBOX_READY,
             )
         assert stopped.value.stage == "integrity"
 
@@ -162,7 +180,6 @@ class TestCodexCanaryInvocation:
                 home=tampered,
                 codex_executable=Path(sys.executable).resolve(),
                 reviewer_env={},
-                sandbox_capability=_SANDBOX_READY,
             )
         assert stopped.value.stage == "integrity"
 
@@ -174,7 +191,6 @@ class TestCodexCanaryInvocation:
                 home=home,
                 codex_executable=Path(sys.executable).resolve(),
                 reviewer_env={"OPENAI_API_KEY": token},
-                sandbox_capability=_SANDBOX_READY,
             )
         assert stopped.value.stage == "environment"
         assert token not in str(stopped.value)
@@ -188,28 +204,14 @@ class TestCodexCanaryInvocation:
                 home=home,
                 codex_executable=candidate,
                 reviewer_env={},
-                sandbox_capability=_SANDBOX_READY,
             )
         assert stopped.value.stage == "executable"
 
-    @pytest.mark.parametrize(
-        "capability",
-        (
-            CanarySandboxCapability(filesystem_enforced=False, shell_network_disabled=True),
-            CanarySandboxCapability(filesystem_enforced=True, shell_network_disabled=False),
-        ),
-    )
-    def test_unverified_sandbox_capability_fails_closed(
-        self, tmp_path: Path, capability: CanarySandboxCapability
-    ) -> None:
-        with pytest.raises(CanaryError) as stopped:
-            build_codex_canary_invocation(
-                home=_home(tmp_path),
-                codex_executable=Path(sys.executable).resolve(),
-                reviewer_env={},
-                sandbox_capability=capability,
-            )
-        assert stopped.value.stage == "sandbox_unavailable"
+    def test_builder_takes_no_sandbox_enforcement_claim(self) -> None:
+        """強制可否の実測evidenceはprocess facadeの責務であり、builderは呼出側の申告を受け取らない。"""
+        parameters = inspect.signature(build_codex_canary_invocation).parameters
+        assert set(parameters) == {"home", "codex_executable", "reviewer_env"}
+        assert not [name for name in dir(module) if "capability" in name.lower()]
 
 
 def test_diagnostic_uses_the_shared_redaction_registry() -> None:
