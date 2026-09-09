@@ -35,6 +35,16 @@ def _grant_everyone(path: Path, permission: str) -> None:
     assert completed.returncode == 0, completed.stderr
 
 
+def _remove_everyone_ace(path: Path, permission: str) -> None:
+    """test側で付けた第三者ACEを外し、temp dirを削除できる状態へ戻す（Issue #58）。"""
+    completed = subprocess.run(
+        ["icacls", str(path), permission, _EVERYONE_SID],
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 class TestOwnerOnlyDacl:
     def test_dir_has_single_inheritable_ace_for_current_user(self, tmp_path: Path) -> None:
         target = tmp_path / "artifacts"
@@ -82,8 +92,13 @@ class TestVerifyRejectsForeignAce:
         target = tmp_path / "artifacts"
         acl_windows.create_private_dir(target)
         _grant_everyone(target, "/deny")
-        with pytest.raises(FsPermissionError):
-            acl_windows.verify_private_dir(target)
+        try:
+            with pytest.raises(FsPermissionError):
+                acl_windows.verify_private_dir(target)
+        finally:
+            # deny ACEはownerの列挙も拒む。外さないとpytestのtemp cleanupがdirを残し、
+            # CIの失敗時artifact収集もEPERMで止まる（Issue #58）
+            _remove_everyone_ace(target, "/remove:d")
 
     def test_missing_path_is_reported(self, tmp_path: Path) -> None:
         with pytest.raises(FsPermissionError) as excinfo:
