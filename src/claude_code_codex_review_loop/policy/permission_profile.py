@@ -75,6 +75,27 @@ def select_profile(auto_mode_available: bool, purpose: ProfilePurpose) -> Permis
 _FORBIDDEN_FLAG_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
     ("permission-bypass", re.compile(r"bypass[\s_-]*permissions", re.IGNORECASE)),
     ("permission-dangerous-skip", re.compile(r"dangerously[\s_-]*skip[\s_-]*permissions", re.IGNORECASE)),
+    # Codex側の全権限・sandbox迂回、および`-c`で指定できる既知の危険な設定値も同じ
+    # choke pointで拒否する。語は区切り可変にし、static contract testの対象語を連結で
+    # 再導入しない（C-09）。
+    (
+        "codex-approval-sandbox-bypass",
+        re.compile(
+            r"dangerously[\s_-]*bypass[\s_-]*(?:approvals[\s_-]*and[\s_-]*sandbox|hook[\s_-]*trust)", re.IGNORECASE
+        ),
+    ),
+    ("codex-danger-full-access", re.compile(r"danger[\s_-]*full[\s_-]*access", re.IGNORECASE)),
+    (
+        "codex-shell-environment-inherit-all",
+        re.compile(r"shell[\s_.=.-]*environment[\s_.=.-]*policy[\s_.=.-]*inherit[\s_.=.-]*all", re.IGNORECASE),
+    ),
+    (
+        "codex-sandbox-full-read",
+        re.compile(
+            r"sandbox[\s_.=\[\]\"'-]*permissions[\s_.=\[\]\"'-]*disk[\s_.=\[\]\"'-]*full[\s_-]*read[\s_-]*access",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 
