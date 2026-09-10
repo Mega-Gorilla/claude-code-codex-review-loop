@@ -38,6 +38,8 @@ Issue #14は「実装前に固定する契約」を`codex-cli 0.149.1`の実測�
     - **OS強制の実測**: `codex sandbox -P <profile> --include-managed-config -C <checkout> -- <probe>`を専用`CODEX_HOME`で実行し、隔離checkoutへの書込成功、protected rootへの書込失敗、credential領域の読取失敗、shell networkの失敗を実測する。`--include-managed-config`はmanaged requirementsを含めてprofileを解決するoptionで、実起動と同じstackで測るために付ける。`codex sandbox`は認証を要求しないため、この実測はcredentialなしで行える。
 
     どちらか1つでも成立しなければspawn前にfail closedする。managed layerの所在をfile pathで探索・検出しようとはしない（Windowsでは文書化されていない）。effective configが専用configと異なるprofile・approval・sandboxを示した時点で差異ありとみなし、起動しない。
+
+    **観測できる範囲の限界**（2026-09-10実測）: 0.153.4の`codex doctor --json`は、configに旧`sandbox_mode`を足しても`sandbox.helpers`の出力を変えない。したがって(a)で確認できるのは上記の観測可能なfieldまでで、system / managed layerに旧sandbox設定がある場合のfallbackは(a)では検出できない。専用config自体に旧keyが無いことはdigestで保証し、残る残余は起動PRで`codex/sandbox-state-meta`相当のeffective sandbox stateを取得するか、起動直後の自己検査で閉じる。また(b)のprobeは隔離checkout内でinterpreterを起動する必要があり、profileの`:minimal`（"General platform and runtime paths needed by common tools"）がそのinterpreterを含まなければprobe自体が起動できない。その場合も`probe_unavailable`としてfail closedし、profileへ読取許可を足すかどうかはelevated backendの実測後に決める。
 14. preflightのevidenceはfacadeが取得した実測だけを認め、呼出側の申告値・過去の実測・configの解釈結果だけの確認で代替しない。evidenceは少なくとも**canonical executable pathと`codex --version`の出力、config digest（`CodexCanaryHome.configuration_digest`）、profile名、workspace root、protected roots、`CODEX_HOME`、reviewer envのdigest**にbindし、spawn直前に同じ条件を再検証して1つでも違えば起動しない。evidenceはreview turnごとに取り直し、前のturnの結果を再利用しない（fresh reviewer）。実測結果は固定stageで公開し、native出力は共通redaction registryを通す。
 
 ## 実測（2026-09-09、codex-cli 0.153.4、Windows 11 非昇格user）
@@ -57,6 +59,7 @@ approval policyの配置は次のとおり確認した。
 | `codex -a never exec --help` | 受理（exit 0） |
 | 生成configのtop-levelに`approval_policy = "never"` | `codex doctor --json`のapproval policyが`Never`（untrusted project固定のまま） |
 | 同上を`[projects.<checkout>]`の中に置く | 無視され`UnlessTrusted`のまま（table内のkeyはtop-levelではない） |
+| 生成configのtop-levelへ旧`sandbox_mode = "workspace-write"`を追加 | `codex doctor --json`の`sandbox.helpers`は変化なし（旧設定によるfallbackはdoctorから観測できない） |
 
 elevated backendはadmin権限による設定を要するため未実測。POSIX backendも未実測（CIにCodexは無く、開発機はWindows）。
 
@@ -71,6 +74,8 @@ elevated backendはadmin権限による設定を要するため未実測。POSIX
 | C | Windows nativeのreviewerを対象外にし、POSIX backend（WSL等）へ限定する | D-029の検証対象と衝突する可能性がある |
 
 既定はfail closed（A）を推奨するが、決定はユーザーの明示合意recordを待つ。それまで第2段階のpreflightはAとして実装し、非昇格環境では起動しない。
+
+2026-09-10、会話でユーザーがAに合意したため、target-experienceのdecision logへ**D-033（Proposed）**として記録した。会話での合意は合意根拠ではなく、Issue #14へのcommentでGitHub上の明示合意recordを得た後にDecidedへ変更する。
 
 ## 検証と完了境界
 
