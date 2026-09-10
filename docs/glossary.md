@@ -133,6 +133,9 @@
 | reviewer home | reviewerへ差し替えるHOME相当の一時領域。`GH_CONFIG_DIR` / `XDG_*` / git global configの探索先をここへ閉じ込める（ADR-0009） |
 | private directory | 作成者のみがアクセスできるdirectory。POSIXは`0o700`、Windowsは現userの単一ACE。排他作成し、実効権限を読み戻して検証する |
 | resume ticket | 停止したtool操作**だけ**の再実行許可。Permission ID・head・tool・scopeの完全一致で発行され、workflow承認のevidenceにはならない |
+| Codex permission profile | Codexの`default_permissions`と`[permissions.<name>]`で定義するfilesystem / network境界。Claude Code向けの「permission profile」（preset選択）とは別概念で、旧`sandbox_mode`と併用しない（ADR-0027） |
+| canary harness | 認証・実APIを使わずにreviewer sandboxの安全境界を実測するための最小基盤。第1段階は専用`CODEX_HOME`と固定argvの純粋builder、第2段階はsandbox preflightと起動を担うprocess facade（ADR-0027） |
+| sandbox preflight | reviewerをspawnする直前に、生成したCodex permission profileが実起動と同じconfig stack（system / managed layerを含む）で選ばれること（effective configの照合）と、それを実CLI / OSが強制していること（`codex sandbox`による実測）の両方をfacade自身が確かめる手順。片方は他方の代替にならず、1つでも成立しなければspawn前にfail closedする。evidenceはexecutable・config digest・profile・roots・envにbindし、呼出側の申告値で代替しない（ADR-0027） |
 
 ## review
 
