@@ -165,6 +165,31 @@ class TestSpecValidation:
         with pytest.raises(SpawnError):
             SpawnSpec(argv=(sys.executable,), cwd=tmp_path, env={}, stdout_path=first, stderr_path=alias)
 
+    @pytest.mark.parametrize("failing", ("resolve", "samefile"))
+    def test_undecidable_identity_is_rejected_not_allowed(
+        self, tmp_path: Path, failing: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """権限やsymlink loopで同一性を判定できない場合は、別実体とみなさず起動前に拒否する。"""
+        prompt = tmp_path / "prompt.txt"
+        prompt.write_text("keep me", encoding="utf-8")
+        out = tmp_path / "out.txt"
+        out.write_text("", encoding="utf-8")
+        if failing == "resolve":
+            original_resolve = Path.resolve
+
+            def looping(self: Path, *args: object, **kwargs: object) -> Path:
+                if self == out:
+                    raise RuntimeError("Symlink loop")
+                return original_resolve(self, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "resolve", looping)
+        else:
+            monkeypatch.setattr(os.path, "samefile", lambda *args: (_ for _ in ()).throw(PermissionError("test")))
+        with pytest.raises(SpawnError) as excinfo:
+            SpawnSpec(argv=(sys.executable,), cwd=tmp_path, env={}, stdin_path=prompt, stdout_path=out)
+        assert excinfo.value.stage == "validate"
+        assert prompt.read_text(encoding="utf-8") == "keep me"
+
     def test_symlink_alias_of_stdin_is_rejected(self, tmp_path: Path) -> None:
         prompt = tmp_path / "prompt.txt"
         prompt.write_text("keep me", encoding="utf-8")

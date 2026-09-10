@@ -266,6 +266,24 @@ class TestLaunchCodexReviewer:
         assert stopped.value.stage == "output"
         assert fx.fake.specs == [] and not (fx.tmp_path / "outside").exists()
 
+    def test_undecidable_output_entry_before_spawn_fails_closed(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """spawn前のentry判定が権限等で不能なら、許可せず`output`で止める。生の例外を出さない。"""
+        target = fx.evidence_root / "last_message.txt"
+        original = Path.lstat
+
+        def undecidable(self: Path, *args: object, **kwargs: object) -> object:
+            if self == target:
+                raise PermissionError("test")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", undecidable)
+        with pytest.raises(LaunchError) as stopped:
+            fx.launch()
+        assert stopped.value.stage == "output"
+        assert fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
+
     def test_unreadable_last_message_is_classified(self, fx: Fixture) -> None:
         """終了後に通常file以外（directory）が現れていれば、今回の生成物とみなさない。"""
         fx.fake.scenario["last_message_dir"] = True

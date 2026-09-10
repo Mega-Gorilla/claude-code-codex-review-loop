@@ -51,4 +51,4 @@ implementation planはC-03の要件を「POSIXはprocess group、WindowsはJob O
 
 ## 追補（2026-09-10、Phase 9）
 
-`SpawnSpec`へoptionalな`stdin_path`を追加した。Noneの場合は従来どおりDEVNULLで、指定時は既存fileを読取専用で開いて子のstdinにする。C-09がreviewerのpromptを**argvに載せず**（process listへ露出せず、長さ制限にも掛からず）渡すための入力経路であり、fileは親が開いてfdとして渡すため、sandbox内の子がそのpathを読める必要はない。redirect先と同一のfile実体（字句上の一致に加え、symlink・hard linkによる別名）は拒否する。redirect先は`wb`で開く（truncate）ため、別名を通すと起動前にstdin fileの内容を失う。停止・timeout・tree全滅の契約は変わらない。
+`SpawnSpec`へoptionalな`stdin_path`を追加した。Noneの場合は従来どおりDEVNULLで、指定時は既存fileを読取専用で開いて子のstdinにする。C-09がreviewerのpromptを**argvに載せず**（process listへ露出せず、長さ制限にも掛からず）渡すための入力経路であり、fileは親が開いてfdとして渡すため、sandbox内の子がそのpathを読める必要はない。redirect先と同一のfile実体（字句上の一致に加え、symlink・hard linkによる別名）は拒否する。redirect先は`wb`で開く（truncate）ため、別名を通すと起動前にstdin fileの内容を失う。未作成の場合だけ「共有していない」とし、権限やsymlink loopで同一性を判定できない場合は許可せず`SpawnError("validate")`で停止する（fail closed）。停止・timeout・tree全滅の契約は変わらない。

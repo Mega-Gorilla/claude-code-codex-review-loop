@@ -162,11 +162,17 @@ def _read_diagnostic(stderr_path: Path) -> RedactionResult:
 
 
 def _entry_exists(path: Path) -> bool:
-    """symlink自体を含むdir entryの存在（`lexists`相当。本moduleは`os`を持たない）。"""
+    """symlink自体を含むdir entryの存在（`lexists`相当。本moduleは`os`を持たない）。
+
+    未作成（FileNotFoundError）だけを「無い」とし、権限等で判定できない場合は生の例外を
+    出さず`output`で停止する（fail closed）。
+    """
     try:
         path.lstat()
     except FileNotFoundError:
         return False
+    except OSError as error:
+        raise LaunchError("output") from error
     return True
 
 

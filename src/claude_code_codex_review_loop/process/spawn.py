@@ -190,13 +190,18 @@ def _same_entity(first: Path | None, second: Path | None) -> bool:
     """
     if first is None or second is None:
         return False
-    if first == second or first.resolve() == second.resolve():
+    if first == second:
         return True
     try:
+        if first.resolve() == second.resolve():
+            return True
         return os.path.samefile(first, second)
-    except OSError:
-        # どちらかが未作成なら実体は共有していない
+    except FileNotFoundError:
+        # どちらかが未作成なら実体は共有していない（redirect先は起動時に作る）
         return False
+    except (OSError, RuntimeError) as exc:
+        # 権限やsymlink loop等で同一性を判定できない場合は許可せず停止する（fail closed）
+        raise SpawnError("validate", f"redirect先とstdinの同一性を判定できない: {type(exc).__name__}") from exc
 
 
 def _open_output(path: Path | None) -> IO[bytes] | None:
