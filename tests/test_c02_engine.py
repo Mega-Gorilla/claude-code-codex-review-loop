@@ -21,11 +21,13 @@ from claude_code_codex_review_loop.schema.registry import (
     validate_object,
 )
 from claude_code_codex_review_loop.schema.validate import (
+    MAX_JSON_DEPTH,
     Field,
     PublicError,
     VersionSpec,
     canonicalize,
     map_key_token,
+    parse_json,
     sanitize_path,
     strip_bom,
     unknown_field_token,
@@ -57,6 +59,24 @@ class TestStages:
     def test_json_stage_rejects_nonstandard_tokens(self) -> None:
         result = validate(_definition({}), b'{"schema_version": NaN}')
         assert (result.ok, result.stage) == (False, "json")
+
+    def test_json_stage_rejects_nesting_beyond_the_explicit_limit(self) -> None:
+        """深いnestはinterpreterのRecursionErrorに頼らず、parse前の明示上限で拒否する（Issue #65）。"""
+        deep = "[" * MAX_JSON_DEPTH + "]" * MAX_JSON_DEPTH
+        result = validate(_definition({}), ('{"schema_version": 1, "x": ' + deep + "}").encode("utf-8"))
+        assert (result.ok, result.stage) == (False, "json")
+        assert result.errors == (PublicError("invalid_json", "$"),)
+
+    def test_nesting_limit_is_exact_and_ignores_brackets_inside_strings(self) -> None:
+        at_limit = "[" * MAX_JSON_DEPTH + "]" * MAX_JSON_DEPTH
+        assert isinstance(parse_json(at_limit), list)
+        with pytest.raises(ValueError):
+            parse_json("[" + at_limit + "]")
+        with pytest.raises(ValueError):
+            parse_json("[" * 3000 + "]" * 3000)
+        assert parse_json('{"a": "' + "[" * 200 + '"}') == {"a": "[" * 200}
+        assert parse_json('{"a": "x\\"' + "{" * 200 + '"}') == {"a": 'x"' + "{" * 200}
+        assert parse_json("[[], {}]") == [[], {}]
 
     def test_root_must_be_object(self) -> None:
         result = validate(_definition({}), b"[1, 2]")
