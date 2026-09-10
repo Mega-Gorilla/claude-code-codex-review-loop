@@ -23,7 +23,17 @@ import subprocess
 import time
 from typing import IO
 
-from .spawn import ProcessGroupRef, SpawnError, SpawnSpec, StopError, StopMethod, StopResult, TreeRef, _open_output
+from .spawn import (
+    ProcessGroupRef,
+    SpawnError,
+    SpawnSpec,
+    StopError,
+    StopMethod,
+    StopResult,
+    TreeRef,
+    _open_input,
+    _open_output,
+)
 
 _POLL_INTERVAL_SECONDS = 0.05
 # 強制停止の完了確認に使う内部上限。呼び出し側のtimeout / grace（C-12で既定値を解決する）とは別物
@@ -129,11 +139,14 @@ def spawn_tree(spec: SpawnSpec) -> PosixTreeHandle:
         stderr = _open_output(spec.stderr_path)
         if stderr is not None:
             files.append(stderr)
+        stdin = _open_input(spec.stdin_path)
+        if stdin is not None:
+            files.append(stdin)
         popen = subprocess.Popen(
             list(spec.argv),
             cwd=str(spec.cwd),
             env=dict(spec.env),
-            stdin=subprocess.DEVNULL,
+            stdin=stdin if stdin is not None else subprocess.DEVNULL,
             stdout=stdout if stdout is not None else subprocess.DEVNULL,
             stderr=stderr if stderr is not None else subprocess.DEVNULL,
             start_new_session=True,

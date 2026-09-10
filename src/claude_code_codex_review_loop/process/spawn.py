@@ -128,6 +128,8 @@ class SpawnSpec:
     - cwd: 子の作業directory
     - env: 子へ渡す環境変数の全体（継承しない）
     - stdout_path / stderr_path: Noneの場合はDEVNULL。fileは0o600相当で作成する
+    - stdin_path: Noneの場合はDEVNULL。指定時は既存fileを読取専用で開いて子のstdinにする
+      （C-09がpromptをargvに載せずに渡すための入力経路。ADR-0005 追補）
     """
 
     argv: tuple[str, ...]
@@ -135,6 +137,7 @@ class SpawnSpec:
     env: Mapping[str, str]
     stdout_path: Path | None = None
     stderr_path: Path | None = None
+    stdin_path: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.argv:
@@ -144,6 +147,8 @@ class SpawnSpec:
                 raise SpawnError("validate", f"argv[{index}]が空、または文字列でない")
         if self.stdout_path is not None and self.stdout_path == self.stderr_path:
             raise SpawnError("validate", "stdout_pathとstderr_pathへ同一pathは指定できない")
+        if self.stdin_path is not None and self.stdin_path in (self.stdout_path, self.stderr_path):
+            raise SpawnError("validate", "stdin_pathへredirect先と同一pathは指定できない")
 
 
 class TreeHandle(Protocol):
@@ -185,6 +190,13 @@ def _open_output(path: Path | None) -> IO[bytes] | None:
         return os.open(target, flags, 0o600)
 
     return open(path, "wb", opener=_opener)
+
+
+def _open_input(path: Path | None) -> IO[bytes] | None:
+    """stdinへ流す既存fileを読取専用で開く。Noneの場合はDEVNULLを意味する。"""
+    if path is None:
+        return None
+    return open(path, "rb")
 
 
 if sys.platform == "win32":  # pragma: no cover - OS dispatch(単一分岐点。各backendは自OSのCIで検証する)

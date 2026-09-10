@@ -26,6 +26,7 @@ def _python_spec(
     stdout: Path | None = None,
     stderr: Path | None = None,
     cwd: Path | None = None,
+    stdin: Path | None = None,
 ) -> SpawnSpec:
     return SpawnSpec(
         argv=(sys.executable, "-c", code),
@@ -33,6 +34,7 @@ def _python_spec(
         env={**child_env(), **(extra_env or {})},
         stdout_path=stdout,
         stderr_path=stderr,
+        stdin_path=stdin,
     )
 
 
@@ -94,6 +96,27 @@ def test_stdin_is_devnull(tmp_path: Path) -> None:
     assert result == Completed(exit_code=0)
 
 
+def test_stdin_path_feeds_the_child(tmp_path: Path) -> None:
+    """stdin_pathの内容が子のstdinへ流れ、argvには現れない（ADR-0005 追補）。"""
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("hello from stdin", encoding="utf-8")
+    out = tmp_path / "echo.txt"
+    spec = _python_spec(tmp_path, "import sys; sys.stdout.write(sys.stdin.read())", stdin=prompt, stdout=out)
+    result = run_tree(spec, timeout_seconds=WAIT_LIMIT_SECONDS, grace_seconds=1.0)
+    assert result == Completed(exit_code=0)
+    assert out.read_text(encoding="utf-8") == "hello from stdin"
+    prompt.unlink()  # handleが残っているとWindowsでPermissionErrorになる
+
+
+def test_missing_stdin_file_fails_spawn_without_residue(tmp_path: Path) -> None:
+    out = tmp_path / "never-written.txt"
+    spec = _python_spec(tmp_path, "pass", stdin=tmp_path / "missing-prompt.txt", stdout=out)
+    with pytest.raises(SpawnError) as excinfo:
+        run_tree(spec, timeout_seconds=WAIT_LIMIT_SECONDS, grace_seconds=1.0)
+    assert excinfo.value.stage == "popen"
+    out.unlink()
+
+
 def test_exit_code_is_reported(tmp_path: Path) -> None:
     spec = _python_spec(tmp_path, "import sys; sys.exit(7)")
     result = run_tree(spec, timeout_seconds=WAIT_LIMIT_SECONDS, grace_seconds=1.0)
@@ -113,6 +136,12 @@ class TestSpecValidation:
     def test_non_string_argument_is_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(SpawnError):
             SpawnSpec(argv=(sys.executable, 5), cwd=tmp_path, env={})  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("redirect", ("stdout_path", "stderr_path"))
+    def test_stdin_path_equal_to_a_redirect_is_rejected(self, tmp_path: Path, redirect: str) -> None:
+        target = tmp_path / "same.txt"
+        with pytest.raises(SpawnError):
+            SpawnSpec(argv=(sys.executable,), cwd=tmp_path, env={}, stdin_path=target, **{redirect: target})
 
     def test_same_redirect_path_is_rejected(self, tmp_path: Path) -> None:
         target = tmp_path / "both.txt"

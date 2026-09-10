@@ -48,3 +48,7 @@ implementation planはC-03の要件を「POSIXはprocess group、WindowsはJob O
 ## 実装への反映
 
 `src/claude_code_codex_review_loop/process/`（spawn / terminate / job_object / process_group）と`tests/test_c03_*.py`、CI workflowのcoverage floor step、CONTRIBUTING「品質ゲートの運用」が本ADRを実装する。
+
+## 追補（2026-09-10、Phase 9）
+
+`SpawnSpec`へoptionalな`stdin_path`を追加した。Noneの場合は従来どおりDEVNULLで、指定時は既存fileを読取専用で開いて子のstdinにする。C-09がreviewerのpromptを**argvに載せず**（process listへ露出せず、長さ制限にも掛からず）渡すための入力経路であり、fileは親が開いてfdとして渡すため、sandbox内の子がそのpathを読める必要はない。redirect先と同一pathは拒否する。停止・timeout・tree全滅の契約は変わらない。
