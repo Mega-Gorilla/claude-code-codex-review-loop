@@ -171,14 +171,21 @@ class TestCodexCanaryInvocation:
         )
         assert invocation.argv[-3:] == ("-o", os.fspath(evidence / "last_message.txt"), "-")
 
-    @pytest.mark.parametrize("kind", ("relative", "missing_parent", "inside_workspace", "inside_home"))
+    @pytest.mark.parametrize("kind", ("relative", "missing_parent", "inside_workspace", "inside_home", "symlink"))
     def test_invalid_last_message_path_is_rejected(self, tmp_path: Path, kind: str) -> None:
         home = _home(tmp_path)
+        symlink = (tmp_path / "link.txt").resolve()
+        if kind == "symlink":
+            try:
+                symlink.symlink_to(tmp_path / "missing-target.txt")
+            except OSError:
+                pytest.skip("symlinkを作成できない環境")
         candidates = {
             "relative": Path("relative.txt"),
             "missing_parent": (tmp_path / "missing" / "last.txt").resolve(),
             "inside_workspace": home.workspace_root / "last.txt",
             "inside_home": home.root / "last.txt",
+            "symlink": symlink,
         }
         with pytest.raises(CanaryError) as stopped:
             build_codex_canary_invocation(

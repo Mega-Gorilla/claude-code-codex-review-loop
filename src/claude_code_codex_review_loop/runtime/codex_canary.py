@@ -171,10 +171,14 @@ def _canonical_directory(path: Path, stage: str) -> Path:
 
 
 def _canonical_output(path: Path, home: CodexCanaryHome) -> Path:
-    """最終messageの出力先: 絶対pathで、親が実在し、workspaceにも`CODEX_HOME`にも含まれない。"""
+    """最終messageの出力先の検証。
+
+    絶対pathで、親が実在し、path自体がsymlinkでなく（辿られるとroot外へ書き得る）、
+    workspaceにも`CODEX_HOME`にも含まれないこと。
+    """
     candidate = Path(path)
     parent = candidate.parent
-    if not candidate.is_absolute() or parent != parent.resolve() or not parent.is_dir():
+    if not candidate.is_absolute() or parent != parent.resolve() or not parent.is_dir() or candidate.is_symlink():
         raise CanaryError("output")
     for other in (home.workspace_root, home.root):
         if candidate.is_relative_to(other):

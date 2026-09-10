@@ -254,8 +254,39 @@ class TestLaunchCodexReviewer:
         assert stopped.value.stage == "output"
         assert fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
 
+    def test_dangling_symlink_at_last_message_path_is_rejected_before_spawn(self, fx: Fixture) -> None:
+        """`exists()`がFalseを返すdangling symlinkも「既存のentry」として拒否する（root外への書込を防ぐ）。"""
+        link = fx.evidence_root / "last_message.txt"
+        try:
+            link.symlink_to(fx.tmp_path / "outside" / "stale.txt")
+        except OSError:
+            pytest.skip("symlinkを作成できない環境")
+        with pytest.raises(LaunchError) as stopped:
+            fx.launch()
+        assert stopped.value.stage == "output"
+        assert fx.fake.specs == [] and not (fx.tmp_path / "outside").exists()
+
     def test_unreadable_last_message_is_classified(self, fx: Fixture) -> None:
+        """終了後に通常file以外（directory）が現れていれば、今回の生成物とみなさない。"""
         fx.fake.scenario["last_message_dir"] = True
+        with pytest.raises(LaunchError) as stopped:
+            fx.launch()
+        assert stopped.value.stage == "output"
+
+    @pytest.mark.parametrize("failing", ("lstat", "open"))
+    def test_last_message_io_failures_are_classified(
+        self, fx: Fixture, failing: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """終了後のstat / readのOS errorは`output`へ写し、生の例外を外へ出さない。"""
+        target = fx.evidence_root / "last_message.txt"
+        original = getattr(Path, failing)
+
+        def failing_call(self: Path, *args: object, **kwargs: object) -> object:
+            if self == target and target.exists():
+                raise PermissionError("test")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, failing, failing_call)
         with pytest.raises(LaunchError) as stopped:
             fx.launch()
         assert stopped.value.stage == "output"

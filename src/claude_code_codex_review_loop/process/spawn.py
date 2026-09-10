@@ -146,10 +146,10 @@ class SpawnSpec:
         for index, argument in enumerate(self.argv):
             if not isinstance(argument, str) or not argument:
                 raise SpawnError("validate", f"argv[{index}]が空、または文字列でない")
-        if self.stdout_path is not None and self.stdout_path == self.stderr_path:
-            raise SpawnError("validate", "stdout_pathとstderr_pathへ同一pathは指定できない")
-        if self.stdin_path is not None and self.stdin_path in (self.stdout_path, self.stderr_path):
-            raise SpawnError("validate", "stdin_pathへredirect先と同一pathは指定できない")
+        if _same_entity(self.stdout_path, self.stderr_path):
+            raise SpawnError("validate", "stdout_pathとstderr_pathへ同一のfileは指定できない")
+        if _same_entity(self.stdin_path, self.stdout_path) or _same_entity(self.stdin_path, self.stderr_path):
+            raise SpawnError("validate", "stdin_pathへredirect先と同一のfileは指定できない")
 
 
 class TreeHandle(Protocol):
@@ -180,6 +180,23 @@ class TreeHandle(Protocol):
 
     def close(self) -> None:
         """安全網の強制停止とOS resource（handle / file）の解放。冪等。"""
+
+
+def _same_entity(first: Path | None, second: Path | None) -> bool:
+    """字句上の一致だけでなく、symlink・hard linkによる同一file実体の別名も同一とみなす。
+
+    redirect先は`wb`で開く（truncate）ため、stdin fileの別名を渡すと起動前に内容を失う。
+    symlinkはresolveで、hard linkはsamefile（両方が存在する場合）で検出する。
+    """
+    if first is None or second is None:
+        return False
+    if first == second or first.resolve() == second.resolve():
+        return True
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        # どちらかが未作成なら実体は共有していない
+        return False
 
 
 def _open_output(path: Path | None) -> IO[bytes] | None:

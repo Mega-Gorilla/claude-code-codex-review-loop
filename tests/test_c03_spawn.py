@@ -9,6 +9,7 @@ explicit env（継承なし）/ cwd / stdout・stderrのfile redirect / stdin（
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -143,6 +144,40 @@ class TestSpecValidation:
         target = tmp_path / "same.txt"
         with pytest.raises(SpawnError):
             SpawnSpec(argv=(sys.executable,), cwd=tmp_path, env={}, stdin_path=target, **{redirect: target})
+
+    @pytest.mark.parametrize("redirect", ("stdout_path", "stderr_path"))
+    def test_hard_link_alias_of_stdin_is_rejected_before_truncation(self, tmp_path: Path, redirect: str) -> None:
+        """別名でも同一file実体なら拒否する。redirect先は`wb`で開くため、通すとpromptが先に消える。"""
+        prompt = tmp_path / "prompt.txt"
+        prompt.write_text("keep me", encoding="utf-8")
+        alias = tmp_path / "alias.txt"
+        os.link(prompt, alias)
+        with pytest.raises(SpawnError) as excinfo:
+            SpawnSpec(argv=(sys.executable,), cwd=tmp_path, env={}, stdin_path=prompt, **{redirect: alias})
+        assert excinfo.value.stage == "validate"
+        assert prompt.read_text(encoding="utf-8") == "keep me"
+
+    def test_hard_link_alias_between_redirects_is_rejected(self, tmp_path: Path) -> None:
+        first = tmp_path / "out.txt"
+        first.write_text("", encoding="utf-8")
+        alias = tmp_path / "alias.txt"
+        os.link(first, alias)
+        with pytest.raises(SpawnError):
+            SpawnSpec(argv=(sys.executable,), cwd=tmp_path, env={}, stdout_path=first, stderr_path=alias)
+
+    def test_symlink_alias_of_stdin_is_rejected(self, tmp_path: Path) -> None:
+        prompt = tmp_path / "prompt.txt"
+        prompt.write_text("keep me", encoding="utf-8")
+        alias = tmp_path / "alias.txt"
+        try:
+            alias.symlink_to(prompt)
+        except OSError:
+            pytest.skip("symlinkを作成できない環境")
+        with pytest.raises(SpawnError):
+            SpawnSpec(argv=(sys.executable,), cwd=tmp_path, env={}, stdin_path=prompt, stdout_path=alias)
+        dangling = tmp_path / "dangling.txt"
+        dangling.symlink_to(tmp_path / "missing-target.txt")
+        SpawnSpec(argv=(sys.executable,), cwd=tmp_path, env={}, stdin_path=prompt, stdout_path=dangling)
 
     def test_same_redirect_path_is_rejected(self, tmp_path: Path) -> None:
         target = tmp_path / "both.txt"

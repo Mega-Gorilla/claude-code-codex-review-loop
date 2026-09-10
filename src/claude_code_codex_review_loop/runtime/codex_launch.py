@@ -21,6 +21,7 @@ prompt本文の構成（P-008 fence、`ReviewContext`）、出力の受理・検
 
 from __future__ import annotations
 
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,8 +98,9 @@ def launch_codex_reviewer(
     prompt_path = root / _PROMPT_NAME
     last_message_path = root / _LAST_MESSAGE_NAME
     # pre-seedされた古い出力を今回の結果として返さない。`-o`は出力先を指定するだけで、
-    # 全失敗経路で既存fileが更新される保証は無い。
-    if last_message_path.exists():
+    # 全失敗経路で既存fileが更新される保証は無い。dir entry自体の存在で判定し、参照先の無い
+    # symlink（`exists()`はFalseを返す）も拒否する。辿られるとevidence root外へ書き得る。
+    if _entry_exists(last_message_path):
         raise LaunchError("output")
     try:
         write_private_text(prompt_path, prompt)
@@ -159,12 +161,30 @@ def _read_diagnostic(stderr_path: Path) -> RedactionResult:
     return redact(raw.decode("utf-8", errors="replace"))
 
 
+def _entry_exists(path: Path) -> bool:
+    """symlink自体を含むdir entryの存在（`lexists`相当。本moduleは`os`を持たない）。"""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _read_last_message(path: Path) -> bytes | None:
-    """今回のprocessが生成したfileを、上限+1 byteまでraw bytesのまま読む。"""
+    """今回のprocessが生成したfileを、上限+1 byteまでraw bytesのまま読む。
+
+    symlinkや通常file以外の実体が現れていれば、今回の生成物とみなさず`output`で停止する。
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise LaunchError("output") from error
+    if not stat.S_ISREG(info.st_mode):
+        raise LaunchError("output")
     try:
         with path.open("rb") as handle:
             return handle.read(MAX_LAST_MESSAGE_BYTES + 1)
-    except FileNotFoundError:
-        return None
     except OSError as error:
         raise LaunchError("output") from error
