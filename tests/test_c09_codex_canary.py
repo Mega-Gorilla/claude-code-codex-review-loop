@@ -51,6 +51,7 @@ class TestPrepareCodexCanaryHome:
         profile = config["permissions"]["c09-canary"]
         filesystem = profile["filesystem"]
         assert config["default_permissions"] == "c09-canary"
+        assert config["approval_policy"] == "never"
         assert profile["extends"] == ":workspace"
         assert filesystem[":root"] == "deny"
         assert filesystem[":minimal"] == "read"
@@ -144,7 +145,7 @@ class TestCodexCanaryInvocation:
         home = _home(tmp_path)
         invocation = build_codex_canary_invocation(
             home=home,
-            codex_executable=Path(sys.executable).resolve(),
+            codex_command=(os.fspath(Path(sys.executable).resolve()),),
             reviewer_env={"PATH": "safe"},
         )
         assert invocation.cwd == home.workspace_root
@@ -153,6 +154,7 @@ class TestCodexCanaryInvocation:
             os.fspath(Path(sys.executable).resolve()), "exec", "--ephemeral", "--ignore-rules", "-C",
             os.fspath(home.workspace_root), "-",
         )
+        assert "-a" not in invocation.argv and "--ask-for-approval" not in invocation.argv
         assert "--ignore-user-config" not in invocation.argv
         assert "--sandbox" not in invocation.argv
         assert "-c" not in invocation.argv
@@ -163,7 +165,7 @@ class TestCodexCanaryInvocation:
         with pytest.raises(CanaryError) as stopped:
             build_codex_canary_invocation(
                 home=home,
-                codex_executable=Path(sys.executable).resolve(),
+                codex_command=(os.fspath(Path(sys.executable).resolve()),),
                 reviewer_env={},
             )
         assert stopped.value.stage == "integrity"
@@ -178,7 +180,7 @@ class TestCodexCanaryInvocation:
         with pytest.raises(CanaryError) as stopped:
             build_codex_canary_invocation(
                 home=tampered,
-                codex_executable=Path(sys.executable).resolve(),
+                codex_command=(os.fspath(Path(sys.executable).resolve()),),
                 reviewer_env={},
             )
         assert stopped.value.stage == "integrity"
@@ -189,20 +191,25 @@ class TestCodexCanaryInvocation:
         with pytest.raises(CanaryError) as stopped:
             build_codex_canary_invocation(
                 home=home,
-                codex_executable=Path(sys.executable).resolve(),
+                codex_command=(os.fspath(Path(sys.executable).resolve()),),
                 reviewer_env={"OPENAI_API_KEY": token},
             )
         assert stopped.value.stage == "environment"
         assert token not in str(stopped.value)
 
-    @pytest.mark.parametrize("executable", (Path("relative"), Path("missing")))
-    def test_invalid_executable_is_rejected(self, tmp_path: Path, executable: Path) -> None:
+    @pytest.mark.parametrize("command", ("relative", "missing", "empty", "blank_argument"))
+    def test_invalid_command_is_rejected(self, tmp_path: Path, command: str) -> None:
         home = _home(tmp_path)
-        candidate = executable if executable == Path("relative") else (tmp_path / executable).resolve()
+        candidates: dict[str, tuple[str, ...]] = {
+            "relative": ("relative",),
+            "missing": (os.fspath((tmp_path / "missing").resolve()),),
+            "empty": (),
+            "blank_argument": (os.fspath(Path(sys.executable).resolve()), ""),
+        }
         with pytest.raises(CanaryError) as stopped:
             build_codex_canary_invocation(
                 home=home,
-                codex_executable=candidate,
+                codex_command=candidates[command],
                 reviewer_env={},
             )
         assert stopped.value.stage == "executable"
@@ -210,7 +217,7 @@ class TestCodexCanaryInvocation:
     def test_builder_takes_no_sandbox_enforcement_claim(self) -> None:
         """強制可否の実測evidenceはprocess facadeの責務であり、builderは呼出側の申告を受け取らない。"""
         parameters = inspect.signature(build_codex_canary_invocation).parameters
-        assert set(parameters) == {"home", "codex_executable", "reviewer_env"}
+        assert set(parameters) == {"home", "codex_command", "reviewer_env"}
         assert not [name for name in dir(module) if "capability" in name.lower()]
 
 

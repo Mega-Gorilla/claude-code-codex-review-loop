@@ -31,7 +31,7 @@ from ..identity.fs_permissions import (
 from ..policy.permission_profile import ensure_argv_allowed
 from ..policy.redaction import TOKEN_ENV_NAMES, RedactionResult, redact
 
-_PROFILE_NAME: Final = "c09-canary"
+PROFILE_NAME: Final = "c09-canary"
 _CONFIG_NAME: Final = "config.toml"
 
 
@@ -102,7 +102,7 @@ def prepare_codex_canary_home(
 def build_codex_canary_invocation(
     *,
     home: CodexCanaryHome,
-    codex_executable: Path,
+    codex_command: tuple[str, ...],
     reviewer_env: Mapping[str, str],
 ) -> CodexCanaryInvocation:
     """専用configを読む最小の`codex exec` argvを構築する。
@@ -110,12 +110,15 @@ def build_codex_canary_invocation(
     configが専用homeのpolicy sourceであるためignore-user-configは使わない。一方で
     repository由来のexecpolicyはignore-rulesで遮断する。任意argvや`-c`上書きの入口は
     このAPIに持たせず、promptは次段のprocess facadeがstdinで渡す。
+
+    `codex_command`は先頭がcanonicalな実行fileのargv prefixで、本番は`(<codex>,)`、
+    hermetic testはinterpreter + scriptを渡す（checkoutの`git_command`と同じ形）。
     """
     _verify_home(home)
-    executable = _canonical_file(codex_executable, "executable")
+    command = canonical_codex_command(codex_command)
     env = _build_environment(reviewer_env, home)
     argv = (
-        str(executable),
+        *command,
         "exec",
         "--ephemeral",
         "--ignore-rules",
@@ -130,6 +133,14 @@ def build_codex_canary_invocation(
 def redact_canary_diagnostic(text: str) -> RedactionResult:
     """native diagnosticを公開面へ渡す前の共通redaction入口。"""
     return redact(text)
+
+
+def canonical_codex_command(codex_command: tuple[str, ...]) -> tuple[str, ...]:
+    """先頭をcanonicalな実行fileに正規化し、残りは空でない固定引数として保持する。"""
+    if not codex_command or any(not argument for argument in codex_command[1:]):
+        raise CanaryError("executable")
+    executable = _canonical_file(Path(codex_command[0]), "executable")
+    return (str(executable), *codex_command[1:])
 
 
 def _validate_name(name: str) -> None:
@@ -179,12 +190,16 @@ def _canonical_protected_roots(protected_roots: Iterable[Path], workspace: Path)
 
 def _render_configuration(workspace: Path, protected_roots: tuple[Path, ...]) -> str:
     lines = [
-        f"default_permissions = {_toml_string(_PROFILE_NAME)}",
+        # 非対話実行では承認へ答えられない。`-a`はtop-level optionでargvの固定形に置けないため、
+        # top-levelのconfigで固定する（ADR-0027 決定11）。sandboxが唯一の強制点になるので、
+        # 起動はpreflightで強制が実測できた場合に限る。
+        'approval_policy = "never"',
+        f"default_permissions = {_toml_string(PROFILE_NAME)}",
         "",
-        f"[permissions.{_PROFILE_NAME}]",
+        f"[permissions.{PROFILE_NAME}]",
         'extends = ":workspace"',
         "",
-        f"[permissions.{_PROFILE_NAME}.filesystem]",
+        f"[permissions.{PROFILE_NAME}.filesystem]",
         '":root" = "deny"',
         '":minimal" = "read"',
         '":tmpdir" = "deny"',
@@ -194,10 +209,10 @@ def _render_configuration(workspace: Path, protected_roots: tuple[Path, ...]) ->
     lines.extend(
         (
             "",
-            f"[permissions.{_PROFILE_NAME}.filesystem.\":workspace_roots\"]",
+            f"[permissions.{PROFILE_NAME}.filesystem.\":workspace_roots\"]",
             '"." = "write"',
             "",
-            f"[permissions.{_PROFILE_NAME}.network]",
+            f"[permissions.{PROFILE_NAME}.network]",
             "enabled = false",
             "",
             # trusted projectの`.codex/config.toml`はuser configより優先され、そこに旧sandbox
