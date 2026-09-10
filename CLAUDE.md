@@ -27,7 +27,7 @@ python -m pytest tests/test_repository_contract.py::test_project_identity_is_con
 git diff --check origin/main...HEAD # CIと同じwhitespace check
 ```
 
-CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3.11でlint、type check、coverage付き全test、coverage floor、`git diff --check`を実行します。品質baselineは`quality-baseline.toml`でversion管理し、緩める変更にはPRへの理由記載が必要です（CONTRIBUTING「品質ゲートの運用」）。
+CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3.11と、ubuntu-latestのPython 3.13でlint、type check、coverage付き全test、coverage floor、`git diff --check`を実行します。品質baselineは`quality-baseline.toml`でversion管理し、緩める変更にはPRへの理由記載が必要です（CONTRIBUTING「品質ゲートの運用」）。
 
 ## Repository contract（testが強制する規約）
 
