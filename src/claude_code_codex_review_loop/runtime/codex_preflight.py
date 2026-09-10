@@ -2,24 +2,31 @@
 """C-09 sandbox preflight（ADR-0027 決定13 / 14）。
 
 reviewerをspawnする直前に、生成したpermission profileが**実起動と同じconfig stackで
-選ばれ**、かつ**OSが実際に強制している**ことをfacade自身が実測する。2つは互いの代替に
-ならず、どちらか1つでも成立しなければ`PreflightError`で停止する（fail closed）。
+選ばれ**、かつ**OSが実際に強制している**ことをfacade自身が実測する。確認は互いの代替に
+ならず、1つでも成立しなければ`PreflightError`で停止する（fail closed）。
 
-- effective configの照合: 同じcommand・同じ`CODEX_HOME`・同じcwdで`codex doctor --json`
-  を取得し、observableなfield（approval `Never`、sandbox `restricted`、denied-read有効、
-  sandbox helperの状態）を確認する
-- OS強制の実測: `codex sandbox -P <profile> --include-managed-config -C <checkout> -- <probe>`
-  で境界を実測する。`codex sandbox`は認証を要求しない
+1. effective configの照合: 同じexecutable・同じ`CODEX_HOME`・同じcwdで`codex doctor --json`
+   を取得し、observableなfield（approval `Never`、sandbox `restricted`、denied-read有効、
+   sandbox helperの状態）を確認する
+2. probeの同一性: facadeが選ぶcanonicalなprobe（本packageの`sandbox_probe.py`）の内容を
+   固定digestと照合する。呼出側からprobe・接続先を受け取らない
+3. positive control: 同じprobe・同じ接続先をsandboxの**外**で実行し、書込・読取・接続が
+   通ることを確かめる。これが無いと、到達不能な接続先や壊れたpathでも`denied`に見える
+4. OS強制の実測: `codex sandbox -P <profile> --include-managed-config -C <checkout> -- <probe>`
+   で同じprobeを**中**で実行し、境界が期待どおり閉じていることを確かめる
 
-evidenceはcommand・version・config digest・profile・roots・`CODEX_HOME`・env digestへ
-bindし、spawn直前に`verify_preflight_evidence`で同じ条件を再検証する。呼出側の申告値や
-前turnのevidenceで代替しない。native出力は例外へ含めず、固定stageだけを公開する。
+evidenceはexecutable・version・config digest・profile・roots・`CODEX_HOME`・env digest・
+probe interpreter・probe digest・接続先・観測結果へbindする。`verify_preflight_evidence`は
+spawn直前に**同じ測定を再実行**し、与えられたevidenceと完全一致する場合だけ通す。過去の
+evidenceや呼出側が組み立てたdataclassは、現実と一致しなければ通らない。native出力は
+例外へ含めず、固定stageだけを公開する。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +36,7 @@ from ..identity.fs_permissions import FsPermissionError, verify_private_dir
 from ..policy.permission_profile import ensure_argv_allowed
 from ..process import Completed, SpawnError, SpawnSpec, run_tree
 from ..schema.projection import canonical_json
+from . import sandbox_probe
 from .codex_canary import (
     PROFILE_NAME,
     CanaryError,
@@ -38,11 +46,24 @@ from .codex_canary import (
 )
 from .sandbox_probe import PROBE_LABELS
 
+# sandboxの外で同じprobeが到達できることを先に確かめる接続先。reviewerが到達して
+# はならない先（AC-C09-05）をそのまま使う。TCP handshakeだけで、requestは送らない。
+NETWORK_CONTROL_TARGET: Final[tuple[str, int]] = ("api.github.com", 443)
+# `sandbox_probe.py`の内容（改行をLFへ正規化）のSHA-256。probeを変更したら更新し、
+# testが実fileと一致することを固定する。一致しなければprobeを信頼せず起動しない。
+PROBE_DIGEST: Final = "fb93b9903b24d9df3d6e4395b4d5e199c12efaf736e02d2c5f5aa9f5ee49e69f"
+
 EXPECTED_BOUNDARIES: Final[Mapping[str, str]] = {
     "workspace_write": "allowed",
     "protected_write": "denied",
     "credential_read": "denied",
     "network": "denied",
+}
+EXPECTED_CONTROL: Final[Mapping[str, str]] = {
+    "workspace_write": "allowed",
+    "protected_write": "allowed",
+    "credential_read": "allowed",
+    "network": "allowed",
 }
 _EXPECTED_EFFECTIVE: Final[Mapping[str, str]] = {
     "approval policy": "Never",
@@ -72,9 +93,9 @@ class EffectiveSandbox:
 
 @dataclass(frozen=True)
 class PreflightEvidence:
-    """facadeが取得した実測evidence。spawn直前に同じ条件で再検証する。"""
+    """facadeが取得した実測evidence。spawn直前に同じ測定を再実行して照合する。"""
 
-    codex_command: tuple[str, ...]
+    codex_executable: str
     codex_version: str
     configuration_digest: str
     profile_name: str
@@ -82,39 +103,47 @@ class PreflightEvidence:
     protected_roots: tuple[Path, ...]
     codex_home: Path
     environment_digest: str
+    probe_interpreter: str
+    probe_digest: str
+    network_target: tuple[str, int]
     effective: EffectiveSandbox
+    control: Mapping[str, str]
     boundaries: Mapping[str, str]
 
 
 def run_sandbox_preflight(
     *,
     home: CodexCanaryHome,
-    codex_command: tuple[str, ...],
+    codex_executable: Path,
     reviewer_env: Mapping[str, str],
-    probe_command: tuple[str, ...],
-    network_target: tuple[str, int],
     evidence_root: Path,
     timeout_seconds: float,
     grace_seconds: float,
 ) -> PreflightEvidence:
-    """2つの確認を両方行い、成立した場合だけevidenceを返す。"""
-    invocation = _invocation(home, codex_command, reviewer_env)
-    command = invocation.argv[: len(codex_command)]
+    """4つの確認を順に行い、すべて成立した場合だけevidenceを返す。"""
+    invocation = _invocation(home, codex_executable, reviewer_env)
+    executable = invocation.argv[0]
     _validate_evidence_root(evidence_root, home)
-    runner = _Runner(command, invocation.env, home.workspace_root, evidence_root, timeout_seconds, grace_seconds)
-    version = _read_version(runner)
-    effective = _read_effective_config(runner, home)
-    boundaries = _probe_boundaries(runner, home, probe_command, network_target)
+    runner = _Runner(invocation.env, home.workspace_root, evidence_root, timeout_seconds, grace_seconds)
+    version = _read_version(runner, executable)
+    effective = _read_effective_config(runner, executable, home)
+    probe = _canonical_probe()
+    control = _run_control(runner, probe, home)
+    boundaries = _probe_boundaries(runner, executable, probe, home)
     return PreflightEvidence(
-        codex_command=command,
+        codex_executable=executable,
         codex_version=version,
         configuration_digest=home.configuration_digest,
         profile_name=PROFILE_NAME,
         workspace_root=home.workspace_root,
         protected_roots=home.protected_roots,
         codex_home=home.root,
-        environment_digest=_digest(invocation.env),
+        environment_digest=_digest(canonical_json(dict(invocation.env)).encode("utf-8")),
+        probe_interpreter=probe[0],
+        probe_digest=PROBE_DIGEST,
+        network_target=NETWORK_CONTROL_TARGET,
         effective=effective,
+        control=control,
         boundaries=boundaries,
     )
 
@@ -123,55 +152,40 @@ def verify_preflight_evidence(
     evidence: PreflightEvidence,
     *,
     home: CodexCanaryHome,
-    codex_command: tuple[str, ...],
+    codex_executable: Path,
     reviewer_env: Mapping[str, str],
     evidence_root: Path,
     timeout_seconds: float,
     grace_seconds: float,
 ) -> None:
-    """spawn直前の再検証。binding先が1つでも違えば`evidence_mismatch`で停止する。"""
-    invocation = _invocation(home, codex_command, reviewer_env)
-    command = invocation.argv[: len(codex_command)]
-    _validate_evidence_root(evidence_root, home)
-    expected = (
-        command,
-        home.configuration_digest,
-        PROFILE_NAME,
-        home.workspace_root,
-        home.protected_roots,
-        home.root,
-        _digest(invocation.env),
+    """spawn直前の再検証。同じ測定を再実行し、与えられたevidenceと完全一致しなければ停止する。
+
+    再実行が正であり、evidenceはその一致を要求されるだけである。過去turnのevidence、
+    期待値で組み立てたdataclass、測定後に変わったsystem / managed configやbackendは、
+    いずれも現在の測定と一致しない限り通らない。
+    """
+    fresh = run_sandbox_preflight(
+        home=home,
+        codex_executable=codex_executable,
+        reviewer_env=reviewer_env,
+        evidence_root=evidence_root,
+        timeout_seconds=timeout_seconds,
+        grace_seconds=grace_seconds,
     )
-    observed = (
-        evidence.codex_command,
-        evidence.configuration_digest,
-        evidence.profile_name,
-        evidence.workspace_root,
-        evidence.protected_roots,
-        evidence.codex_home,
-        evidence.environment_digest,
-    )
-    if expected != observed or dict(evidence.boundaries) != dict(EXPECTED_BOUNDARIES):
-        raise PreflightError("evidence_mismatch")
-    if _effective_fields(evidence.effective) != dict(_EXPECTED_EFFECTIVE):
-        raise PreflightError("evidence_mismatch")
-    runner = _Runner(command, invocation.env, home.workspace_root, evidence_root, timeout_seconds, grace_seconds)
-    if _read_version(runner) != evidence.codex_version:
+    if fresh != evidence:
         raise PreflightError("evidence_mismatch")
 
 
 @dataclass(frozen=True)
 class _Runner:
-    command: tuple[str, ...]
     env: Mapping[str, str]
     workspace: Path
     evidence_root: Path
     timeout_seconds: float
     grace_seconds: float
 
-    def output(self, stage: str, *arguments: str) -> tuple[int, str]:
-        """codexを実行し、終了codeとUTF-8のstdoutを返す。起動失敗とtimeoutはstageで停止する。"""
-        argv = (*self.command, *arguments)
+    def output(self, stage: str, argv: tuple[str, ...]) -> tuple[int, str]:
+        """argvを実行し、終了codeとUTF-8のstdoutを返す。起動失敗とtimeoutはstageで停止する。"""
         ensure_argv_allowed(argv)
         stdout_path = self.evidence_root / f"{stage}.stdout"
         stderr_path = self.evidence_root / f"{stage}.stderr"
@@ -190,10 +204,10 @@ class _Runner:
 
 
 def _invocation(
-    home: CodexCanaryHome, codex_command: tuple[str, ...], reviewer_env: Mapping[str, str]
+    home: CodexCanaryHome, codex_executable: Path, reviewer_env: Mapping[str, str]
 ) -> CodexCanaryInvocation:
     try:
-        return build_codex_canary_invocation(home=home, codex_command=codex_command, reviewer_env=reviewer_env)
+        return build_codex_canary_invocation(home=home, codex_executable=codex_executable, reviewer_env=reviewer_env)
     except CanaryError as error:
         raise PreflightError("configuration") from error
 
@@ -212,17 +226,17 @@ def _validate_evidence_root(evidence_root: Path, home: CodexCanaryHome) -> None:
             raise PreflightError("evidence_root")
 
 
-def _read_version(runner: _Runner) -> str:
-    exit_code, text = runner.output("version", "--version")
+def _read_version(runner: _Runner, executable: str) -> str:
+    exit_code, text = runner.output("version", (executable, "--version"))
     version = text.strip()
     if exit_code != 0 or not version or "\n" in version:
         raise PreflightError("version")
     return version
 
 
-def _read_effective_config(runner: _Runner, home: CodexCanaryHome) -> EffectiveSandbox:
+def _read_effective_config(runner: _Runner, executable: str, home: CodexCanaryHome) -> EffectiveSandbox:
     """doctorの終了codeは認証欠如でもfailになるため見ず、JSONの該当checkだけを照合する。"""
-    _, text = runner.output("doctor", "doctor", "--json")
+    _, text = runner.output("doctor", (executable, "doctor", "--json"))
     try:
         report = json.loads(text)
         checks = report["checks"]
@@ -252,39 +266,75 @@ def _read_effective_config(runner: _Runner, home: CodexCanaryHome) -> EffectiveS
     return effective
 
 
+def _canonical_probe() -> tuple[str, str]:
+    """facadeが選ぶprobe: 現在のinterpreterと、固定digestに一致する本packageのprobe file。"""
+    try:
+        interpreter = Path(sys.executable).resolve()
+        source = Path(sandbox_probe.__file__).resolve()
+        if not interpreter.is_file() or not source.is_file():
+            raise PreflightError("probe_integrity")
+        content = source.read_bytes().replace(b"\r\n", b"\n")
+    except OSError as error:
+        raise PreflightError("probe_integrity") from error
+    if _digest(content) != PROBE_DIGEST:
+        raise PreflightError("probe_integrity")
+    return (str(interpreter), str(source))
+
+
+def _probe_arguments(home: CodexCanaryHome, protected: tuple[Path, ...]) -> tuple[str, ...]:
+    host, port = NETWORK_CONTROL_TARGET
+    return (str(home.workspace_root), str(home.config_path), host, str(port), *(str(path) for path in protected))
+
+
+def _run_control(runner: _Runner, probe: tuple[str, str], home: CodexCanaryHome) -> Mapping[str, str]:
+    """sandboxの外で同じprobeを実行し、書込・読取・接続が通ることを確かめる。
+
+    protected rootは渡さない。実repositoryへは一時fileであっても書かず、この確認で
+    証明するのは「probeが動き、接続先へ到達できる」ことである。
+    """
+    exit_code, text = runner.output("control", (*probe, *_probe_arguments(home, ())))
+    if exit_code != 0:
+        raise PreflightError("control")
+    observed = _parse_probe(text, "control")
+    if observed != dict(EXPECTED_CONTROL):
+        raise PreflightError("control_boundary")
+    return observed
+
+
 def _probe_boundaries(
-    runner: _Runner, home: CodexCanaryHome, probe_command: tuple[str, ...], network_target: tuple[str, int]
+    runner: _Runner, executable: str, probe: tuple[str, str], home: CodexCanaryHome
 ) -> Mapping[str, str]:
-    host, port = network_target
-    if not probe_command or any(not argument for argument in probe_command) or not host or port <= 0:
-        raise PreflightError("probe_command")
     exit_code, text = runner.output(
         "probe",
-        "sandbox",
-        "-P",
-        PROFILE_NAME,
-        "--include-managed-config",
-        "-C",
-        str(home.workspace_root),
-        "--",
-        *probe_command,
-        str(home.workspace_root),
-        str(home.config_path),
-        host,
-        str(port),
-        *(str(path) for path in home.protected_roots[:-1]),
+        (
+            executable,
+            "sandbox",
+            "-P",
+            PROFILE_NAME,
+            "--include-managed-config",
+            "-C",
+            str(home.workspace_root),
+            "--",
+            *probe,
+            *_probe_arguments(home, home.protected_roots[:-1]),
+        ),
     )
     if exit_code != 0:
         raise PreflightError("sandbox_unavailable")
+    observed = _parse_probe(text, "probe_unavailable")
+    if observed != dict(EXPECTED_BOUNDARIES):
+        raise PreflightError("boundary")
+    return observed
+
+
+def _parse_probe(text: str, missing_stage: str) -> dict[str, str]:
     observed: dict[str, str] = {}
     for line in text.splitlines():
         label, separator, outcome = line.strip().partition("=")
         if separator and label in PROBE_LABELS and outcome in {"allowed", "denied"}:
             observed[label] = outcome
     if set(observed) != set(PROBE_LABELS):
-        raise PreflightError("probe_unavailable")
-    if observed != dict(EXPECTED_BOUNDARIES):
-        raise PreflightError("boundary")
+        raise PreflightError(missing_stage)
     return observed
 
 
@@ -297,5 +347,5 @@ def _effective_fields(effective: EffectiveSandbox) -> dict[str, str]:
     }
 
 
-def _digest(env: Mapping[str, str]) -> str:
-    return hashlib.sha256(canonical_json(dict(env)).encode("utf-8")).hexdigest()
+def _digest(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()

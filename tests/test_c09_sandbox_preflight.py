@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """C-09 sandbox preflightのhermetic test（ADR-0027 決定13 / 14）。
 
-fakeのcodex（interpreter + script）をscenario fileで駆動し、実Codex・認証・network・
-実GitHubは使わない。probe自体は実filesystemとlocal socketで両outcomeを実測する。
+C-03の`run_tree`をscenario駆動のfakeへ差し替え、実Codex・認証・network・実GitHubは
+使わない。production APIはcanonicalな実行file 1つしか受け取らないため、fake CLIは
+argvではなくrunnerの差替えで注入する。probe自体は実filesystemとlocal socketで両outcomeを
+実測し、probe fileのdigestが固定値と一致することも固定する。
 """
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import os
 import socket
@@ -18,12 +22,15 @@ from pathlib import Path
 import pytest
 
 from claude_code_codex_review_loop.identity import create_private_dir
-from claude_code_codex_review_loop.process import Completed
+from claude_code_codex_review_loop.process import Completed, SpawnError, SpawnSpec
+from claude_code_codex_review_loop.process import run_tree as real_run_tree
 from claude_code_codex_review_loop.runtime import codex_preflight as module
 from claude_code_codex_review_loop.runtime import sandbox_probe
 from claude_code_codex_review_loop.runtime.codex_canary import prepare_codex_canary_home
 from claude_code_codex_review_loop.runtime.codex_preflight import (
     EXPECTED_BOUNDARIES,
+    EXPECTED_CONTROL,
+    NETWORK_CONTROL_TARGET,
     EffectiveSandbox,
     PreflightError,
     PreflightEvidence,
@@ -38,43 +45,82 @@ _GOOD_DETAILS = {
     "denied-read restrictions": "true",
 }
 _GOOD_LINES = [f"{label}={outcome}" for label, outcome in EXPECTED_BOUNDARIES.items()]
+_CONTROL_LINES = [f"{label}={outcome}" for label, outcome in EXPECTED_CONTROL.items()]
+_INTERPRETER = os.fspath(Path(sys.executable).resolve())
+_PROBE_FILE = os.fspath(Path(sandbox_probe.__file__).resolve())
 
-_FAKE_CODEX = r'''
-import json, os, pathlib, sys, time
-scenario = json.loads(pathlib.Path(os.environ["FAKE_CODEX_SCENARIO"]).read_text(encoding="utf-8"))
-argv = sys.argv[1:]
-with open(scenario["argv_log"], "a", encoding="utf-8") as log:
-    log.write(json.dumps(argv) + "\n")
-if scenario.get("sleep_seconds"):
-    time.sleep(scenario["sleep_seconds"])
-if argv == ["--version"]:
-    sys.stdout.write(scenario["version"])
-    sys.exit(scenario["version_exit"])
-if argv == ["doctor", "--json"]:
-    if scenario.get("doctor_raw") is not None:
-        sys.stdout.write(scenario["doctor_raw"])
-        sys.exit(1)
-    doctor = scenario["doctor"]
-    report = {"checks": {
-        "config.load": {"status": doctor["load_status"], "details": {
-            "CODEX_HOME": doctor.get("codex_home") or os.environ["CODEX_HOME"],
-            "cwd": doctor.get("cwd") or os.getcwd(),
-        }},
-        "sandbox.helpers": {"status": doctor["helper_status"], "details": doctor["details"]},
-    }}
-    sys.stdout.write(json.dumps(report))
-    sys.exit(1)
-if argv[:1] == ["sandbox"]:
-    sys.stdout.write("\n".join(scenario["probe_lines"]) + "\n")
-    sys.exit(scenario["sandbox_exit"])
-sys.exit(3)
-'''
+
+class FakeCodex:
+    """`run_tree`の差替え。argvからstageを判定し、scenarioに従ってstdout fileを書く。"""
+
+    def __init__(self) -> None:
+        self.scenario: dict[str, object] = {
+            "version": "codex-cli 0.0.0-fake",
+            "version_exit": 0,
+            "doctor": {"load_status": "ok", "helper_status": "ok", "details": dict(_GOOD_DETAILS)},
+            "doctor_raw": None,
+            "control_lines": list(_CONTROL_LINES),
+            "control_exit": 0,
+            "probe_lines": list(_GOOD_LINES),
+            "sandbox_exit": 0,
+            "raise_at": None,
+            "timeout_at": None,
+            "silent_at": None,
+        }
+        self.specs: list[SpawnSpec] = []
+
+    def doctor(self, **overrides: object) -> None:
+        doctor: dict[str, object] = {"load_status": "ok", "helper_status": "ok", "details": dict(_GOOD_DETAILS)}
+        doctor.update(overrides)
+        self.scenario["doctor"] = doctor
+
+    def run_tree(self, spec: SpawnSpec, timeout_seconds: float, grace_seconds: float) -> object:
+        self.specs.append(spec)
+        stage = spec.stdout_path.name.removesuffix(".stdout") if spec.stdout_path else ""
+        if self.scenario["raise_at"] == stage:
+            raise SpawnError("spawn", "test")
+        if self.scenario["timeout_at"] == stage:
+            return object()
+        if self.scenario["silent_at"] == stage:
+            return Completed(exit_code=0)
+        assert spec.stdout_path is not None
+        argv = spec.argv
+        if argv[1:] == ("--version",):
+            spec.stdout_path.write_text(str(self.scenario["version"]), encoding="utf-8")
+            return Completed(exit_code=int(str(self.scenario["version_exit"])))
+        if argv[1:] == ("doctor", "--json"):
+            raw = self.scenario["doctor_raw"]
+            spec.stdout_path.write_text(raw if isinstance(raw, str) else self._doctor_json(spec), encoding="utf-8")
+            return Completed(exit_code=1)
+        if argv[:2] == (_INTERPRETER, _PROBE_FILE):
+            spec.stdout_path.write_text("\n".join(map(str, self.scenario["control_lines"])) + "\n", encoding="utf-8")  # type: ignore[call-overload]
+            return Completed(exit_code=int(str(self.scenario["control_exit"])))
+        if argv[1:2] == ("sandbox",):
+            spec.stdout_path.write_text("\n".join(map(str, self.scenario["probe_lines"])) + "\n", encoding="utf-8")  # type: ignore[call-overload]
+            return Completed(exit_code=int(str(self.scenario["sandbox_exit"])))
+        raise AssertionError(argv)
+
+    def _doctor_json(self, spec: SpawnSpec) -> str:
+        doctor = self.scenario["doctor"]
+        assert isinstance(doctor, dict)
+        return json.dumps(
+            {
+                "checks": {
+                    "config.load": {
+                        "status": doctor["load_status"],
+                        "details": {
+                            "CODEX_HOME": doctor.get("codex_home") or spec.env["CODEX_HOME"],
+                            "cwd": doctor.get("cwd") or os.fspath(spec.cwd),
+                        },
+                    },
+                    "sandbox.helpers": {"status": doctor["helper_status"], "details": doctor["details"]},
+                }
+            }
+        )
 
 
 class Fixture:
-    """1 testぶんのhome・fake codex・scenarioをまとめる。"""
-
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.tmp_path = tmp_path
         private = tmp_path / "private"
         create_private_dir(private)
@@ -89,50 +135,24 @@ class Fixture:
             workspace_root=self.workspace,
             protected_roots=(self.real_repository, self.state_root),
         )
-        self.evidence_root = tmp_path / "evidence"
-        create_private_dir(self.evidence_root)
-        self.evidence_root = self.evidence_root.resolve()
-        self.script = tmp_path / "fake_codex.py"
-        self.script.write_text(_FAKE_CODEX, encoding="utf-8")
-        self.scenario_path = tmp_path / "scenario.json"
-        self.argv_log = tmp_path / "argv.log"
-        self.codex_command = (os.fspath(Path(sys.executable).resolve()), os.fspath(self.script))
-        self.probe_command = (os.fspath(Path(sys.executable).resolve()), os.fspath(tmp_path / "probe.py"))
-        self.write_scenario()
-
-    def write_scenario(self, **overrides: object) -> None:
-        scenario: dict[str, object] = {
-            "version": "codex-cli 0.0.0-fake",
-            "version_exit": 0,
-            "doctor": {"load_status": "ok", "helper_status": "ok", "details": dict(_GOOD_DETAILS)},
-            "doctor_raw": None,
-            "sandbox_exit": 0,
-            "probe_lines": list(_GOOD_LINES),
-            "sleep_seconds": 0,
-            "argv_log": os.fspath(self.argv_log),
-        }
-        scenario.update(overrides)
-        self.scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
-
-    def doctor(self, **overrides: object) -> None:
-        doctor: dict[str, object] = {"load_status": "ok", "helper_status": "ok", "details": dict(_GOOD_DETAILS)}
-        doctor.update(overrides)
-        self.write_scenario(doctor=doctor)
+        evidence_root = tmp_path / "evidence"
+        create_private_dir(evidence_root)
+        self.evidence_root = evidence_root.resolve()
+        self.codex_executable = Path(sys.executable).resolve()
+        self.fake = FakeCodex()
+        monkeypatch.setattr(module, "run_tree", self.fake.run_tree)
 
     @property
     def reviewer_env(self) -> dict[str, str]:
         env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "TEMP", "TMP") if name in os.environ}
         env["PYTHONUTF8"] = "1"
-        env["FAKE_CODEX_SCENARIO"] = os.fspath(self.scenario_path)
         return env
 
     def run(self, **overrides: object) -> PreflightEvidence:
         values: dict[str, object] = {
             "home": self.home,
-            "codex_command": self.codex_command,
+            "codex_executable": self.codex_executable,
             "reviewer_env": self.reviewer_env,
-            "probe_command": self.probe_command,
-            "network_target": ("api.github.invalid", 443),
             "evidence_root": self.evidence_root,
             "timeout_seconds": 60.0,
             "grace_seconds": 1.0,
@@ -143,7 +163,7 @@ class Fixture:
     def verify(self, evidence: PreflightEvidence, **overrides: object) -> None:
         values: dict[str, object] = {
             "home": self.home,
-            "codex_command": self.codex_command,
+            "codex_executable": self.codex_executable,
             "reviewer_env": self.reviewer_env,
             "evidence_root": self.evidence_root,
             "timeout_seconds": 60.0,
@@ -152,19 +172,16 @@ class Fixture:
         values.update(overrides)
         verify_preflight_evidence(evidence, **values)  # type: ignore[arg-type]
 
-    def logged_argv(self) -> list[list[str]]:
-        return [json.loads(line) for line in self.argv_log.read_text(encoding="utf-8").splitlines()]
-
 
 @pytest.fixture
-def fx(tmp_path: Path) -> Fixture:
-    return Fixture(tmp_path)
+def fx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Fixture:
+    return Fixture(tmp_path, monkeypatch)
 
 
 class TestRunSandboxPreflight:
-    def test_both_checks_pass_and_evidence_is_bound(self, fx: Fixture) -> None:
+    def test_all_checks_pass_and_evidence_is_bound(self, fx: Fixture) -> None:
         evidence = fx.run()
-        assert evidence.codex_command == fx.codex_command
+        assert evidence.codex_executable == os.fspath(fx.codex_executable)
         assert evidence.codex_version == "codex-cli 0.0.0-fake"
         assert evidence.configuration_digest == fx.home.configuration_digest
         assert evidence.profile_name == "c09-canary"
@@ -172,23 +189,48 @@ class TestRunSandboxPreflight:
         assert evidence.protected_roots == fx.home.protected_roots
         assert evidence.codex_home == fx.home.root
         assert len(evidence.environment_digest) == 64
+        assert evidence.probe_interpreter == _INTERPRETER
+        assert evidence.probe_digest == module.PROBE_DIGEST
+        assert evidence.network_target == NETWORK_CONTROL_TARGET
         assert evidence.effective == EffectiveSandbox("Never", "restricted", "restricted", "true")
+        assert dict(evidence.control) == dict(EXPECTED_CONTROL)
         assert dict(evidence.boundaries) == dict(EXPECTED_BOUNDARIES)
-        version, doctor, probe = fx.logged_argv()
-        assert version == ["--version"] and doctor == ["doctor", "--json"]
-        assert probe == [
-            "sandbox", "-P", "c09-canary", "--include-managed-config", "-C", os.fspath(fx.workspace), "--",
-            *fx.probe_command, os.fspath(fx.workspace), os.fspath(fx.home.config_path), "api.github.invalid", "443",
+        version, doctor, control, probe = fx.fake.specs
+        host, port = NETWORK_CONTROL_TARGET
+        codex = os.fspath(fx.codex_executable)
+        assert version.argv == (codex, "--version") and doctor.argv == (codex, "doctor", "--json")
+        assert control.argv == (
+            _INTERPRETER, _PROBE_FILE, os.fspath(fx.workspace), os.fspath(fx.home.config_path), host, str(port),
+        )
+        assert probe.argv == (
+            codex, "sandbox", "-P", "c09-canary", "--include-managed-config", "-C", os.fspath(fx.workspace), "--",
+            _INTERPRETER, _PROBE_FILE, os.fspath(fx.workspace), os.fspath(fx.home.config_path), host, str(port),
             os.fspath(fx.real_repository), os.fspath(fx.state_root),
-        ]
-        assert "-a" not in probe and "-c" not in probe
+        )
+        for spec in fx.fake.specs:
+            assert spec.cwd == fx.workspace
+            assert spec.env == {**fx.reviewer_env, "CODEX_HOME": os.fspath(fx.home.root)}
+            assert spec.stdout_path is not None and spec.stdout_path.parent == fx.evidence_root
+        assert "-a" not in probe.argv and "-c" not in probe.argv
+
+    def test_production_api_accepts_no_probe_target_or_argv_prefix(self) -> None:
+        """probe・接続先・argv prefixは呼出側から注入できない（ADR-0027 決定9 / 14）。"""
+        for function in (run_sandbox_preflight, verify_preflight_evidence):
+            names = set(inspect.signature(function).parameters)
+            assert names.isdisjoint({"probe_command", "network_target", "codex_command"})
+            assert inspect.signature(function).parameters["codex_executable"].annotation == "Path"
+
+    def test_probe_file_matches_the_pinned_digest(self) -> None:
+        """probeを変更したら`PROBE_DIGEST`を更新する。一致しなければfacadeはprobeを信頼しない。"""
+        content = Path(sandbox_probe.__file__).read_bytes().replace(b"\r\n", b"\n")
+        assert hashlib.sha256(content).hexdigest() == module.PROBE_DIGEST
 
     def test_token_environment_is_rejected_before_any_process_starts(self, fx: Fixture) -> None:
         env = {**fx.reviewer_env, "OPENAI_API_KEY": "sk-" + "x" * 40}
         with pytest.raises(PreflightError) as stopped:
             fx.run(reviewer_env=env)
         assert stopped.value.stage == "configuration"
-        assert not fx.argv_log.exists()
+        assert fx.fake.specs == []
 
     @pytest.mark.parametrize("kind", ("relative", "missing", "inside_workspace", "inside_home", "not_private"))
     def test_evidence_root_must_be_private_and_disjoint(
@@ -220,13 +262,19 @@ class TestRunSandboxPreflight:
             ({"doctor_raw": "not json"}, "doctor_output"),
             ({"doctor_raw": "{\"checks\": {}}"}, "doctor_output"),
             ({"doctor_raw": "[]"}, "doctor_output"),
+            ({"control_exit": 1}, "control"),
+            ({"control_lines": ["workspace_write=allowed", "garbage"]}, "control"),
+            ({"control_lines": [*_CONTROL_LINES[:-1], "network=denied"]}, "control_boundary"),
             ({"sandbox_exit": 1}, "sandbox_unavailable"),
             ({"probe_lines": ["workspace_write=allowed", "garbage"]}, "probe_unavailable"),
             ({"probe_lines": [*_GOOD_LINES[:-1], "network=allowed"]}, "boundary"),
+            ({"raise_at": "version"}, "version"),
+            ({"timeout_at": "doctor"}, "doctor"),
+            ({"silent_at": "probe"}, "probe"),
         ),
     )
     def test_each_stage_fails_closed(self, fx: Fixture, overrides: dict[str, object], stage: str) -> None:
-        fx.write_scenario(**overrides)
+        fx.fake.scenario.update(overrides)
         with pytest.raises(PreflightError) as stopped:
             fx.run()
         assert stopped.value.stage == stage
@@ -248,106 +296,125 @@ class TestRunSandboxPreflight:
     def test_effective_config_mismatch_fails_closed(
         self, fx: Fixture, overrides: dict[str, object], stage: str
     ) -> None:
-        fx.doctor(**overrides)
+        fx.fake.doctor(**overrides)
         with pytest.raises(PreflightError) as stopped:
             fx.run()
         assert stopped.value.stage == stage
+        assert len(fx.fake.specs) == 2
 
-    @pytest.mark.parametrize(
-        ("probe_command", "network_target"),
-        (
-            ((), ("host", 443)),
-            (("python", ""), ("host", 443)),
-            (("python",), ("", 443)),
-            (("python",), ("host", 0)),
-        ),
-    )
-    def test_invalid_probe_command_or_target_is_rejected(
-        self, fx: Fixture, probe_command: tuple[str, ...], network_target: tuple[str, int]
+    @pytest.mark.parametrize("kind", ("digest", "missing_file", "unreadable", "missing_interpreter"))
+    def test_untrusted_probe_is_rejected_before_any_probe_runs(
+        self, fx: Fixture, kind: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        with pytest.raises(PreflightError) as stopped:
-            fx.run(probe_command=probe_command, network_target=network_target)
-        assert stopped.value.stage == "probe_command"
+        if kind == "digest":
+            monkeypatch.setattr(module, "PROBE_DIGEST", "0" * 64)
+        elif kind == "missing_file":
+            monkeypatch.setattr(sandbox_probe, "__file__", os.fspath(fx.tmp_path / "missing.py"))
+        elif kind == "unreadable":
+            original = Path.read_bytes
 
-    def test_spawn_failure_is_classified_by_stage(self, fx: Fixture) -> None:
+            def unreadable_probe(self: Path) -> bytes:
+                if os.fspath(self) == _PROBE_FILE:
+                    raise OSError("test")
+                return original(self)
+
+            monkeypatch.setattr(Path, "read_bytes", unreadable_probe)
+        else:
+            monkeypatch.setattr(sys, "executable", os.fspath(fx.tmp_path / "missing-python"))
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "probe_integrity"
+        assert [spec.stdout_path.name for spec in fx.fake.specs if spec.stdout_path] == [
+            "version.stdout", "doctor.stdout",
+        ]
+
+    def test_real_spawn_path_reaches_codex_through_c03(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """fakeを外し、実interpreterをcodexとして起動する。`--version`は通り、doctorで止まる。"""
+        monkeypatch.setattr(module, "run_tree", real_run_tree)
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "doctor_output"
+        assert (fx.evidence_root / "version.stdout").read_text(encoding="utf-8").startswith("Python ")
+
+    def test_spawn_failure_of_a_non_executable_is_classified(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(module, "run_tree", real_run_tree)
         not_executable = fx.tmp_path / "not-executable.txt"
         not_executable.write_text("plain", encoding="utf-8")
         with pytest.raises(PreflightError) as stopped:
-            fx.run(codex_command=(os.fspath(not_executable.resolve()),))
-        assert stopped.value.stage == "version"
-
-    def test_timeout_is_classified_by_stage(self, fx: Fixture) -> None:
-        fx.write_scenario(sleep_seconds=30)
-        with pytest.raises(PreflightError) as stopped:
-            fx.run(timeout_seconds=0.5, grace_seconds=0.2)
-        assert stopped.value.stage == "version"
-
-    def test_missing_output_file_is_classified_by_stage(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(module, "run_tree", lambda *args, **kwargs: Completed(exit_code=0))
-        with pytest.raises(PreflightError) as stopped:
-            fx.run()
+            fx.run(codex_executable=not_executable.resolve())
         assert stopped.value.stage == "version"
 
 
 class TestVerifyPreflightEvidence:
-    def test_same_conditions_pass(self, fx: Fixture) -> None:
+    def test_same_conditions_pass_by_remeasuring(self, fx: Fixture) -> None:
         evidence = fx.run()
         fx.verify(evidence)
+        assert len(fx.fake.specs) == 8
+
+    @pytest.mark.parametrize(
+        ("overrides", "stage"),
+        (
+            ({"version": "codex-cli 0.0.1-fake"}, "evidence_mismatch"),
+            ({"probe_lines": [*_GOOD_LINES[:-1], "network=allowed"]}, "boundary"),
+            ({"sandbox_exit": 1}, "sandbox_unavailable"),
+        ),
+    )
+    def test_reality_changed_after_measurement_is_rejected(
+        self, fx: Fixture, overrides: dict[str, object], stage: str
+    ) -> None:
+        """再測定が正。CLI更新はevidence不一致、境界やbackendの変化は測定自体の失敗として止まる。"""
+        evidence = fx.run()
+        fx.fake.scenario.update(overrides)
+        with pytest.raises(PreflightError) as stopped:
+            fx.verify(evidence)
+        assert stopped.value.stage == stage
+
+    def test_effective_config_changed_after_measurement_is_rejected(self, fx: Fixture) -> None:
+        evidence = fx.run()
+        fx.fake.doctor(details={**_GOOD_DETAILS, "network sandbox": "enabled"})
+        with pytest.raises(PreflightError) as stopped:
+            fx.verify(evidence)
+        assert stopped.value.stage == "effective_config"
 
     @pytest.mark.parametrize(
         "field",
         (
-            "codex_command",
-            "configuration_digest",
-            "profile_name",
-            "workspace_root",
-            "protected_roots",
-            "codex_home",
-            "environment_digest",
-            "boundaries",
-            "effective",
-            "codex_version",
+            "codex_executable", "codex_version", "configuration_digest", "profile_name", "workspace_root",
+            "protected_roots", "codex_home", "environment_digest", "probe_interpreter", "probe_digest",
+            "network_target", "effective", "control", "boundaries",
         ),
     )
-    def test_any_changed_binding_is_rejected(self, fx: Fixture, field: str) -> None:
+    def test_forged_or_stale_evidence_is_rejected_against_fresh_measurement(self, fx: Fixture, field: str) -> None:
         evidence = fx.run()
-        changed = {
-            "codex_command": (fx.codex_command[0],),
+        forged = {
+            "codex_executable": "other",
+            "codex_version": "codex-cli 9.9.9",
             "configuration_digest": "0" * 64,
             "profile_name": "other",
             "workspace_root": fx.real_repository,
             "protected_roots": fx.home.protected_roots[:-1],
             "codex_home": fx.workspace,
             "environment_digest": "0" * 64,
-            "boundaries": {**EXPECTED_BOUNDARIES, "network": "allowed"},
+            "probe_interpreter": "other",
+            "probe_digest": "0" * 64,
+            "network_target": ("localhost", 1),
             "effective": EffectiveSandbox("UnlessTrusted", "restricted", "restricted", "true"),
-            "codex_version": "codex-cli 9.9.9",
+            "control": {**EXPECTED_CONTROL, "network": "denied"},
+            "boundaries": {**EXPECTED_BOUNDARIES, "network": "allowed"},
         }
         with pytest.raises(PreflightError) as stopped:
-            fx.verify(replace(evidence, **{field: changed[field]}))
+            fx.verify(replace(evidence, **{field: forged[field]}))
         assert stopped.value.stage == "evidence_mismatch"
 
-    def test_changed_environment_or_command_is_rejected(self, fx: Fixture) -> None:
+    def test_changed_environment_is_rejected(self, fx: Fixture) -> None:
         evidence = fx.run()
         with pytest.raises(PreflightError) as stopped:
             fx.verify(evidence, reviewer_env={**fx.reviewer_env, "EXTRA": "1"})
         assert stopped.value.stage == "evidence_mismatch"
-
-    def test_upgraded_cli_is_rejected_at_spawn_time(self, fx: Fixture) -> None:
-        evidence = fx.run()
-        fx.write_scenario(version="codex-cli 0.0.1-fake")
-        with pytest.raises(PreflightError) as stopped:
-            fx.verify(evidence)
-        assert stopped.value.stage == "evidence_mismatch"
-
-    def test_configuration_and_evidence_root_are_revalidated(self, fx: Fixture) -> None:
-        evidence = fx.run()
-        with pytest.raises(PreflightError) as configuration:
-            fx.verify(evidence, reviewer_env={**fx.reviewer_env, "OPENAI_API_KEY": "sk-" + "x" * 40})
-        assert configuration.value.stage == "configuration"
-        with pytest.raises(PreflightError) as root:
-            fx.verify(evidence, evidence_root=fx.workspace)
-        assert root.value.stage == "evidence_root"
 
 
 class TestSandboxProbe:
