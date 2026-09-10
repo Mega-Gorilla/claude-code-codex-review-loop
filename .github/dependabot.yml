@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# GitHub Actionsの更新だけを自動で提案する。workflowはcommit SHAで固定しているため、
+# dependabotがSHAとversion commentを揃えて更新する。Python依存はexact pinのratchet方針
+# （CONTRIBUTING「品質ゲートの運用」）に従い手動で更新する。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
