@@ -13,9 +13,11 @@ on:
 permissions:
   contents: read
 
-# 同一PRへの連続pushでは古いcommitのrunを打ち切る。mainとtagへのpushは打ち切らない。
+# 同一PRへの連続pushでは古いcommitのrunを打ち切る。mainとtagへのpushは打ち切らず、
+# 置換もしない: 同じgroupではpending runを1件しか保持できず、新しいrunが古いpendingを
+# 置き換えるため、pushはrun_idで一意なgroupにしてrunどうしを独立させる（PR #64レビュー）。
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
