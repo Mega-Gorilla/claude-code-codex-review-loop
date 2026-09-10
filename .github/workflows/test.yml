@@ -13,25 +13,45 @@ on:
 permissions:
   contents: read
 
+# 同一PRへの連続pushでは古いcommitのrunを打ち切る。mainとtagへのpushは打ち切らず、
+# 置換もしない: 同じgroupではpending runを1件しか保持できず、新しいrunが古いpendingを
+# 置き換えるため、pushはrun_idで一意なgroupにしてrunどうしを独立させる（PR #64レビュー）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
-    name: Python 3.11 / ${{ matrix.os }}
+    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # 実測はubuntu約3分 / windows約5分。subprocessを起動するtestがhangしても既定の360分を占有しない。
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os:
           - ubuntu-latest
           - windows-latest
+        python-version:
+          - "3.11"
+        # 下限の3.11に加え、開発機で使う最新系でも同じgateを通す（Issue #63）。
+        # `Python 3.11 / <os>`のjob名はrulesetの必須status checkなので変えない。
+        include:
+          - os: ubuntu-latest
+            python-version: "3.13"
 
+    # actionはmutableなmajor tagではなくcommit SHAで固定する（supply-chainの置換防止）。
+    # 更新は`.github/dependabot.yml`のgithub-actions更新PRで行い、末尾のversion commentも揃える。
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -116,9 +136,9 @@ jobs:
       # であり、hidden pathは黙って収集対象から外れる。
       - name: Collect run state on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: run-state-${{ matrix.os }}
+          name: run-state-${{ matrix.os }}-py${{ matrix.python-version }}
           path: |
             ${{ runner.temp }}/pytest-tmp/**/runs/*/checkpoint.json
             ${{ runner.temp }}/pytest-tmp/**/runs/*/actions/*/action.json

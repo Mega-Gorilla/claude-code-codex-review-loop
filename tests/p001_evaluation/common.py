@@ -24,7 +24,8 @@ stage優先順位:
 
 JSON parse境界:
     Pythonのint変換桁数上限（既定4300桁）を超える整数はValueErrorとなるため、
-    深いnestのRecursionErrorと同様にinvalid_jsonとして扱う。JSON標準にない
+    invalid_jsonとして扱う。深いnestはRecursionErrorに頼らず、parse前に明示上限
+    （MAX_JSON_DEPTH）で拒否する（Issue #65）。JSON標準にない
     token（NaN / Infinity / -Infinity）はparse_constantで拒否し、invalid_jsonとする。
 
 dynamic keyのpath正規化:
@@ -36,10 +37,18 @@ dynamic keyのpath正規化:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
 MAX_INPUT_BYTES = 65_536
+
+# 深いnestはjson decoderのRecursionErrorに頼らず、parse前に明示的な上限で拒否する。
+# Python 3.12以降、C実装の再帰は`sys.setrecursionlimit`ではなくOS依存のC recursion limitに
+# 従い、3.13のLinuxでは深さ3000の入力が解析できてしまうことをCIで観測した（Issue #65）。
+# protocolのschemaは数段しかnestせず、corpusの他caseの最大深さは3である。
+MAX_JSON_DEPTH = 64
+_STRING_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
 KNOWN_SCHEMA_VERSIONS = frozenset({1})
 MAX_PATH_LENGTH = 120
 
@@ -78,9 +87,24 @@ def _reject_constant(value: str) -> object:
     raise ValueError(f"非標準のJSON token: {value}")
 
 
-def parse_json(text: str) -> object:
-    """protocolのJSON parse意味論（NaN / Infinity拒否）。失敗はValueError / RecursionError。"""
+def ensure_json_depth(text: str, limit: int = MAX_JSON_DEPTH) -> None:
+    """文字列literalを除いた`[` / `{`の深さが上限を超えたらValueError（json stageで拒否）。
 
+    parse前の軽量な走査であり、括弧の対応は検査しない（不整合はjson.loadsが拒否する）。
+    """
+    depth = 0
+    for character in _STRING_LITERAL.sub("", text):
+        if character in "[{":
+            depth += 1
+            if depth > limit:
+                raise ValueError(f"JSONのnestが上限{limit}を超える")
+        elif character in "]}":
+            depth -= 1
+
+
+def parse_json(text: str) -> object:
+    """protocolのJSON parse意味論（NaN / Infinity拒否、nest深さ上限）。失敗はValueError / RecursionError。"""
+    ensure_json_depth(text)
     return json.loads(text, parse_constant=_reject_constant)
 
 

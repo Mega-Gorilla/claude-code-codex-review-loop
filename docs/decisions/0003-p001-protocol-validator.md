@@ -93,3 +93,9 @@ Windows / Linuxで同一結果 / representative全受理 / malformed全拒否と
 - `pyproject.toml`の`dependencies = []`が、stubの初期状態ではなく**決定された要件**になる
 - schema機能の追加はC-02の変更として現れ、機能集合の拡大が再評価条件の判定材料になる
 - implementation planのP-001（未決事項）は本ADRにより解決した
+
+## 追補（2026-09-10、Issue #65）
+
+「JSON parse境界」のうち深いnestの拒否は、json decoderのRecursionErrorに依存していた。Python 3.12以降、C実装の再帰は`sys.setrecursionlimit`ではなくOS依存のC recursion limitに従い、3.13のLinuxでは`malformed/deeply_nested.json`（3000段）が解析できてschema stageまで到達することをCI（Python 3.13 / ubuntu-latest job、PR #64）で観測した。開発機のWindows 3.13では2000段が解析でき、5000段でRecursionErrorになる。
+
+parse境界を環境依存にしないため、`parse_json`は`json.loads`の前に文字列literalを除いた`[` / `{`の深さを走査し、`MAX_JSON_DEPTH`（64）を超える入力をValueErrorとしてjson stageで拒否する。評価harness（`tests/p001_evaluation/common.py`）も同じ上限を持ち、dedicated / jsonschemaの両候補でmanifestの期待（reject:json）が全Python versionで一致する。corpusの他caseの最大深さは3である。

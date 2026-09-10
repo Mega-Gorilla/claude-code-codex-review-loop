@@ -45,7 +45,7 @@ baselineは`quality-baseline.toml`でversion管理します。値を緩める変
 - **OS専用moduleのcoverage / mypy**: C-03のOS専用backend（`process/job_object.py` / `process/process_group.py`）は自OSでしか実行できないため、CIのfloor stepは**異OS側moduleだけ**をreport対象から`--omit`します（floor値100は変更しません。ADR-0005）。mypyはplatform narrowingにより各OSが自OS側backendを検査し、2 jobの合算で両方の型検査が成立します。localでfloorを確認する場合は、Windowsでは`python -m coverage report --omit "*/process/process_group.py"`、POSIXでは`--omit "*/process/job_object.py"`を付けてください
 - **version整合**: 通常CIで`pyproject.toml`とpackageの`__version__`の一致を検証し、`v*` tagのbuildではtagとpackage versionの不一致をfailにします
 
-CIは`ubuntu-latest`と`windows-latest`のPython 3.11で全testを実行します。testの実行対象を限定する設定は追加しません。test fileの追加漏れが構造的に起こらない状態を保ちます。
+CIは`ubuntu-latest`と`windows-latest`のPython 3.11、および`ubuntu-latest`のPython 3.13で全testを実行します（下限と開発機の最新系の両端。Issue #63）。testの実行対象を限定する設定は追加しません。test fileの追加漏れが構造的に起こらない状態を保ちます。
 
 ## 開発の流れ
 
