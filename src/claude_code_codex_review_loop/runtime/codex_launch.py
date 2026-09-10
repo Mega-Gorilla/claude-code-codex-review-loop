@@ -4,9 +4,13 @@
 sandbox preflight（決定13 / 14）を**同じ呼出の中で**実行してからreviewerをspawnする。
 測定とspawnの間に呼出側のcodeを挟まないため、過去のevidenceを渡す入口が無い。
 
-- promptはevidence root配下の私有file（0o600）へ書き、C-03の`stdin_path`で子のstdinへ
-  流す。argvには載せない
-- 最終messageは`-o <evidence root配下のfile>`で受け取る
+- promptはevidence root配下の私有file（0o600、排他作成）へ書き、C-03の`stdin_path`で子の
+  stdinへ流す。argvには載せない
+- 最終messageは`-o <evidence root配下のfile>`で受け取る。spawn前にそのfileが存在しない
+  ことを要求し、今回のprocessが新規に生成したfileだけを返す
+- 最終messageは**raw bytesのまま**、上限+1 byteまでのbounded readで搬送する。decodeも
+  置換もしない。不正UTF-8とsize超過の判定はC-10がschema pipeline（size -> utf8 -> json）
+  で行えるよう、原文を壊さない
 - reviewerのstderrは共通redaction registryを通した`RedactionResult`としてだけ公開し、
   生のnative出力を結果へ含めない。失敗は固定stageだけを公開する
 - timeoutはC-03がtreeを停止した後に`ReviewerTimedOut`として返す
@@ -24,12 +28,15 @@ from typing import Final
 
 from ..identity.fs_permissions import FsPermissionError, write_private_text
 from ..policy.redaction import RedactionResult, redact
-from ..process import Completed, SpawnError, SpawnSpec, run_tree
+from ..process import Completed, SpawnError, SpawnSpec, StopError, run_tree
 from .codex_canary import CanaryError, CodexCanaryHome, build_codex_canary_invocation
 from .codex_preflight import PreflightEvidence, run_sandbox_preflight
 
 MAX_PROMPT_BYTES: Final = 1_048_576
 MAX_DIAGNOSTIC_BYTES: Final = 262_144
+# 最終messageのbounded readの上限。C-10はこの値以下の`max_input_bytes`で検証する前提で、
+# 上限+1 byteまで読むことで「上限を超えていた」ことをC-10のsize stageが判定できる。
+MAX_LAST_MESSAGE_BYTES: Final = 262_144
 _PROMPT_NAME: Final = "prompt.txt"
 _LAST_MESSAGE_NAME: Final = "last_message.txt"
 _STDOUT_NAME: Final = "reviewer.stdout"
@@ -46,10 +53,14 @@ class LaunchError(Exception):
 
 @dataclass(frozen=True)
 class ReviewerCompleted:
-    """reviewerが終了した。`last_message`は`-o`のfileが無ければNone（成否は呼出側が判断する）。"""
+    """reviewerが終了した。
+
+    `last_message`は`-o`のfileの**raw bytes**（上限+1 byteまで）で、fileが無ければNone。
+    decodeも置換もしていない。成否・schema・sizeの判定はC-10が行う。
+    """
 
     exit_code: int
-    last_message: str | None
+    last_message: bytes | None
     diagnostic: RedactionResult
     evidence: PreflightEvidence
 
@@ -85,6 +96,10 @@ def launch_codex_reviewer(
     root = Path(evidence_root)
     prompt_path = root / _PROMPT_NAME
     last_message_path = root / _LAST_MESSAGE_NAME
+    # pre-seedされた古い出力を今回の結果として返さない。`-o`は出力先を指定するだけで、
+    # 全失敗経路で既存fileが更新される保証は無い。
+    if last_message_path.exists():
+        raise LaunchError("output")
     try:
         write_private_text(prompt_path, prompt)
     except (FsPermissionError, OSError) as error:
@@ -110,6 +125,9 @@ def launch_codex_reviewer(
         outcome = run_tree(spec, timeout_seconds=timeout_seconds, grace_seconds=grace_seconds)
     except SpawnError as error:
         raise LaunchError("spawn") from error
+    except StopError as error:
+        # timeout後の停止・closeの失敗。C-03のnative detailを持つ型をfacade外へ出さない
+        raise LaunchError("stop") from error
     diagnostic = _read_diagnostic(root / _STDERR_NAME)
     if not isinstance(outcome, Completed):
         return ReviewerTimedOut(diagnostic=diagnostic, evidence=evidence)
@@ -122,7 +140,11 @@ def launch_codex_reviewer(
 
 
 def _validate_prompt(prompt: str) -> None:
-    encoded = prompt.encode("utf-8", errors="surrogateescape") if prompt else b""
+    """空・NUL・上限超・UTF-8へencodeできない文字列（unpaired surrogate）を起動前に拒否する。"""
+    try:
+        encoded = prompt.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise LaunchError("prompt") from error
     if not prompt.strip() or len(encoded) > MAX_PROMPT_BYTES or "\x00" in prompt:
         raise LaunchError("prompt")
 
@@ -137,9 +159,11 @@ def _read_diagnostic(stderr_path: Path) -> RedactionResult:
     return redact(raw.decode("utf-8", errors="replace"))
 
 
-def _read_last_message(path: Path) -> str | None:
+def _read_last_message(path: Path) -> bytes | None:
+    """今回のprocessが生成したfileを、上限+1 byteまでraw bytesのまま読む。"""
     try:
-        return path.read_bytes().decode("utf-8", errors="replace")
+        with path.open("rb") as handle:
+            return handle.read(MAX_LAST_MESSAGE_BYTES + 1)
     except FileNotFoundError:
         return None
     except OSError as error:

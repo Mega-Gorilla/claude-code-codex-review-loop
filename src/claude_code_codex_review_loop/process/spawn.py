@@ -12,8 +12,9 @@ importして実装する。OS分岐は本module末尾のconditional import 1箇�
   前提）。Windowsで子がPython等の場合に必要な`SYSTEMROOT`等の基本変数も、呼び出し側が
   明示的に含める必要がある
 - stdout / stderrはfileへredirectし、pipeを作らない（deadlockとthread生成の回避、
-  別pane等からのlog観測のため）。stdinは常にDEVNULL（非対話。TUIへのキー入力注入は
-  行わない）
+  別pane等からのlog観測のため）。stdinは既定でDEVNULL（非対話。TUIへのキー入力注入は
+  行わない）。`stdin_path`指定時だけ既存fileを読取専用で開いて子のstdinにする（C-09の
+  prompt入力経路。ADR-0005 追補）
 - timeoutとgrace periodの既定値は持たない（既定値の解決はPhase 12のC-12設定解決）
 - 終了・停止の理由は型で区別し、出力文字列の部分一致で分類しない（P-003）
 """

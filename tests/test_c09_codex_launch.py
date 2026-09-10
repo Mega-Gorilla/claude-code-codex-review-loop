@@ -16,7 +16,15 @@ from pathlib import Path
 import pytest
 
 from claude_code_codex_review_loop.identity import create_private_dir
-from claude_code_codex_review_loop.process import Completed, SpawnError, SpawnSpec, StopMethod, StopResult, TimedOut
+from claude_code_codex_review_loop.process import (
+    Completed,
+    SpawnError,
+    SpawnSpec,
+    StopError,
+    StopMethod,
+    StopResult,
+    TimedOut,
+)
 from claude_code_codex_review_loop.runtime import codex_launch as module
 from claude_code_codex_review_loop.runtime.codex_canary import prepare_codex_canary_home
 from claude_code_codex_review_loop.runtime.codex_launch import (
@@ -57,6 +65,8 @@ class FakeReviewer:
         self.specs.append(spec)
         if self.scenario["raise"]:
             raise SpawnError("popen", "test")
+        if self.scenario.get("stop_error"):
+            raise StopError("close", "test")
         assert spec.stdin_path is not None and spec.stdout_path is not None and spec.stderr_path is not None
         self.seen_prompt = spec.stdin_path.read_text(encoding="utf-8")
         spec.stdout_path.write_text("", encoding="utf-8")
@@ -65,9 +75,11 @@ class FakeReviewer:
         if self.scenario["timeout"]:
             return TimedOut(stop_result=StopResult(method=StopMethod.FORCED, graceful_requested=True))
         last_message = self.scenario["last_message"]
-        if last_message is not None:
-            index = spec.argv.index("-o")
-            Path(spec.argv[index + 1]).write_bytes(str(last_message).encode("utf-8"))
+        output = Path(spec.argv[spec.argv.index("-o") + 1])
+        if self.scenario.get("last_message_dir"):
+            output.mkdir()
+        elif last_message is not None:
+            output.write_bytes(last_message if isinstance(last_message, bytes) else str(last_message).encode("utf-8"))
         return Completed(exit_code=int(str(self.scenario["exit_code"])))
 
 
@@ -151,7 +163,7 @@ class TestLaunchCodexReviewer:
     def test_preflight_then_spawn_with_prompt_on_stdin_and_last_message_file(self, fx: Fixture) -> None:
         result = fx.launch(prompt="please review\n")
         assert isinstance(result, ReviewerCompleted)
-        assert result.exit_code == 0 and result.last_message == "LGTM"
+        assert result.exit_code == 0 and result.last_message == b"LGTM"
         assert result.evidence == fx.evidence()
         assert result.diagnostic.text == "progress\n" and result.diagnostic.hits == ()
         assert fx.preflight_calls == 1 and fx.fake.seen_prompt == "please review\n"
@@ -179,8 +191,8 @@ class TestLaunchCodexReviewer:
 
     @pytest.mark.parametrize(
         "prompt",
-        ("", "   \n", "a\x00b", "x" * (MAX_PROMPT_BYTES + 1)),
-        ids=("empty", "blank", "nul", "too_large"),
+        ("", "   \n", "a\x00b", "x" * (MAX_PROMPT_BYTES + 1), "lone " + chr(0xD800), "escaped " + chr(0xDC80)),
+        ids=("empty", "blank", "nul", "too_large", "unpaired_high_surrogate", "unpaired_low_surrogate"),
     )
     def test_invalid_prompt_is_rejected_before_preflight(self, fx: Fixture, prompt: str) -> None:
         with pytest.raises(LaunchError) as stopped:
@@ -234,12 +246,41 @@ class TestLaunchCodexReviewer:
             fx.launch()
         assert stopped.value.stage == "diagnostic"
 
-    def test_unreadable_last_message_is_classified(self, fx: Fixture) -> None:
-        (fx.evidence_root / "last_message.txt").mkdir()
-        fx.fake.scenario["last_message"] = None
+    def test_preseeded_last_message_is_rejected_before_spawn(self, fx: Fixture) -> None:
+        """pre-seedされた古い出力を今回の結果として返さない。spawnもprompt fileも発生しない。"""
+        (fx.evidence_root / "last_message.txt").write_bytes(b"stale")
         with pytest.raises(LaunchError) as stopped:
             fx.launch()
         assert stopped.value.stage == "output"
+        assert fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
+
+    def test_unreadable_last_message_is_classified(self, fx: Fixture) -> None:
+        fx.fake.scenario["last_message_dir"] = True
+        with pytest.raises(LaunchError) as stopped:
+            fx.launch()
+        assert stopped.value.stage == "output"
+
+    def test_last_message_is_raw_bytes_without_decoding(self, fx: Fixture) -> None:
+        """不正UTF-8をそのまま搬送する。C-10のutf8 stageが原文で判定できる。"""
+        raw = b'{"verdict": "\xff\xfe broken"}'
+        fx.fake.scenario["last_message"] = raw
+        result = fx.launch()
+        assert isinstance(result, ReviewerCompleted) and result.last_message == raw
+
+    @pytest.mark.parametrize("extra", (0, 1, 50))
+    def test_last_message_read_is_bounded_at_limit_plus_one(self, fx: Fixture, extra: int) -> None:
+        limit = module.MAX_LAST_MESSAGE_BYTES
+        fx.fake.scenario["last_message"] = b"m" * (limit + extra)
+        result = fx.launch()
+        assert isinstance(result, ReviewerCompleted) and result.last_message is not None
+        assert len(result.last_message) == min(limit + extra, limit + 1)
+
+    def test_stop_failure_after_timeout_is_classified(self, fx: Fixture) -> None:
+        """C-03の`StopError`（native detailを持つ）をfacade外へ出さない。"""
+        fx.fake.scenario["stop_error"] = True
+        with pytest.raises(LaunchError) as stopped:
+            fx.launch()
+        assert stopped.value.stage == "stop"
 
     def test_real_spawn_path_feeds_stdin_through_c03(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
         """fakeを外し、interpreterをcodexとして起動する。`exec`をscriptとして開けず非0で終わる。"""

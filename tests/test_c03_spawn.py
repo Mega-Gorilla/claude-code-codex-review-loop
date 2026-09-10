@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """C-03 spawn契約の受入test。
 
-explicit env（継承なし）/ cwd / stdout・stderrのfile redirect / stdin=DEVNULL /
-argv検証（P-014）/ spawn失敗時に残骸（process・file handle）を残さないことを検証する。
+explicit env（継承なし）/ cwd / stdout・stderrのfile redirect / stdin（既定はDEVNULL、
+`stdin_path`指定時はfile入力）/ argv検証（P-014）/ spawn失敗時に残骸（process・file handle）を
+残さないことを検証する。
 """
 
 from __future__ import annotations
