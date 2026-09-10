@@ -44,8 +44,8 @@ _GOOD_DETAILS = {
     "network sandbox": "restricted",
     "denied-read restrictions": "true",
 }
-_GOOD_LINES = [f"{label}={outcome}" for label, outcome in EXPECTED_BOUNDARIES.items()]
-_CONTROL_LINES = [f"{label}={outcome}" for label, outcome in EXPECTED_CONTROL.items()]
+_GOOD_LINES = [*(f"{label}={outcome}" for label, outcome in EXPECTED_BOUNDARIES.items()), "cleanup=ok"]
+_CONTROL_LINES = [*(f"{label}={outcome}" for label, outcome in EXPECTED_CONTROL.items()), "cleanup=ok"]
 _INTERPRETER = os.fspath(Path(sys.executable).resolve())
 _PROBE_FILE = os.fspath(Path(sandbox_probe.__file__).resolve())
 
@@ -66,6 +66,8 @@ class FakeCodex:
             "raise_at": None,
             "timeout_at": None,
             "silent_at": None,
+            "residue_at": None,
+            "residue_dir_at": None,
         }
         self.specs: list[SpawnSpec] = []
 
@@ -85,6 +87,12 @@ class FakeCodex:
             return Completed(exit_code=0)
         assert spec.stdout_path is not None
         argv = spec.argv
+        sentinel = next((a for a in argv if a.startswith(".cc-review-probe-")), None)
+        if sentinel and self.scenario["residue_at"] == stage:
+            (spec.cwd / sentinel).write_text("left behind", encoding="utf-8")
+        if sentinel and self.scenario["residue_dir_at"] == stage:
+            (spec.cwd / sentinel).mkdir()
+            (spec.cwd / sentinel / "inner").write_text("blocks unlink", encoding="utf-8")
         if argv[1:] == ("--version",):
             spec.stdout_path.write_text(str(self.scenario["version"]), encoding="utf-8")
             return Completed(exit_code=int(str(self.scenario["version_exit"])))
@@ -198,15 +206,19 @@ class TestRunSandboxPreflight:
         version, doctor, control, probe = fx.fake.specs
         host, port = NETWORK_CONTROL_TARGET
         codex = os.fspath(fx.codex_executable)
+        sentinel = control.argv[-1]
+        assert sentinel.startswith(".cc-review-probe-") and len(sentinel) == len(".cc-review-probe-") + 32
         assert version.argv == (codex, "--version") and doctor.argv == (codex, "doctor", "--json")
         assert control.argv == (
             _INTERPRETER, _PROBE_FILE, os.fspath(fx.workspace), os.fspath(fx.home.config_path), host, str(port),
+            sentinel,
         )
         assert probe.argv == (
             codex, "sandbox", "-P", "c09-canary", "--include-managed-config", "-C", os.fspath(fx.workspace), "--",
             _INTERPRETER, _PROBE_FILE, os.fspath(fx.workspace), os.fspath(fx.home.config_path), host, str(port),
-            os.fspath(fx.real_repository), os.fspath(fx.state_root),
+            sentinel, os.fspath(fx.real_repository), os.fspath(fx.state_root),
         )
+        assert not any(path.name.startswith(".cc-review-probe-") for path in fx.workspace.iterdir())
         for spec in fx.fake.specs:
             assert spec.cwd == fx.workspace
             assert spec.env == {**fx.reviewer_env, "CODEX_HOME": os.fspath(fx.home.root)}
@@ -264,10 +276,16 @@ class TestRunSandboxPreflight:
             ({"doctor_raw": "[]"}, "doctor_output"),
             ({"control_exit": 1}, "control"),
             ({"control_lines": ["workspace_write=allowed", "garbage"]}, "control"),
-            ({"control_lines": [*_CONTROL_LINES[:-1], "network=denied"]}, "control_boundary"),
+            ({"control_lines": [*_CONTROL_LINES[:-2], "network=denied", "cleanup=ok"]}, "control_boundary"),
             ({"sandbox_exit": 1}, "sandbox_unavailable"),
             ({"probe_lines": ["workspace_write=allowed", "garbage"]}, "probe_unavailable"),
-            ({"probe_lines": [*_GOOD_LINES[:-1], "network=allowed"]}, "boundary"),
+            ({"probe_lines": [*_GOOD_LINES[:-2], "network=allowed", "cleanup=ok"]}, "boundary"),
+            ({"probe_lines": _GOOD_LINES[:-1]}, "probe_unavailable"),
+            ({"probe_lines": [*_GOOD_LINES[:-1], "cleanup=failed"]}, "probe_residue"),
+            ({"control_lines": [*_CONTROL_LINES[:-1], "cleanup=failed"]}, "probe_residue"),
+            ({"residue_at": "control"}, "probe_residue"),
+            ({"residue_at": "probe"}, "probe_residue"),
+            ({"residue_dir_at": "probe"}, "probe_residue"),
             ({"raise_at": "version"}, "version"),
             ({"timeout_at": "doctor"}, "doctor"),
             ({"silent_at": "probe"}, "probe"),
@@ -278,6 +296,9 @@ class TestRunSandboxPreflight:
         with pytest.raises(PreflightError) as stopped:
             fx.run()
         assert stopped.value.stage == stage
+        leftovers = [path for path in fx.workspace.iterdir() if path.name.startswith(".cc-review-probe-")]
+        # 残留fileはhost側で掃除される。directoryの残留はbest effortで残るが、停止理由は変わらない
+        assert leftovers == [] or "residue_dir_at" in overrides
 
     @pytest.mark.parametrize(
         ("overrides", "stage"),
@@ -359,8 +380,9 @@ class TestVerifyPreflightEvidence:
         ("overrides", "stage"),
         (
             ({"version": "codex-cli 0.0.1-fake"}, "evidence_mismatch"),
-            ({"probe_lines": [*_GOOD_LINES[:-1], "network=allowed"]}, "boundary"),
+            ({"probe_lines": [*_GOOD_LINES[:-2], "network=allowed", "cleanup=ok"]}, "boundary"),
             ({"sandbox_exit": 1}, "sandbox_unavailable"),
+            ({"probe_lines": [*_GOOD_LINES[:-1], "cleanup=failed"]}, "probe_residue"),
         ),
     )
     def test_reality_changed_after_measurement_is_rejected(
@@ -428,7 +450,7 @@ class TestSandboxProbe:
         listener.listen(1)
         port = listener.getsockname()[1]
         try:
-            outcomes = sandbox_probe.run_probe(workspace, blocked, "127.0.0.1", port, (blocked,))
+            outcomes = sandbox_probe.run_probe(workspace, blocked, "127.0.0.1", port, ".probe", (blocked,))
         finally:
             listener.close()
         assert outcomes == {
@@ -436,16 +458,59 @@ class TestSandboxProbe:
             "protected_write": "denied",
             "credential_read": "allowed",
             "network": "allowed",
+            "cleanup": "ok",
         }
         assert list(workspace.iterdir()) == []
-        outcomes = sandbox_probe.run_probe(blocked, tmp_path / "missing", "127.0.0.1", port, (workspace,))
+        outcomes = sandbox_probe.run_probe(blocked, tmp_path / "missing", "127.0.0.1", port, ".probe", (workspace,))
         assert outcomes == {
             "workspace_write": "denied",
             "protected_write": "allowed",
             "credential_read": "denied",
             "network": "denied",
+            "cleanup": "ok",
         }
-        assert sandbox_probe.run_probe(workspace, blocked, "127.0.0.1", port, ())["protected_write"] == "allowed"
+        no_roots = sandbox_probe.run_probe(workspace, blocked, "127.0.0.1", port, ".probe", ())
+        assert no_roots["protected_write"] == "allowed"
+
+    def test_successful_write_with_failed_cleanup_is_still_allowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """作成できた書込は削除に失敗しても`allowed`。cleanup失敗は別に報告し、`denied`へ反転しない。"""
+        protected = tmp_path / "protected"
+        protected.mkdir()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        original = Path.unlink
+
+        def refuse_protected(self: Path, missing_ok: bool = False) -> None:
+            if self.parent == protected:
+                raise PermissionError("delete denied")
+            original(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", refuse_protected)
+        outcomes = sandbox_probe.run_probe(workspace, tmp_path / "missing", "127.0.0.1", 1, ".probe", (protected,))
+        assert outcomes["protected_write"] == "allowed"
+        assert outcomes["cleanup"] == "failed"
+        assert (protected / ".probe").exists()
+        assert list(workspace.iterdir()) == []
+
+    def test_successful_connection_with_failed_close_is_still_allowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        original_close = socket.socket.close
+
+        def failing_close(self: socket.socket) -> None:
+            if self is not listener:
+                raise OSError("close failed")
+            original_close(self)
+
+        monkeypatch.setattr(socket.socket, "close", failing_close)
+        try:
+            assert sandbox_probe._attempt(lambda: sandbox_probe._connect("127.0.0.1", port)) == "allowed"
+        finally:
+            listener.close()
 
     def test_main_prints_labels_or_usage(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         assert sandbox_probe.main([]) == 0
@@ -453,8 +518,11 @@ class TestSandboxProbe:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         assert sandbox_probe.main([os.fspath(workspace), os.fspath(tmp_path / "missing"), "127.0.0.1", "1"]) == 0
+        assert capsys.readouterr().out == "usage=error\n"
+        arguments = [os.fspath(workspace), os.fspath(tmp_path / "missing"), "127.0.0.1", "1", ".probe"]
+        assert sandbox_probe.main(arguments) == 0
         lines = capsys.readouterr().out.splitlines()
-        assert [line.split("=")[0] for line in lines] == list(sandbox_probe.PROBE_LABELS)
+        assert [line.split("=")[0] for line in lines] == [*sandbox_probe.PROBE_LABELS, "cleanup"]
 
     def test_default_probe_command_runs_standalone(self, tmp_path: Path) -> None:
         command = sandbox_probe.default_probe_command()
@@ -462,7 +530,7 @@ class TestSandboxProbe:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         completed = subprocess.run(
-            [*command, os.fspath(workspace), os.fspath(tmp_path / "missing"), "127.0.0.1", "1"],
+            [*command, os.fspath(workspace), os.fspath(tmp_path / "missing"), "127.0.0.1", "1", ".probe"],
             capture_output=True,
             text=True,
             check=False,

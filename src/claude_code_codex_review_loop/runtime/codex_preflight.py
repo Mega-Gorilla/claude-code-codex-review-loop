@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,14 +45,14 @@ from .codex_canary import (
     CodexCanaryInvocation,
     build_codex_canary_invocation,
 )
-from .sandbox_probe import PROBE_LABELS
+from .sandbox_probe import CLEANUP_LABEL, PROBE_LABELS
 
 # sandboxの外で同じprobeが到達できることを先に確かめる接続先。reviewerが到達して
 # はならない先（AC-C09-05）をそのまま使う。TCP handshakeだけで、requestは送らない。
 NETWORK_CONTROL_TARGET: Final[tuple[str, int]] = ("api.github.com", 443)
 # `sandbox_probe.py`の内容（改行をLFへ正規化）のSHA-256。probeを変更したら更新し、
 # testが実fileと一致することを固定する。一致しなければprobeを信頼せず起動しない。
-PROBE_DIGEST: Final = "fb93b9903b24d9df3d6e4395b4d5e199c12efaf736e02d2c5f5aa9f5ee49e69f"
+PROBE_DIGEST: Final = "ba4b0262cca6b4698ee4cc13b8c8da8732cab09458569bef5c3d61c1979b04e4"
 
 EXPECTED_BOUNDARIES: Final[Mapping[str, str]] = {
     "workspace_write": "allowed",
@@ -128,8 +129,11 @@ def run_sandbox_preflight(
     version = _read_version(runner, executable)
     effective = _read_effective_config(runner, executable, home)
     probe = _canonical_probe()
-    control = _run_control(runner, probe, home)
-    boundaries = _probe_boundaries(runner, executable, probe, home)
+    # sentinelは1測定ごとに払い出す一意なfile名。probeの書込先をhost側で残留確認するために使い、
+    # 再測定で値が変わるためevidenceには含めない。
+    sentinel = f".cc-review-probe-{uuid.uuid4().hex}"
+    control = _run_control(runner, probe, home, sentinel)
+    boundaries = _probe_boundaries(runner, executable, probe, home, sentinel)
     return PreflightEvidence(
         codex_executable=executable,
         codex_version=version,
@@ -281,61 +285,110 @@ def _canonical_probe() -> tuple[str, str]:
     return (str(interpreter), str(source))
 
 
-def _probe_arguments(home: CodexCanaryHome, protected: tuple[Path, ...]) -> tuple[str, ...]:
+def _probe_arguments(home: CodexCanaryHome, protected: tuple[Path, ...], sentinel: str) -> tuple[str, ...]:
     host, port = NETWORK_CONTROL_TARGET
-    return (str(home.workspace_root), str(home.config_path), host, str(port), *(str(path) for path in protected))
+    return (
+        str(home.workspace_root),
+        str(home.config_path),
+        host,
+        str(port),
+        sentinel,
+        *(str(path) for path in protected),
+    )
 
 
-def _run_control(runner: _Runner, probe: tuple[str, str], home: CodexCanaryHome) -> Mapping[str, str]:
+def _run_control(runner: _Runner, probe: tuple[str, str], home: CodexCanaryHome, sentinel: str) -> Mapping[str, str]:
     """sandboxの外で同じprobeを実行し、書込・読取・接続が通ることを確かめる。
 
     protected rootは渡さない。実repositoryへは一時fileであっても書かず、この確認で
     証明するのは「probeが動き、接続先へ到達できる」ことである。
     """
-    exit_code, text = runner.output("control", (*probe, *_probe_arguments(home, ())))
-    if exit_code != 0:
-        raise PreflightError("control")
-    observed = _parse_probe(text, "control")
+    argv = (*probe, *_probe_arguments(home, (), sentinel))
+    observed = _probe_stage(runner, "control", argv, home, sentinel, exit_stage="control", missing_stage="control")
     if observed != dict(EXPECTED_CONTROL):
         raise PreflightError("control_boundary")
     return observed
 
 
 def _probe_boundaries(
-    runner: _Runner, executable: str, probe: tuple[str, str], home: CodexCanaryHome
+    runner: _Runner, executable: str, probe: tuple[str, str], home: CodexCanaryHome, sentinel: str
 ) -> Mapping[str, str]:
-    exit_code, text = runner.output(
-        "probe",
-        (
-            executable,
-            "sandbox",
-            "-P",
-            PROFILE_NAME,
-            "--include-managed-config",
-            "-C",
-            str(home.workspace_root),
-            "--",
-            *probe,
-            *_probe_arguments(home, home.protected_roots[:-1]),
-        ),
+    argv = (
+        executable,
+        "sandbox",
+        "-P",
+        PROFILE_NAME,
+        "--include-managed-config",
+        "-C",
+        str(home.workspace_root),
+        "--",
+        *probe,
+        *_probe_arguments(home, home.protected_roots[:-1], sentinel),
     )
-    if exit_code != 0:
-        raise PreflightError("sandbox_unavailable")
-    observed = _parse_probe(text, "probe_unavailable")
+    observed = _probe_stage(
+        runner, "probe", argv, home, sentinel, exit_stage="sandbox_unavailable", missing_stage="probe_unavailable"
+    )
     if observed != dict(EXPECTED_BOUNDARIES):
         raise PreflightError("boundary")
     return observed
 
 
-def _parse_probe(text: str, missing_stage: str) -> dict[str, str]:
+def _probe_stage(
+    runner: _Runner,
+    stage: str,
+    argv: tuple[str, ...],
+    home: CodexCanaryHome,
+    sentinel: str,
+    *,
+    exit_stage: str,
+    missing_stage: str,
+) -> dict[str, str]:
+    """probeを1回実行し、host側で残留を掃除・検出してから結果を読む。
+
+    probeの書込が成功して削除だけ失敗した場合、probeは境界を`allowed`と報告しつつ
+    `cleanup=failed`を返す。facadeはhost側の残留とcleanup失敗のどちらでも`probe_residue`で
+    停止する。残留の掃除はbest effortで、失敗しても停止理由を置き換えない。
+    """
+    try:
+        exit_code, text = runner.output(stage, argv)
+    finally:
+        residue = _sweep_residue(home, sentinel)
+    if residue:
+        raise PreflightError("probe_residue")
+    if exit_code != 0:
+        raise PreflightError(exit_stage)
+    observed, cleanup = _parse_probe(text, missing_stage)
+    if cleanup != "ok":
+        raise PreflightError("probe_residue")
+    return observed
+
+
+def _sweep_residue(home: CodexCanaryHome, sentinel: str) -> bool:
+    """probeのsentinelがworkspace / protected rootに残っていれば掃除し、残留の有無を返す。"""
+    found = False
+    for root in (home.workspace_root, *home.protected_roots[:-1]):
+        target = root / sentinel
+        if target.exists():
+            found = True
+            try:
+                target.unlink()
+            except OSError:
+                pass
+    return found
+
+
+def _parse_probe(text: str, missing_stage: str) -> tuple[dict[str, str], str]:
     observed: dict[str, str] = {}
+    cleanup: str | None = None
     for line in text.splitlines():
         label, separator, outcome = line.strip().partition("=")
         if separator and label in PROBE_LABELS and outcome in {"allowed", "denied"}:
             observed[label] = outcome
-    if set(observed) != set(PROBE_LABELS):
+        elif separator and label == CLEANUP_LABEL and outcome in {"ok", "failed"}:
+            cleanup = outcome
+    if set(observed) != set(PROBE_LABELS) or cleanup is None:
         raise PreflightError(missing_stage)
-    return observed
+    return observed, cleanup
 
 
 def _effective_fields(effective: EffectiveSandbox) -> dict[str, str]:
