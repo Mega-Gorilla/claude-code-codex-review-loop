@@ -51,6 +51,7 @@ class TestPrepareCodexCanaryHome:
         profile = config["permissions"]["c09-canary"]
         filesystem = profile["filesystem"]
         assert config["default_permissions"] == "c09-canary"
+        assert config["approval_policy"] == "never"
         assert profile["extends"] == ":workspace"
         assert filesystem[":root"] == "deny"
         assert filesystem[":minimal"] == "read"
@@ -153,6 +154,7 @@ class TestCodexCanaryInvocation:
             os.fspath(Path(sys.executable).resolve()), "exec", "--ephemeral", "--ignore-rules", "-C",
             os.fspath(home.workspace_root), "-",
         )
+        assert "-a" not in invocation.argv and "--ask-for-approval" not in invocation.argv
         assert "--ignore-user-config" not in invocation.argv
         assert "--sandbox" not in invocation.argv
         assert "-c" not in invocation.argv
@@ -211,6 +213,7 @@ class TestCodexCanaryInvocation:
         """強制可否の実測evidenceはprocess facadeの責務であり、builderは呼出側の申告を受け取らない。"""
         parameters = inspect.signature(build_codex_canary_invocation).parameters
         assert set(parameters) == {"home", "codex_executable", "reviewer_env"}
+        assert parameters["codex_executable"].annotation == "Path"
         assert not [name for name in dir(module) if "capability" in name.lower()]
 
 
