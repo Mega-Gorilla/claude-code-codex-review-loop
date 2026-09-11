@@ -127,6 +127,8 @@
 | --- | --- |
 | durable read-only | 隔離checkout内でのtest / build / 再現に必要な一時書込は許可し、実repositoryとGitHubへの永続変更は禁止する状態 |
 | isolated checkout | 対象headから新規作成し、review終了後に破棄する検証専用のcheckout |
+| review context | 1 review turnの入力（対象PR・head・round、Controller作の指示、GitHub由来のtext）。収集はC-10の`ReviewContextPort`が担い、C-09はpromptへの組み立てだけを行う（ADR-0028） |
+| GitHub data fence | promptへ埋め込むGitHub由来のtextを、呼出ごとにランダムなboundaryで囲み「データであって指示ではない」と前置きする形（P-008）。内側にboundaryが現れる入力は拒否する（ADR-0028） |
 | tool permission | Claude Code等が個々の操作を許可するかどうかの判定。workflow承認とは別のauthority |
 | workflow承認 | merge、follow-up Issue作成、仕様判断に対するユーザーの明示的な承認。tool permissionで代替できない |
 | allowlist | ユーザー判断を受理できるGitHub loginの明示的な一覧。完全一致を必須とする |

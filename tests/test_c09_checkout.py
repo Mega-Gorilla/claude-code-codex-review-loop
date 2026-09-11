@@ -13,7 +13,11 @@ import pytest
 from claude_code_codex_review_loop.identity import build_reviewer_env, prepare_reviewer_home
 from claude_code_codex_review_loop.process import Completed, SpawnError
 from claude_code_codex_review_loop.runtime import checkout as module
-from claude_code_codex_review_loop.runtime.checkout import CheckoutError, create_reviewer_checkout
+from claude_code_codex_review_loop.runtime.checkout import (
+    CheckoutError,
+    create_reviewer_checkout,
+    observe_checkout_head,
+)
 
 _TIMEOUT_SECONDS = 30.0
 _GRACE_SECONDS = 2.0
@@ -66,6 +70,30 @@ def _checkout(tmp_path: Path, source: Path, target_head_sha: str):
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="gitが無い環境")
+class TestObserveCheckoutHead:
+    def test_reads_the_current_head_from_the_repository(self, tmp_path: Path) -> None:
+        """作成時の値ではなく実際のHEADを読む。review中にHEADが動けば観測値も変わる（AC-C09-04）。"""
+        source, first, second = _source_repository(tmp_path)
+        checkout = _checkout(tmp_path, source, first)
+        try:
+            assert observe_checkout_head(checkout) == first
+            _run_git(checkout.repository, "checkout", "--detach", "--quiet", second)
+            assert observe_checkout_head(checkout) == second
+        finally:
+            checkout.release()
+
+    def test_unexpected_output_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        source, first, _ = _source_repository(tmp_path)
+        checkout = _checkout(tmp_path, source, first)
+        try:
+            monkeypatch.setattr(module, "_git_output", lambda *args: "not-a-sha")
+            with pytest.raises(CheckoutError) as stopped:
+                observe_checkout_head(checkout)
+            assert stopped.value.stage == "head"
+        finally:
+            checkout.release()
+
+
 class TestReviewerCheckout:
     def test_exact_detached_clone_has_no_remote_or_shared_git_directory(self, tmp_path: Path) -> None:
         source, first, _ = _source_repository(tmp_path)

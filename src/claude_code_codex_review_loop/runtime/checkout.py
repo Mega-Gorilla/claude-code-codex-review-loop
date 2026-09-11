@@ -120,6 +120,18 @@ def _validate_inputs(parent: Path, source_repository: Path, target_head_sha: str
         raise CheckoutError("git_command")
 
 
+def observe_checkout_head(checkout: ReviewerCheckout) -> str:
+    """隔離checkoutの現在のHEAD（40桁のGit object ID）を観測する（AC-C09-04の照合元）。
+
+    review後にHEADが動いていないかを、作成時の`target_head_sha`ではなく実際のrepositoryから読む。
+    形式が不正な出力は`head`で停止する。
+    """
+    observed = _git_output(checkout, "observe_head", "-C", str(checkout.repository), "rev-parse", "HEAD")
+    if _GIT_SHA1_OBJECT_ID.fullmatch(observed) is None:
+        raise CheckoutError("head")
+    return observed
+
+
 def _git_output(checkout: ReviewerCheckout, stage: str, *arguments: str) -> str:
     """gitをexplicit envで実行し、成功時だけUTF-8出力を返す。"""
     ensure_argv_allowed((*checkout.git_command, *arguments))
