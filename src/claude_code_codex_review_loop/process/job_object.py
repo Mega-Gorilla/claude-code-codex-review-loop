@@ -30,7 +30,17 @@ import uuid
 from ctypes import wintypes
 from typing import IO
 
-from .spawn import JobObjectRef, SpawnError, SpawnSpec, StopError, StopMethod, StopResult, TreeRef, _open_output
+from .spawn import (
+    JobObjectRef,
+    SpawnError,
+    SpawnSpec,
+    StopError,
+    StopMethod,
+    StopResult,
+    TreeRef,
+    _open_input,
+    _open_output,
+)
 
 _CREATE_SUSPENDED = 0x00000004
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
@@ -378,11 +388,14 @@ def spawn_tree(spec: SpawnSpec) -> WindowsTreeHandle:
         stderr = _open_output(spec.stderr_path)
         if stderr is not None:
             files.append(stderr)
+        stdin = _open_input(spec.stdin_path)
+        if stdin is not None:
+            files.append(stdin)
         popen = subprocess.Popen(
             list(spec.argv),
             cwd=str(spec.cwd),
             env=dict(spec.env),
-            stdin=subprocess.DEVNULL,
+            stdin=stdin if stdin is not None else subprocess.DEVNULL,
             stdout=stdout if stdout is not None else subprocess.DEVNULL,
             stderr=stderr if stderr is not None else subprocess.DEVNULL,
             creationflags=_CREATE_SUSPENDED | subprocess.CREATE_NEW_PROCESS_GROUP,

@@ -12,8 +12,9 @@ importして実装する。OS分岐は本module末尾のconditional import 1箇�
   前提）。Windowsで子がPython等の場合に必要な`SYSTEMROOT`等の基本変数も、呼び出し側が
   明示的に含める必要がある
 - stdout / stderrはfileへredirectし、pipeを作らない（deadlockとthread生成の回避、
-  別pane等からのlog観測のため）。stdinは常にDEVNULL（非対話。TUIへのキー入力注入は
-  行わない）
+  別pane等からのlog観測のため）。stdinは既定でDEVNULL（非対話。TUIへのキー入力注入は
+  行わない）。`stdin_path`指定時だけ既存fileを読取専用で開いて子のstdinにする（C-09の
+  prompt入力経路。ADR-0005 追補）
 - timeoutとgrace periodの既定値は持たない（既定値の解決はPhase 12のC-12設定解決）
 - 終了・停止の理由は型で区別し、出力文字列の部分一致で分類しない（P-003）
 """
@@ -128,6 +129,8 @@ class SpawnSpec:
     - cwd: 子の作業directory
     - env: 子へ渡す環境変数の全体（継承しない）
     - stdout_path / stderr_path: Noneの場合はDEVNULL。fileは0o600相当で作成する
+    - stdin_path: Noneの場合はDEVNULL。指定時は既存fileを読取専用で開いて子のstdinにする
+      （C-09がpromptをargvに載せずに渡すための入力経路。ADR-0005 追補）
     """
 
     argv: tuple[str, ...]
@@ -135,6 +138,7 @@ class SpawnSpec:
     env: Mapping[str, str]
     stdout_path: Path | None = None
     stderr_path: Path | None = None
+    stdin_path: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.argv:
@@ -142,8 +146,10 @@ class SpawnSpec:
         for index, argument in enumerate(self.argv):
             if not isinstance(argument, str) or not argument:
                 raise SpawnError("validate", f"argv[{index}]が空、または文字列でない")
-        if self.stdout_path is not None and self.stdout_path == self.stderr_path:
-            raise SpawnError("validate", "stdout_pathとstderr_pathへ同一pathは指定できない")
+        if _same_entity(self.stdout_path, self.stderr_path):
+            raise SpawnError("validate", "stdout_pathとstderr_pathへ同一のfileは指定できない")
+        if _same_entity(self.stdin_path, self.stdout_path) or _same_entity(self.stdin_path, self.stderr_path):
+            raise SpawnError("validate", "stdin_pathへredirect先と同一のfileは指定できない")
 
 
 class TreeHandle(Protocol):
@@ -176,6 +182,28 @@ class TreeHandle(Protocol):
         """安全網の強制停止とOS resource（handle / file）の解放。冪等。"""
 
 
+def _same_entity(first: Path | None, second: Path | None) -> bool:
+    """字句上の一致だけでなく、symlink・hard linkによる同一file実体の別名も同一とみなす。
+
+    redirect先は`wb`で開く（truncate）ため、stdin fileの別名を渡すと起動前に内容を失う。
+    symlinkはresolveで、hard linkはsamefile（両方が存在する場合）で検出する。
+    """
+    if first is None or second is None:
+        return False
+    if first == second:
+        return True
+    try:
+        if first.resolve() == second.resolve():
+            return True
+        return os.path.samefile(first, second)
+    except FileNotFoundError:
+        # どちらかが未作成なら実体は共有していない（redirect先は起動時に作る）
+        return False
+    except (OSError, RuntimeError) as exc:
+        # 権限やsymlink loop等で同一性を判定できない場合は許可せず停止する（fail closed）
+        raise SpawnError("validate", f"redirect先とstdinの同一性を判定できない: {type(exc).__name__}") from exc
+
+
 def _open_output(path: Path | None) -> IO[bytes] | None:
     """redirect先fileを作成者のみ読書き可能な権限で開く。Noneの場合はDEVNULLを意味する。"""
     if path is None:
@@ -185,6 +213,13 @@ def _open_output(path: Path | None) -> IO[bytes] | None:
         return os.open(target, flags, 0o600)
 
     return open(path, "wb", opener=_opener)
+
+
+def _open_input(path: Path | None) -> IO[bytes] | None:
+    """stdinへ流す既存fileを読取専用で開く。Noneの場合はDEVNULLを意味する。"""
+    if path is None:
+        return None
+    return open(path, "rb")
 
 
 if sys.platform == "win32":  # pragma: no cover - OS dispatch(単一分岐点。各backendは自OSのCIで検証する)

@@ -35,7 +35,7 @@ from typing import Final
 
 from ..identity.fs_permissions import FsPermissionError, verify_private_dir
 from ..policy.permission_profile import ensure_argv_allowed
-from ..process import Completed, SpawnError, SpawnSpec, run_tree
+from ..process import Completed, SpawnError, SpawnSpec, StopError, run_tree
 from ..schema.projection import canonical_json
 from . import sandbox_probe
 from .codex_canary import (
@@ -196,7 +196,8 @@ class _Runner:
         spec = SpawnSpec(argv=argv, cwd=self.workspace, env=self.env, stdout_path=stdout_path, stderr_path=stderr_path)
         try:
             outcome = run_tree(spec, timeout_seconds=self.timeout_seconds, grace_seconds=self.grace_seconds)
-        except SpawnError as error:
+        except (SpawnError, StopError) as error:
+            # 起動失敗も、timeout後の停止失敗も、C-03のnative detailを持つ型を外へ出さない
             raise PreflightError(stage) from error
         if not isinstance(outcome, Completed):
             raise PreflightError(stage)

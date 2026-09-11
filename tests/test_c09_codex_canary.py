@@ -159,6 +159,43 @@ class TestCodexCanaryInvocation:
         assert "--sandbox" not in invocation.argv
         assert "-c" not in invocation.argv
 
+    def test_last_message_path_adds_output_option_before_the_stdin_marker(self, tmp_path: Path) -> None:
+        home = _home(tmp_path)
+        evidence = (tmp_path / "evidence").resolve()
+        evidence.mkdir()
+        invocation = build_codex_canary_invocation(
+            home=home,
+            codex_executable=Path(sys.executable).resolve(),
+            reviewer_env={},
+            last_message_path=evidence / "last_message.txt",
+        )
+        assert invocation.argv[-3:] == ("-o", os.fspath(evidence / "last_message.txt"), "-")
+
+    @pytest.mark.parametrize("kind", ("relative", "missing_parent", "inside_workspace", "inside_home", "symlink"))
+    def test_invalid_last_message_path_is_rejected(self, tmp_path: Path, kind: str) -> None:
+        home = _home(tmp_path)
+        symlink = (tmp_path / "link.txt").resolve()
+        if kind == "symlink":
+            try:
+                symlink.symlink_to(tmp_path / "missing-target.txt")
+            except OSError:
+                pytest.skip("symlinkを作成できない環境")
+        candidates = {
+            "relative": Path("relative.txt"),
+            "missing_parent": (tmp_path / "missing" / "last.txt").resolve(),
+            "inside_workspace": home.workspace_root / "last.txt",
+            "inside_home": home.root / "last.txt",
+            "symlink": symlink,
+        }
+        with pytest.raises(CanaryError) as stopped:
+            build_codex_canary_invocation(
+                home=home,
+                codex_executable=Path(sys.executable).resolve(),
+                reviewer_env={},
+                last_message_path=candidates[kind],
+            )
+        assert stopped.value.stage == "output"
+
     def test_modified_configuration_fails_closed(self, tmp_path: Path) -> None:
         home = _home(tmp_path)
         home.config_path.write_text("modified", encoding="utf-8")
@@ -212,7 +249,7 @@ class TestCodexCanaryInvocation:
     def test_builder_takes_no_sandbox_enforcement_claim(self) -> None:
         """強制可否の実測evidenceはprocess facadeの責務であり、builderは呼出側の申告を受け取らない。"""
         parameters = inspect.signature(build_codex_canary_invocation).parameters
-        assert set(parameters) == {"home", "codex_executable", "reviewer_env"}
+        assert set(parameters) == {"home", "codex_executable", "reviewer_env", "last_message_path"}
         assert parameters["codex_executable"].annotation == "Path"
         assert not [name for name in dir(module) if "capability" in name.lower()]
 

@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from claude_code_codex_review_loop.identity import create_private_dir
-from claude_code_codex_review_loop.process import Completed, SpawnError, SpawnSpec
+from claude_code_codex_review_loop.process import Completed, SpawnError, SpawnSpec, StopError
 from claude_code_codex_review_loop.process import run_tree as real_run_tree
 from claude_code_codex_review_loop.runtime import codex_preflight as module
 from claude_code_codex_review_loop.runtime import sandbox_probe
@@ -81,6 +81,8 @@ class FakeCodex:
         stage = spec.stdout_path.name.removesuffix(".stdout") if spec.stdout_path else ""
         if self.scenario["raise_at"] == stage:
             raise SpawnError("spawn", "test")
+        if self.scenario.get("stop_at") == stage:
+            raise StopError("close", "test")
         if self.scenario["timeout_at"] == stage:
             return object()
         if self.scenario["silent_at"] == stage:
@@ -287,6 +289,7 @@ class TestRunSandboxPreflight:
             ({"residue_at": "probe"}, "probe_residue"),
             ({"residue_dir_at": "probe"}, "probe_residue"),
             ({"raise_at": "version"}, "version"),
+            ({"stop_at": "probe"}, "probe"),
             ({"timeout_at": "doctor"}, "doctor"),
             ({"silent_at": "probe"}, "probe"),
         ),

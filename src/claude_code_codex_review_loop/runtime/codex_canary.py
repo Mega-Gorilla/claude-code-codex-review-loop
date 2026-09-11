@@ -104,6 +104,7 @@ def build_codex_canary_invocation(
     home: CodexCanaryHome,
     codex_executable: Path,
     reviewer_env: Mapping[str, str],
+    last_message_path: Path | None = None,
 ) -> CodexCanaryInvocation:
     """専用configを読む最小の`codex exec` argvを構築する。
 
@@ -112,10 +113,16 @@ def build_codex_canary_invocation(
     このAPIに持たせず、promptは次段のprocess facadeがstdinで渡す。実行fileは
     canonicalな1 fileだけを受け取り、`exec`より前へoptionを挿入できる形にしない
     （ADR-0027 決定9）。testはC-03の`run_tree`を差し替える。
+
+    `last_message_path`を渡すと`-o <file>`を加え、最終messageをそのfileへ書かせる（起動facadeが
+    evidence root配下の私有fileを指定する）。workspaceと`CODEX_HOME`の配下は拒否する。
     """
     _verify_home(home)
     executable = _canonical_file(codex_executable, "executable")
     env = _build_environment(reviewer_env, home)
+    output: tuple[str, ...] = ()
+    if last_message_path is not None:
+        output = ("-o", str(_canonical_output(last_message_path, home)))
     argv = (
         str(executable),
         "exec",
@@ -123,6 +130,7 @@ def build_codex_canary_invocation(
         "--ignore-rules",
         "-C",
         str(home.workspace_root),
+        *output,
         "-",
     )
     ensure_argv_allowed(argv)
@@ -159,6 +167,22 @@ def _canonical_directory(path: Path, stage: str) -> Path:
     candidate = Path(path)
     if not candidate.is_absolute() or candidate != candidate.resolve() or not candidate.is_dir():
         raise CanaryError(stage)
+    return candidate
+
+
+def _canonical_output(path: Path, home: CodexCanaryHome) -> Path:
+    """最終messageの出力先の検証。
+
+    絶対pathで、親が実在し、path自体がsymlinkでなく（辿られるとroot外へ書き得る）、
+    workspaceにも`CODEX_HOME`にも含まれないこと。
+    """
+    candidate = Path(path)
+    parent = candidate.parent
+    if not candidate.is_absolute() or parent != parent.resolve() or not parent.is_dir() or candidate.is_symlink():
+        raise CanaryError("output")
+    for other in (home.workspace_root, home.root):
+        if candidate.is_relative_to(other):
+            raise CanaryError("output")
     return candidate
 
 
