@@ -190,6 +190,23 @@ class TestSpecValidation:
         assert excinfo.value.stage == "validate"
         assert prompt.read_text(encoding="utf-8") == "keep me"
 
+    def test_resolved_alias_of_stdin_is_rejected_without_symlink_privilege(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """symlinkを作れない環境でも、resolveが同一pathへ収束する別名を拒否する経路を固定する。"""
+        prompt = tmp_path / "prompt.txt"
+        prompt.write_text("keep me", encoding="utf-8")
+        alias = tmp_path / "alias.txt"
+        original_resolve = Path.resolve
+
+        def collapse(self: Path, *args: object, **kwargs: object) -> Path:
+            return original_resolve(prompt if self == alias else self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", collapse)
+        with pytest.raises(SpawnError) as excinfo:
+            SpawnSpec(argv=(sys.executable,), cwd=tmp_path, env={}, stdin_path=prompt, stdout_path=alias)
+        assert excinfo.value.stage == "validate"
+
     def test_symlink_alias_of_stdin_is_rejected(self, tmp_path: Path) -> None:
         prompt = tmp_path / "prompt.txt"
         prompt.write_text("keep me", encoding="utf-8")
