@@ -39,10 +39,12 @@ from claude_code_codex_review_loop.runtime.head_binding import HeadMismatch, Hea
 from claude_code_codex_review_loop.runtime.ports import PortUnavailableError
 from claude_code_codex_review_loop.runtime.review_prompt import GitHubText, ReviewContext
 from claude_code_codex_review_loop.runtime.reviewer_turn import (
+    AdvertisedHeadPort,
     ReportHeadPort,
     ReviewerTurn,
     ReviewerTurnRequest,
     TurnError,
+    UnavailableAdvertisedHead,
     UnavailableReportHead,
     run_reviewer_turn,
 )
@@ -102,6 +104,18 @@ class ReportHeadFromMessage:
             return None
         found = _SHA.search(last_message.decode("utf-8", "replace"))
         return found.group(0) if found else None
+
+
+class AdvertisedHeadSequence:
+    """呼出ごとに与えた値を順に返すfake port（最後の値を繰り返す）。呼出の引数も記録する。"""
+
+    def __init__(self, *heads: str) -> None:
+        self.heads = list(heads)
+        self.calls: list[tuple[str, int]] = []
+
+    def advertised_head(self, *, repository: str, number: int) -> str:
+        self.calls.append((repository, number))
+        return self.heads.pop(0) if len(self.heads) > 1 else self.heads[0]
 
 
 class FakeLaunch:
@@ -178,8 +192,18 @@ class Fixture:
         values.update(overrides)
         return ReviewerTurnRequest(**values)  # type: ignore[arg-type]
 
-    def run(self, report_head: ReportHeadPort | None = None, **overrides: object) -> ReviewerTurn:
-        return run_reviewer_turn(self.request(**overrides), report_head=report_head or ReportHeadFromMessage())
+    def run(
+        self,
+        report_head: ReportHeadPort | None = None,
+        advertised: AdvertisedHeadPort | None = None,
+        **overrides: object,
+    ) -> ReviewerTurn:
+        self.advertised = advertised or AdvertisedHeadSequence(self.first)
+        return run_reviewer_turn(
+            self.request(**overrides),
+            report_head=report_head or ReportHeadFromMessage(),
+            advertised_head=self.advertised,
+        )
 
     def leftover_checkouts(self) -> list[Path]:
         return [path for path in self.run_root.iterdir() if path.name.startswith("reviewer-checkout-")]
@@ -206,6 +230,9 @@ class TestRunReviewerTurn:
     def test_composes_the_parts_in_fixed_order_and_binds_the_head(self, fx: Fixture) -> None:
         turn = fx.run()
         assert turn.binding == HeadsBound(fx.first) and turn.observed_head == fx.first
+        assert turn.advertised_head_after == fx.first
+        # advertised headはreview終了後（投稿判断の直前）にGitHubから取り直す
+        assert fx.advertised.calls == [("octo/repo", 12)]  # type: ignore[attr-defined]
         assert turn.release.dirty is False and turn.provisioning is None
         assert len(turn.prompt_boundary) == 32 and turn.redaction_hits == 0
         assert isinstance(turn.launch, ReviewerCompleted)
@@ -290,6 +317,25 @@ class TestRunReviewerTurn:
         assert turn.observed_head == fx.second
         assert isinstance(turn.binding, HeadMismatch) and turn.binding.checkout_head == fx.second
         assert turn.binding.reasons == ("advertised_moved",)
+
+    def test_push_to_the_pull_request_during_review_is_detected(self, fx: Fixture) -> None:
+        """AC-C09-04: review中にPRへpushされると、checkoutとreportが一致してもadvertised headが動いている。"""
+        turn = fx.run(advertised=AdvertisedHeadSequence(fx.second))
+        assert turn.observed_head == fx.first and turn.advertised_head_after == fx.second
+        assert isinstance(turn.binding, HeadMismatch) and turn.binding.reasons == ("advertised_moved",)
+        assert turn.binding.advertised_head == fx.second and fx.leftover_checkouts() == []
+
+    def test_advertised_head_is_read_after_the_review_not_before(self, fx: Fixture) -> None:
+        """portの読取は起動の後。起動中にportの値がold→newへ変われば、newで照合する。"""
+        port = AdvertisedHeadSequence(fx.first)
+
+        def push(kwargs: dict[str, object]) -> None:
+            assert port.calls == []
+            port.heads = [fx.second]
+
+        fx.launch.on_launch = push
+        turn = fx.run(advertised=port)
+        assert isinstance(turn.binding, HeadMismatch) and turn.binding.reasons == ("advertised_moved",)
 
     def test_report_that_names_another_head_is_a_mismatch(self, fx: Fixture) -> None:
         class Other:
@@ -380,9 +426,37 @@ class TestFailClosed:
             fx.run(report_head=port)
         assert fx.leftover_checkouts() == []
 
+    def test_advertised_head_port_is_fail_closed_until_c10(self, fx: Fixture) -> None:
+        port: AdvertisedHeadPort = UnavailableAdvertisedHead()
+        with pytest.raises(PortUnavailableError):
+            fx.run(advertised=port)
+        assert fx.leftover_checkouts() == []
+
+    @pytest.mark.parametrize("kind", ("equals_state_root", "inside_source", "contains_state_root"))
+    def test_run_root_overlapping_a_protected_root_is_rejected_before_anything_is_created(
+        self, fx: Fixture, kind: str
+    ) -> None:
+        """保護対象と重なるrun_rootは、reviewer homeやcheckoutを作る前に拒否し、保護対象を変えない。"""
+        if kind == "equals_state_root":
+            run_root = fx.state_root
+        elif kind == "inside_source":
+            run_root = fx.source / "run"
+        else:
+            run_root = fx.state_root.parent
+        create_private_dir(run_root) if not run_root.exists() else None
+        before = {
+            root: sorted(os.fspath(p) for p in root.rglob("*")) for root in (fx.source, fx.state_root)
+        }
+        with pytest.raises(TurnError) as stopped:
+            fx.run(run_root=run_root)
+        assert stopped.value.stage == "run_root" and fx.launch.calls == []
+        after = {root: sorted(os.fspath(p) for p in root.rglob("*")) for root in (fx.source, fx.state_root)}
+        assert after == before
+        assert not (run_root / "reviewer-home").exists()
+
     def test_canary_home_rejection_is_mapped(self, fx: Fixture) -> None:
         with pytest.raises(TurnError) as stopped:
-            fx.run(protected_roots=(fx.run_root,))
+            fx.run(protected_roots=(fx.state_root, fx.state_root))  # 重複はcanary homeが拒否する
         assert stopped.value.stage == "canary:protected_root" and fx.leftover_checkouts() == []
 
     def test_provisioning_rejection_is_mapped(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -435,5 +509,5 @@ def test_request_has_no_defaults_and_api_takes_no_argv_or_probe_injection() -> N
         field.default is MISSING and field.default_factory is MISSING for field in fields(ReviewerTurnRequest)
     )
     names = set(inspect.signature(run_reviewer_turn).parameters)
-    assert names == {"request", "report_head"}
+    assert names == {"request", "report_head", "advertised_head"}
     assert not {name for name in dir(module) if "argv" in name.lower() or "probe" in name.lower()}

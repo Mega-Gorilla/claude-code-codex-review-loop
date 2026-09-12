@@ -11,11 +11,14 @@ Phase 9の各部品（checkout / canary home / preflight / launch / prompt / hea
 4. 専用`CODEX_HOME`（workspace = 隔離checkout、protected = 実repository + 呼出側のroot）
 5. Windowsではprovisioning成果物の複製（ADR-0029。provisioningは走らせない）
 6. 起動facade（preflightを同じ呼出の中で行い、成立しなければspawnしない）
-7. 隔離checkoutのHEADを再観測し、advertised head・reportの対象headと三者照合（AC-C09-04）
+7. 隔離checkoutのHEADと**GitHub上のadvertised head**を再観測し、reportの対象headと三者照合（AC-C09-04）。
+   起動前のadvertised headはsnapshotに過ぎず、review中にPRへpushされたheadはportで取り直す
 8. checkoutの破棄（dirty stateをevidenceとして返す。失敗しても必ず試みる）
 
-reportからの対象head抽出はC-10のport（`ReportHeadPort`）で、本実装までは`PortUnavailableError`で
+reportからの対象head抽出はC-10のport（`ReportHeadPort`）、advertised headの再観測はC-05の
+`get_pull_request`（ADR-0012）を使うport（`AdvertisedHeadPort`）で、本実装までは`PortUnavailableError`で
 停止する。`HeadMismatch`時の非投稿はC-10の責務で、本moduleは判定結果を返すだけである。
+`run_root`は実repository・protected rootと同一・祖先・子孫のいずれでもないことを、何かを作る前に検証する。
 """
 
 from __future__ import annotations
@@ -57,6 +60,19 @@ class UnavailableReportHead:
         raise PortUnavailableError("reportからの対象head抽出はC-10（report parser）が実装する")
 
 
+class AdvertisedHeadPort(Protocol):
+    """GitHub上のPRの現在のhead SHAを読むport。本実装はC-05の`get_pull_request`（ADR-0012）で組む。"""
+
+    def advertised_head(self, *, repository: str, number: int) -> str: ...
+
+
+class UnavailableAdvertisedHead:
+    """C-10がC-05へ接続するまでのfail closed実装。"""
+
+    def advertised_head(self, *, repository: str, number: int) -> str:
+        raise PortUnavailableError("advertised headの再観測はC-10がC-05の`get_pull_request`で実装する")
+
+
 class TurnError(Exception):
     """固定stage（`<部品>:<部品のstage>`）だけを公開するturnの失敗。本文・path・native出力を含めない。"""
 
@@ -67,7 +83,10 @@ class TurnError(Exception):
 
 @dataclass(frozen=True)
 class ReviewerTurnRequest:
-    """1 turnの入力。すべて明示値で、既定値を持たない。`run_root`は呼出側が所有し、turn後に破棄する。"""
+    """1 turnの入力。すべて明示値で、既定値を持たない。`run_root`は呼出側が所有し、turn後に破棄する。
+
+    `advertised_head`は起動前のsnapshotで、review後の照合にはportで取り直した値を使う。
+    """
 
     source_repository: Path
     advertised_head: str
@@ -92,15 +111,19 @@ class ReviewerTurn:
     redaction_hits: int
     launch: ReviewerCompleted | ReviewerTimedOut
     observed_head: str
+    # review後に取り直したGitHub上のadvertised head（三者照合に使った値）
+    advertised_head_after: str
     binding: HeadsBound | HeadMismatch
     release: CheckoutRelease
     provisioning: ProvisioningMirror | None
     evidence_root: Path
 
 
-def run_reviewer_turn(request: ReviewerTurnRequest, *, report_head: ReportHeadPort) -> ReviewerTurn:
+def run_reviewer_turn(
+    request: ReviewerTurnRequest, *, report_head: ReportHeadPort, advertised_head: AdvertisedHeadPort
+) -> ReviewerTurn:
     """固定順序でturnを実行する。どの段階で失敗しても、作成済みのcheckoutは破棄を試みる。"""
-    _validate_run_root(request.run_root)
+    _validate_run_root(request.run_root, (request.source_repository, *request.protected_roots))
     if request.advertised_head != request.context.target_head_sha:
         # 起動前にheadが動いている。reviewを走らせても投稿できないため、checkoutを作る前に止める
         raise TurnError("head:advertised_moved")
@@ -138,14 +161,15 @@ def run_reviewer_turn(request: ReviewerTurnRequest, *, report_head: ReportHeadPo
         raise TurnError("checkout:release") from error
     last_message = launch.last_message if isinstance(launch, ReviewerCompleted) else None
     reported = report_head.reported_head(last_message)
-    binding = verify_review_target(
-        checkout_head=observed, advertised_head=request.advertised_head, reported_head=reported or ""
-    )
+    # 投稿判断の直前にGitHub上のheadを取り直す。review中のpushは起動前のsnapshotでは見えない
+    current = advertised_head.advertised_head(repository=request.context.repository, number=request.context.number)
+    binding = verify_review_target(checkout_head=observed, advertised_head=current, reported_head=reported or "")
     return ReviewerTurn(
         prompt_boundary=prompt.boundary,
         redaction_hits=prompt.redaction_hits,
         launch=launch,
         observed_head=observed,
+        advertised_head_after=current,
         binding=binding,
         release=release,
         provisioning=provisioning,
@@ -205,10 +229,19 @@ def _release_quietly(checkout: ReviewerCheckout) -> None:
         pass
 
 
-def _validate_run_root(run_root: Path) -> None:
+def _validate_run_root(run_root: Path, protected: tuple[Path, ...]) -> None:
+    """private dirであり、実repository・protected rootと同一・祖先・子孫のいずれでもないことを確認する。
+
+    重なりがあると、reviewer homeや隔離checkoutを保護対象の中へ作ってしまう。canary homeの検証が
+    後段で止めるとしても、その前に保護対象へentryを作る経路を残さない。
+    """
     try:
         if not run_root.is_absolute() or run_root != run_root.resolve() or not run_root.is_dir():
             raise TurnError("run_root")
+        for other in protected:
+            candidate = other.resolve()
+            if run_root == candidate or run_root.is_relative_to(candidate) or candidate.is_relative_to(run_root):
+                raise TurnError("run_root")
         verify_private_dir(run_root)
     except (FsPermissionError, OSError) as error:
         raise TurnError("run_root") from error
