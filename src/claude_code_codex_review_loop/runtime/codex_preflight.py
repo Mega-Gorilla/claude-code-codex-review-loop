@@ -152,7 +152,7 @@ def run_sandbox_preflight(
         protected_roots=home.protected_roots,
         codex_home=home.root,
         environment_digest=_digest(canonical_json(dict(invocation.env)).encode("utf-8")),
-        probe_interpreter=probe[0],
+        probe_interpreter=probe.interpreter,
         probe_digest=PROBE_DIGEST,
         network_target=NETWORK_CONTROL_TARGET,
         effective=effective,
@@ -285,7 +285,16 @@ def _read_effective_config(runner: _Runner, executable: str, home: CodexCanaryHo
     return effective
 
 
-def _canonical_probe() -> tuple[str, str]:
+@dataclass(frozen=True)
+class _Probe:
+    """digest照合済みのprobe。`content`は改行をLFへ正規化した本文で、複製の元になる。"""
+
+    interpreter: str
+    source: str
+    content: bytes
+
+
+def _canonical_probe() -> _Probe:
     """facadeが選ぶprobe: 現在のinterpreterと、固定digestに一致する本packageのprobe file。"""
     try:
         interpreter = Path(sys.executable).resolve()
@@ -297,7 +306,7 @@ def _canonical_probe() -> tuple[str, str]:
         raise PreflightError("probe_integrity") from error
     if _digest(content) != PROBE_DIGEST:
         raise PreflightError("probe_integrity")
-    return (str(interpreter), str(source))
+    return _Probe(interpreter=str(interpreter), source=str(source), content=content)
 
 
 def _probe_arguments(home: CodexCanaryHome, protected: tuple[Path, ...], sentinel: str) -> tuple[str, ...]:
@@ -312,13 +321,13 @@ def _probe_arguments(home: CodexCanaryHome, protected: tuple[Path, ...], sentine
     )
 
 
-def _run_control(runner: _Runner, probe: tuple[str, str], home: CodexCanaryHome, sentinel: str) -> Mapping[str, str]:
+def _run_control(runner: _Runner, probe: _Probe, home: CodexCanaryHome, sentinel: str) -> Mapping[str, str]:
     """sandboxの外で同じprobeを実行し、書込・読取・接続が通ることを確かめる。
 
     protected rootは渡さない。実repositoryへは一時fileであっても書かず、この確認で
     証明するのは「probeが動き、接続先へ到達できる」ことである。
     """
-    argv = (*probe, *_probe_arguments(home, (), sentinel))
+    argv = (probe.interpreter, probe.source, *_probe_arguments(home, (), sentinel))
     observed = _probe_stage(runner, "control", argv, home, sentinel, exit_stage="control", missing_stage="control")
     if observed != dict(EXPECTED_CONTROL):
         raise PreflightError("control_boundary")
@@ -326,8 +335,16 @@ def _run_control(runner: _Runner, probe: tuple[str, str], home: CodexCanaryHome,
 
 
 def _probe_boundaries(
-    runner: _Runner, executable: str, probe: tuple[str, str], home: CodexCanaryHome, sentinel: str
+    runner: _Runner, executable: str, probe: _Probe, home: CodexCanaryHome, sentinel: str
 ) -> Mapping[str, str]:
+    """sandboxの中でprobeを実行する。
+
+    probeの本体は隔離checkout（workspace root）へ複製してから実行する。専用profileは実repository
+    （本packageの所在を含む）をdenyし、elevated backendではその読取拒否が実際に強制されるため、
+    package内のprobe fileを直接指定すると起動できない（2026-09-12実測、ADR-0027 決定17）。複製は
+    本呼出だけの名前で置き、実行後に必ず取り除く。取り除けなければ`probe_residue`で停止する。
+    """
+    copy = _stage_probe_copy(home, sentinel, probe.content)
     argv = (
         executable,
         "sandbox",
@@ -337,15 +354,52 @@ def _probe_boundaries(
         "-C",
         str(home.workspace_root),
         "--",
-        *probe,
+        probe.interpreter,
+        str(copy),
         *_probe_arguments(home, home.protected_roots[:-1], sentinel),
     )
-    observed = _probe_stage(
-        runner, "probe", argv, home, sentinel, exit_stage="sandbox_unavailable", missing_stage="probe_unavailable"
-    )
+    try:
+        observed = _probe_stage(
+            runner, "probe", argv, home, sentinel, exit_stage="sandbox_unavailable", missing_stage="probe_unavailable"
+        )
+    finally:
+        leftover = _remove_probe_copy(copy)
+    if leftover:
+        raise PreflightError("probe_residue")
     if observed != dict(EXPECTED_BOUNDARIES):
         raise PreflightError("boundary")
     return observed
+
+
+def _stage_probe_copy(home: CodexCanaryHome, sentinel: str, content: bytes) -> Path:
+    """digest照合済みの本文を、隔離checkout直下の本呼出だけの名前へ置く。既存のentryがあれば置かない。
+
+    通常のfileとして書く（private ACLにしない）。sandbox userが読めるのはworkspace rootから継承する
+    権限であり、owner限定のACLを付けると読取が拒否される。
+    """
+    copy = home.workspace_root / f"{sentinel}.py"
+    if copy.is_symlink() or copy.exists():
+        raise PreflightError("probe_copy")
+    try:
+        copy.write_bytes(content)
+    except OSError as error:
+        # 書込途中の失敗（disk full等）でfileが作られていることがある。作成済みentryは回収し、
+        # 回収できなければ残留として停止する（決定17「実行後は複製を必ず取り除く」）
+        if _remove_probe_copy(copy):
+            raise PreflightError("probe_residue") from error
+        raise PreflightError("probe_copy") from error
+    return copy
+
+
+def _remove_probe_copy(copy: Path) -> bool:
+    """複製を取り除き、残留していればTrueを返す（best effort。停止理由は呼出側が決める）。"""
+    try:
+        copy.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return copy.is_symlink() or copy.exists()
 
 
 def _probe_stage(
