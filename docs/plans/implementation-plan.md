@@ -98,7 +98,7 @@ product名`Claude Code–Codex Review Loop`、repository / package名`claude-cod
 役割による権限・state遷移と、providerによるCLI起動・出力正規化・認証・安全profileを分離する。既存の`RequestCodexReview` / `CodexPurpose` / `CODEX_*`は実装上の識別子で、名称だけで実行providerを決めない。永続化済み文字列を変更する場合はADR-0004に基づく互換性設計を先に行う。
 
 - C-02 / C-07 / C-08: role別provider/modelと実行方式・安全profile・adapter契約versionの解決済みsnapshot、復元・設定変更の検出、head / nonce / bindingを保つ共通protocol
-- C-04 / C-06 / C-09: provider別の認証・argv・sandbox能力を検証し、reviewerの実repository／GitHub書込を禁止。同一providerでもcoder credentialやsessionを引き継がない。CLIの名称やpromptだけを安全性の根拠にしない
+- C-04 / C-06 / C-09: provider別の認証・argv・sandbox能力を検証し、reviewerの実repository／GitHub書込を禁止。同一providerの**アカウントまたは認証元**は明示設定により共有可能とする（既定は共有しない）。ただしsession・workspace・実効sandbox権限はroleごとに分離し、coderの設定領域（`~/.codex`等）全体をreviewerへ渡さず、reviewerのmodel-generated commandからprovider認証材料を取得できないこと、GitHub write credentialへ到達できないことをnegative testする。CLIの名称やpromptだけを安全性の根拠にしない
 - C-09: fresh reviewer共通のcheckout・停止・出力検証と、Claude / Codex固有adapterを分離。C-08のheadless基盤はenvelope入力・SUBMIT出力を要求するため、native CLIをそのまま指定して対応としない
 - C-10 / C-11 / C-12 / C-13: review以外のclarification・decision・最終報告・ユーザー説明にも選択結果を反映。C-12で設定解決し、coreへ暗黙のprovider既定値を置かない。final reporterをreviewer providerへ従わせる案は実装ADRで確定する
 - C-15: 両providerのactive入口と設定例・対応OS／CLI version表を提供。GUIキー注入やprovider別の独自round loopは作らない
@@ -351,6 +351,8 @@ Section 2のprotocolを実装する。active host adapterとheadless adapterを�
 | AC-C09-03 | 同一headに対する2回のreviewが、前回session状態に依存しない |
 | AC-C09-04 | 隔離checkoutのHEAD、PRのadvertised head、review出力の対象headが一致する |
 | AC-C09-05 | read-only Web調査を許可したprofileでも、GitHub write credentialへ到達できない |
+| AC-C09-06 | reviewerのproviderが正常に認証・実行できる一方、model-generated commandからprovider認証材料（Codex / OpenAIの認証情報等）を取得できない。認証元の共有はD-032の明示設定だけで成立し、既定では共有しない |
+| AC-C09-07 | 予約delimiterやfence markerを含むIssue本文・comment・diffでもprompt境界を破れず、GitHub由来のtextは指示として扱われない。schema検証済み出力だけが受理される（受理側はC-10） |
 
 ### C-10 PR mode review loop
 
