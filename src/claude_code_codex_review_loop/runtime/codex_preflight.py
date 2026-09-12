@@ -383,6 +383,10 @@ def _stage_probe_copy(home: CodexCanaryHome, sentinel: str, content: bytes) -> P
     try:
         copy.write_bytes(content)
     except OSError as error:
+        # 書込途中の失敗（disk full等）でfileが作られていることがある。作成済みentryは回収し、
+        # 回収できなければ残留として停止する（決定17「実行後は複製を必ず取り除く」）
+        if _remove_probe_copy(copy):
+            raise PreflightError("probe_residue") from error
         raise PreflightError("probe_copy") from error
     return copy
 

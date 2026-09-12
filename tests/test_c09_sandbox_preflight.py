@@ -258,6 +258,44 @@ class TestRunSandboxPreflight:
             "version.stdout", "doctor.stdout", "control.stdout",
         ]
 
+    def test_partially_written_probe_copy_is_removed_before_failing(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """disk full等で本文の一部を書いた後に失敗しても、複製を隔離checkoutへ残さない。"""
+        original = Path.write_bytes
+
+        def partial(self: Path, data: bytes) -> int:
+            if self.parent == fx.workspace and self.name.endswith(".py"):
+                original(self, data[:16])
+                raise OSError("disk full")
+            return original(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", partial)
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "probe_copy"
+        assert not any(path.name.endswith(".py") for path in fx.workspace.iterdir())
+
+    def test_partially_written_probe_copy_that_cannot_be_removed_is_residue(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        original = Path.write_bytes
+
+        def partial(self: Path, data: bytes) -> int:
+            if self.parent == fx.workspace and self.name.endswith(".py"):
+                original(self, data[:16])
+                raise OSError("disk full")
+            return original(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", partial)
+        monkeypatch.setattr(module, "_remove_probe_copy", lambda copy: True)
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "probe_residue"
+        monkeypatch.undo()
+        for path in fx.workspace.iterdir():
+            path.unlink()
+
     def test_preexisting_entry_at_the_probe_copy_path_fails_closed(
         self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
