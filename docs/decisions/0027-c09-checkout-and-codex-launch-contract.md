@@ -9,7 +9,7 @@
 
 Issue #14は「実装前に固定する契約」を`codex-cli 0.149.1`の実測で書き、方式の具体化を着手時のplanへ委ねた。PR #56（reviewer用の独立checkout）とPR #57（canary harness第1段階）はその具体化だが、Issue #14の契約表から意図的に逸れた判断が3つあり、ADRに記録されていなかった。またPR #57のレビューで「builderは安全保証を主張しない」と正本へ書いた結果、fail-closed要件の実装先を明示する必要が生じた。
 
-本ADRは`codex-cli 0.153.4`（Windows 11、非昇格user）で再実測した結果に基づく。CLIは更新されるため、後続PRは`--help`と`codex doctor --json`の出力を証跡として再確認する。
+本ADRは`codex-cli 0.153.4`（Windows 11、非昇格user）で再実測した結果に基づく（elevated backendは`0.154.0`で追補実測）。CLIは更新されるため、後続PRは`--help`と`codex doctor --json`の出力を証跡として再確認する。
 
 ## Decision
 
@@ -63,7 +63,43 @@ approval policyの配置は次のとおり確認した。
 | 同上を`[projects.<checkout>]`の中に置く | 無視され`UnlessTrusted`のまま（table内のkeyはtop-levelではない） |
 | 生成configのtop-levelへ旧`sandbox_mode = "workspace-write"`を追加 | `codex doctor --json`の`sandbox.helpers`は変化なし（旧設定によるfallbackはdoctorから観測できない） |
 
-elevated backendはadmin権限による設定を要するため未実測。POSIX backendも未実測（CIにCodexは無く、開発機はWindows）。
+elevated backendはadmin権限による設定を要するため本節では未実測（次節の追補で実測）。POSIX backendは未実測（CIにCodexは無く、開発機はWindows）。
+
+## 実測 追補（2026-09-12、codex-cli 0.154.0、Windows 11、elevated backend provisioning済みuser）
+
+前提: ユーザーが`~/.codex/config.toml`へ`[windows] sandbox = "elevated"`を設定し、UAC昇格でprovisioningを完了した環境（`codex doctor --json`の`sandbox.helpers`が`sandbox backend: elevated` / `sandbox provisioning: complete`を報告。local account `CodexSandboxOffline` / `CodexSandboxOnline`とgroup `CodexSandboxUsers`、Windows Firewallのrule `codex_sandbox_offline_block_*`が作成されている）。0.154.0のdoctorは`sandbox backend`と`sandbox provisioning`のfieldを新たに報告する。実測はいずれも認証・API呼出・GitHub mutationを伴わず、`~/.codex`へは書き込んでいない。
+
+### (1) 専用`CODEX_HOME`でのpreflight（決定13の実装`run_sandbox_preflight`をそのまま実行）
+
+| 専用configの内容 | `sandbox.helpers` | preflightの結果 |
+| --- | --- | --- |
+| 生成configそのまま | `fail`: `managed denied-read requirements need the elevated Windows sandbox backend`。`sandbox backend: disabled`、`denied-read restrictions: true` | `sandbox_unavailable`で停止（fail closed） |
+| 生成config + `[windows] sandbox = "elevated"` | `warning`: `elevated Windows sandbox provisioning is incomplete or outdated`。`sandbox backend: elevated`、`sandbox provisioning: incomplete`。remediation: `codex sandbox setup --elevated --user <end-user> --codex-home <authoritative-home>`を昇格shellで実行 | 同上 |
+
+観測: backendの選択は`CODEX_HOME`のconfigで決まり（専用configに`[windows]`が無ければ`disabled`）、provisioningは`CODEX_HOME`ごとに紐付く（`codex sandbox setup`の`--codex-home`）。runごとに新しい専用`CODEX_HOME`を作る現在の設計（決定12）では、elevated backendをprovisioning済みにできない（毎runのUAC昇格が要る）。
+
+### (2) provisioning済み`~/.codex`を読取専用に使い、同じprofileを`-c`のinline overrideで与えた`codex sandbox`
+
+設計の到達点（elevated backendが生成profileを強制するか）を測るための手動実測で、設定fileは書かず、probeは決定13の`sandbox_probe.py`をそのまま使った。
+
+| 観測 | 結果 |
+| --- | --- |
+| workspace内の書込 | allowed |
+| protected rootへの書込 | denied |
+| deny root配下のfile読取 | **denied**（非昇格backendではallowedだった） |
+| `api.github.com:443`へのTCP handshake | **allowed**（`--sandbox-state-disable-network`を付けても同じ） |
+| sandbox内のtoken | `whoami`: `CodexSandboxOffline`（SID末尾`-1005`）、group `CodexSandboxUsers`、Medium integrity |
+| Windows Firewall | `codex_sandbox_offline_block_outbound`（Outbound / Block / Enabled / LocalUser = 上記SID / RemoteAddress = loopback以外の全て）が存在し有効 |
+| firewall product | Security Centerに登録された有効なfirewallはthird-party製品（ESET。firewall helper service稼働）。Windows Defender Firewallのprofileは`State: オン`だが、Codexのblock ruleは実効していない |
+
+観測: elevated backendはfilesystemのread deny / write denyをこの環境で強制した（AC-C09-05のcredential隔離はfilesystem側で成立する）。一方shell networkの禁止はWindows Firewallのlocal ruleに依存しており、third-party firewallが有効なこの機では**実効しなかった**。`codex doctor`は同じ環境で`network sandbox: restricted`と報告するため、決定13 (a)のeffective config照合では検出できず、positive controlと境界probe（決定13 (b)）だけが検出する。決定13が(a)と(b)を両方必須にした設計が実環境で必要であることを示す実測である。
+
+### 帰結（本追補では決めない）
+
+- D-033（elevated backend必須、fail closed）の下でも、現在のpreflightはこの機で`sandbox_unavailable`（専用home）または`boundaries`（provisioning済みhome）で停止する。fail closedは設計どおりで、緩めない。
+- reviewer用`CODEX_HOME`のprovisioning単位を決める必要がある。候補は、専用の固定`CODEX_HOME`（user配下の固定path）を一度だけ`codex sandbox setup --elevated --user <user> --codex-home <path>`でprovisioningし、runごとにconfigだけを書き直す方式（credentialを含めない点は変えない。決定12のprivate homeの検証はそのまま適用する）。同一userに複数homeをprovisioningできるかは昇格が要るため未確認。
+- network隔離はOSのfirewall構成に依存する。third-party firewallが有効な環境でCodexのblock ruleを実効させる方法（製品側のrule、またはWindows Defender Firewallへの委譲）はユーザー環境の判断であり、本projectの責務はpreflightで検出してfail closedすることまでとする。
+- 0.154.0のdoctorが報告する`sandbox backend` / `sandbox provisioning`を決定13 (a)の照合fieldへ加える案（Windowsでは`elevated` / `complete`を要求）。D-033の合意record後に実装する。
 
 ## Open（ユーザー判断を要する。本ADRでは決めない）
 
