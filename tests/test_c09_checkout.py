@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from claude_code_codex_review_loop.identity import build_reviewer_env, prepare_reviewer_home
-from claude_code_codex_review_loop.process import Completed, SpawnError
+from claude_code_codex_review_loop.process import Completed, SpawnError, StopError
 from claude_code_codex_review_loop.runtime import checkout as module
 from claude_code_codex_review_loop.runtime.checkout import (
     CheckoutError,
@@ -80,6 +80,23 @@ class TestObserveCheckoutHead:
             _run_git(checkout.repository, "checkout", "--detach", "--quiet", second)
             assert observe_checkout_head(checkout) == second
         finally:
+            checkout.release()
+
+    @pytest.mark.parametrize("error", (SpawnError("spawn", "test"), StopError("close", "native detail")))
+    def test_process_failures_are_mapped_to_a_fixed_checkout_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        """C-03の`SpawnError` / `StopError`（native detailを持つ）を生のまま外へ出さない。"""
+        source, first, _ = _source_repository(tmp_path)
+        checkout = _checkout(tmp_path, source, first)
+        try:
+            monkeypatch.setattr(module, "run_tree", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+            with pytest.raises(CheckoutError) as stopped:
+                observe_checkout_head(checkout)
+            assert stopped.value.stage == "observe_head"
+            assert "native detail" not in str(stopped.value)
+        finally:
+            monkeypatch.undo()
             checkout.release()
 
     def test_unexpected_output_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

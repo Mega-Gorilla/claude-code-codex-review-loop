@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ..identity.fs_permissions import create_private_dir, verify_private_dir
 from ..policy.permission_profile import ensure_argv_allowed
-from ..process import Completed, SpawnError, SpawnSpec, run_tree
+from ..process import Completed, SpawnError, SpawnSpec, StopError, run_tree
 
 _GIT_SHA1_OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 
@@ -133,7 +133,10 @@ def observe_checkout_head(checkout: ReviewerCheckout) -> str:
 
 
 def _git_output(checkout: ReviewerCheckout, stage: str, *arguments: str) -> str:
-    """gitをexplicit envで実行し、成功時だけUTF-8出力を返す。"""
+    """gitをexplicit envで実行し、成功時だけUTF-8出力を返す。
+
+    C-03の`SpawnError` / `StopError`（native detailを持つ）はどちらも固定stageの`CheckoutError`へ写す。
+    """
     ensure_argv_allowed((*checkout.git_command, *arguments))
     stdout_path = checkout.root / f"{stage}.stdout"
     stderr_path = checkout.root / f"{stage}.stderr"
@@ -146,7 +149,7 @@ def _git_output(checkout: ReviewerCheckout, stage: str, *arguments: str) -> str:
     )
     try:
         outcome = run_tree(spec, timeout_seconds=checkout.timeout_seconds, grace_seconds=checkout.grace_seconds)
-    except SpawnError as error:
+    except (SpawnError, StopError) as error:
         raise CheckoutError(stage) from error
     if not isinstance(outcome, Completed) or outcome.exit_code != 0:
         raise CheckoutError(stage)
