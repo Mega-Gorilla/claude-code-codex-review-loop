@@ -72,6 +72,12 @@ _EXPECTED_EFFECTIVE: Final[Mapping[str, str]] = {
     "network sandbox": "restricted",
     "denied-read restrictions": "true",
 }
+# D-033: Windows nativeではelevated backendが必須で、provisioningが完了していなければ起動しない。
+# backendの選択は`CODEX_HOME`のconfigで決まり、provisioningは`CODEX_HOME`ごとに紐付く（ADR-0027 追補）。
+_WINDOWS_EXPECTED_BACKEND: Final[Mapping[str, str]] = {
+    "sandbox backend": "elevated",
+    "sandbox provisioning": "complete",
+}
 
 
 class PreflightError(Exception):
@@ -90,6 +96,9 @@ class EffectiveSandbox:
     filesystem_sandbox: str
     network_sandbox: str
     denied_read_restrictions: str
+    # 0.154.0以降のdoctorが報告する。無ければ空文字で記録し、Windowsでは要求値との一致を要求する
+    sandbox_backend: str
+    sandbox_provisioning: str
 
 
 @dataclass(frozen=True)
@@ -256,6 +265,8 @@ def _read_effective_config(runner: _Runner, executable: str, home: CodexCanaryHo
             filesystem_sandbox=str(details["filesystem sandbox"]),
             network_sandbox=str(details["network sandbox"]),
             denied_read_restrictions=str(details["denied-read restrictions"]),
+            sandbox_backend=str(details.get("sandbox backend", "")),
+            sandbox_provisioning=str(details.get("sandbox provisioning", "")),
         )
         home_seen = str(load_details["CODEX_HOME"])
         cwd_seen = str(load_details["cwd"])
@@ -268,6 +279,9 @@ def _read_effective_config(runner: _Runner, executable: str, home: CodexCanaryHo
     # helperがfailなら、profileはこのOS / backendで適用できない（例: 非昇格Windowsのdeny）。
     if helper_status != "ok":
         raise PreflightError("sandbox_unavailable")
+    # D-033: helperがokでも、Windowsでelevated backendがprovisioning済みでなければ起動しない。
+    if _platform() == "win32" and _backend_fields(effective) != dict(_WINDOWS_EXPECTED_BACKEND):
+        raise PreflightError("sandbox_backend")
     return effective
 
 
@@ -399,6 +413,17 @@ def _effective_fields(effective: EffectiveSandbox) -> dict[str, str]:
         "network sandbox": effective.network_sandbox,
         "denied-read restrictions": effective.denied_read_restrictions,
     }
+
+
+def _backend_fields(effective: EffectiveSandbox) -> dict[str, str]:
+    return {
+        "sandbox backend": effective.sandbox_backend,
+        "sandbox provisioning": effective.sandbox_provisioning,
+    }
+
+
+def _platform() -> str:
+    return sys.platform
 
 
 def _digest(content: bytes) -> str:

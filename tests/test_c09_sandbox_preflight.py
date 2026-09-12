@@ -43,6 +43,8 @@ _GOOD_DETAILS = {
     "filesystem sandbox": "restricted",
     "network sandbox": "restricted",
     "denied-read restrictions": "true",
+    "sandbox backend": "elevated",
+    "sandbox provisioning": "complete",
 }
 _GOOD_LINES = [*(f"{label}={outcome}" for label, outcome in EXPECTED_BOUNDARIES.items()), "cleanup=ok"]
 _CONTROL_LINES = [*(f"{label}={outcome}" for label, outcome in EXPECTED_CONTROL.items()), "cleanup=ok"]
@@ -202,7 +204,9 @@ class TestRunSandboxPreflight:
         assert evidence.probe_interpreter == _INTERPRETER
         assert evidence.probe_digest == module.PROBE_DIGEST
         assert evidence.network_target == NETWORK_CONTROL_TARGET
-        assert evidence.effective == EffectiveSandbox("Never", "restricted", "restricted", "true")
+        assert evidence.effective == EffectiveSandbox(
+            "Never", "restricted", "restricted", "true", "elevated", "complete"
+        )
         assert dict(evidence.control) == dict(EXPECTED_CONTROL)
         assert dict(evidence.boundaries) == dict(EXPECTED_BOUNDARIES)
         version, doctor, control, probe = fx.fake.specs
@@ -326,6 +330,36 @@ class TestRunSandboxPreflight:
         assert stopped.value.stage == stage
         assert len(fx.fake.specs) == 2
 
+    @pytest.mark.parametrize(
+        "details",
+        (
+            {**_GOOD_DETAILS, "sandbox backend": "unelevated"},
+            {**_GOOD_DETAILS, "sandbox backend": "disabled"},
+            {**_GOOD_DETAILS, "sandbox provisioning": "incomplete"},
+            {k: v for k, v in _GOOD_DETAILS.items() if not k.startswith("sandbox ")},
+        ),
+        ids=("unelevated", "disabled", "incomplete", "fields_absent"),
+    )
+    def test_windows_requires_a_provisioned_elevated_backend(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch, details: dict[str, str]
+    ) -> None:
+        """D-033: helperがokでも、Windowsではelevated backendのprovisioning完了を要求する。"""
+        monkeypatch.setattr(module, "_platform", lambda: "win32")
+        fx.fake.doctor(details=details)
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "sandbox_backend"
+        assert len(fx.fake.specs) == 2
+
+    def test_backend_fields_are_recorded_but_not_required_outside_windows(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POSIX backendは未実測のため要求値を置かない。fieldが無ければ空文字でevidenceへ記録する。"""
+        monkeypatch.setattr(module, "_platform", lambda: "linux")
+        fx.fake.doctor(details={k: v for k, v in _GOOD_DETAILS.items() if not k.startswith("sandbox ")})
+        evidence = fx.run()
+        assert evidence.effective.sandbox_backend == "" and evidence.effective.sandbox_provisioning == ""
+
     @pytest.mark.parametrize("kind", ("digest", "missing_file", "unreadable", "missing_interpreter"))
     def test_untrusted_probe_is_rejected_before_any_probe_runs(
         self, fx: Fixture, kind: str, monkeypatch: pytest.MonkeyPatch
@@ -427,7 +461,7 @@ class TestVerifyPreflightEvidence:
             "probe_interpreter": "other",
             "probe_digest": "0" * 64,
             "network_target": ("localhost", 1),
-            "effective": EffectiveSandbox("UnlessTrusted", "restricted", "restricted", "true"),
+            "effective": EffectiveSandbox("UnlessTrusted", "restricted", "restricted", "true", "elevated", "complete"),
             "control": {**EXPECTED_CONTROL, "network": "denied"},
             "boundaries": {**EXPECTED_BOUNDARIES, "network": "allowed"},
         }
