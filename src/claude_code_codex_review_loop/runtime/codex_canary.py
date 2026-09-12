@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -238,7 +239,16 @@ def _render_configuration(workspace: Path, protected_roots: tuple[Path, ...]) ->
             "",
         )
     )
+    if _platform() == "win32":
+        # D-033: Windows nativeではelevated backendを必須にする。backendの選択は`CODEX_HOME`のconfigで
+        # 決まり、専用configに書かなければ`disabled`になる（ADR-0027 追補）。provisioningの有無は
+        # preflightが`codex doctor --json`で確認する。
+        lines.extend(("[windows]", 'sandbox = "elevated"', ""))
     return "\n".join(lines)
+
+
+def _platform() -> str:
+    return sys.platform
 
 
 def _toml_string(value: str) -> str:

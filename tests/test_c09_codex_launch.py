@@ -129,7 +129,7 @@ class Fixture:
             probe_interpreter=os.fspath(self.codex_executable),
             probe_digest="0" * 64,
             network_target=NETWORK_CONTROL_TARGET,
-            effective=EffectiveSandbox("Never", "restricted", "restricted", "true"),
+            effective=EffectiveSandbox("Never", "restricted", "restricted", "true", "elevated", "complete"),
             control=dict(EXPECTED_CONTROL),
             boundaries=dict(EXPECTED_BOUNDARIES),
         )

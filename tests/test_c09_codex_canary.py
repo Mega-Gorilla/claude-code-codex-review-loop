@@ -67,6 +67,24 @@ class TestPrepareCodexCanaryHome:
         raw = home.config_path.read_text(encoding="utf-8")
         assert "sandbox_mode" not in raw
         assert "sandbox_workspace_write" not in raw
+        if module._platform() == "win32":
+            assert config["windows"] == {"sandbox": "elevated"}
+        else:
+            assert "windows" not in config
+
+    @pytest.mark.parametrize("platform", ("win32", "linux", "darwin"))
+    def test_windows_selects_the_elevated_backend_in_the_managed_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+    ) -> None:
+        """D-033: backendの選択は`CODEX_HOME`のconfigで決まるため、Windowsでは専用configに明示する。"""
+        monkeypatch.setattr(module, "_platform", lambda: platform)
+        home = _home(tmp_path)
+        with home.config_path.open("rb") as handle:
+            config = tomllib.load(handle)
+        if platform == "win32":
+            assert config["windows"] == {"sandbox": "elevated"}
+        else:
+            assert "windows" not in config
 
     def test_isolated_checkout_is_pinned_untrusted_so_its_codex_layer_is_not_loaded(self, tmp_path: Path) -> None:
         """trusted projectの`.codex/config.toml`はuser configより優先され、旧sandbox設定が
