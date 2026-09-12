@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-既存baselineは承認済みで、Phase 8までの実行基盤が実装されています。両providerへの実接続と後続workflowの完成とは区別してください。role別provider選択の追加案D-032は`Proposed`です。Windows nativeのreviewer sandboxをelevated backend必須（fail closed）とするD-033も`Proposed`で、Issue #14の合意recordを待ちます（ADR-0027）。設定契約・永続化・runtime照合は実装済み（ADR-0025 / 0026）、native adapterは未実装で、Issue #52が追跡します（2026-09-05時点）。
+既存baselineは承認済みで、Phase 8までの実行基盤が実装されています。両providerへの実接続と後続workflowの完成とは区別してください。role別provider選択の追加案D-032は`Proposed`です。Windows nativeのreviewer sandboxをelevated backend必須（fail closed）とするD-033は、Issue #14の合意record（2026-09-12）で`Decided`です（ADR-0027）。設定契約・永続化・runtime照合は実装済み（ADR-0025 / 0026）、native adapterは未実装で、Issue #52が追跡します（2026-09-05時点）。
 
 | 正本 | 役割 |
 | --- | --- |
-| `docs/plans/target-experience.md`（Status: **Agreed**） | 何を作るか。user-visible behaviorと合意済み制約。decision log（D-001〜D-033、D-032 / D-033はProposed）を含む |
+| `docs/plans/target-experience.md`（Status: **Agreed**） | 何を作るか。user-visible behaviorと合意済み制約。decision log（D-001〜D-033、D-032はProposed）を含む |
 | `docs/plans/implementation-plan.md`（Status: **Accepted**） | どう作るか。設計原則P-002〜P-015、component C-01〜C-15、Phase 0〜17、受入条件AC-CNN-NNと横断条件案AC-RP-NN |
 
 親roadmapはIssue #2、実装子IssueはPhase 0〜17に対応する#5〜#22です。最新の進捗を各Issueで確認し、dependency順に進めます。Phase 9 #14のruntime契約は追加案#52と調整します。

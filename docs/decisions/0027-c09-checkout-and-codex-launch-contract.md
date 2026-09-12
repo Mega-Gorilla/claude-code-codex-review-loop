@@ -115,6 +115,8 @@ elevated backendはadmin権限による設定を要するため本節では未�
 
 2026-09-10、会話でユーザーがAに合意したため、target-experienceのdecision logへ**D-033（Proposed）**として記録した。会話での合意は合意根拠ではなく、Issue #14へのcommentでGitHub上の明示合意recordを得た後にDecidedへ変更する。
 
+2026-09-12、[Issue #14の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/14#issuecomment-5644657388)を得たため、**D-033はDecided**になった。本Openは閉じる。実測追補の帰結（provisioning単位、firewall構成、doctorの新fieldの照合）は決定Aの実装上の課題であり、Issue #14で追跡する。
+
 ## 検証と完了境界
 
 - PR #56: 実gitでexact SHA・detached HEAD・remoteなし・alternatesなし・dirty観測・破棄を検証。branch coverage 100%
