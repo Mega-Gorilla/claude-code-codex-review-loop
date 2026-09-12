@@ -40,10 +40,11 @@ Issue #14は「実装前に固定する契約」を`codex-cli 0.149.1`の実測�
 
     1つでも成立しなければspawn前にfail closedする。managed layerの所在をfile pathで探索・検出しようとはしない（Windowsでは文書化されていない）。effective configが専用configと異なるprofile・approval・sandboxを示した時点で差異ありとみなし、起動しない。
 
-    **観測できる範囲の限界**（2026-09-10実測）: 0.153.4の`codex doctor --json`は、configに旧`sandbox_mode`を足しても`sandbox.helpers`の出力を変えない。したがって(a)で確認できるのは上記の観測可能なfieldまでで、system / managed layerに旧sandbox設定がある場合のfallbackは(a)では検出できない。専用config自体に旧keyが無いことはdigestで保証し、残る残余は起動PRで`codex/sandbox-state-meta`相当のeffective sandbox stateを取得するか、起動直後の自己検査で閉じる。また(b)のprobeは隔離checkout内でinterpreterを起動する必要があり、profileの`:minimal`（"General platform and runtime paths needed by common tools"）がそのinterpreterを含まなければprobe自体が起動できない。その場合も`probe_unavailable`としてfail closedし、profileへ読取許可を足すかどうかはelevated backendの実測後に決める。
+    **観測できる範囲の限界**（2026-09-10実測）: 0.153.4の`codex doctor --json`は、configに旧`sandbox_mode`を足しても`sandbox.helpers`の出力を変えない。したがって(a)で確認できるのは上記の観測可能なfieldまでで、system / managed layerに旧sandbox設定がある場合のfallbackは(a)では検出できない。専用config自体に旧keyが無いことはdigestで保証し、残る残余は起動PRで`codex/sandbox-state-meta`相当のeffective sandbox stateを取得するか、起動直後の自己検査で閉じる。また(b)のprobeは隔離checkout内でinterpreterを起動する必要があり、profileの`:minimal`（"General platform and runtime paths needed by common tools"）がそのinterpreterを含まなければprobe自体が起動できない。その場合も`probe_unavailable`としてfail closedし、profileへ読取許可を足すかどうかはelevated backendの実測後に決める。**2026-09-12追記**: elevated backendの実測で、interpreterは読めたが本packageの所在（実repository配下でdeny）にあるprobe fileが読めず起動できなかった。profileへ読取許可を足す代わりに、probe本体を隔離checkoutへ複製して実行する（決定17）。
 15. **起動facade**（PR #67）は、preflight（決定13 / 14）を**同じ呼出の中で**実行してからspawnする。測定とspawnの間に呼出側のcodeを挟まないため、過去のevidenceを渡す入口が無い。promptはevidence root配下の私有file（0o600）へ書き、C-03の`stdin_path`（ADR-0005 追補）で子のstdinへ流す。argvには載せない。最終messageは決定9のargvへ`-o <evidence root配下のfile>`を加えて受け取り、workspaceと`CODEX_HOME`配下への出力は拒否する。spawn前にそのpathにdir entryが無いこと（参照先の無いsymlinkも含めて`lexists`相当で判定し、path自体のsymlinkは構築時に拒否）を要求し、終了後に通常fileであることを確かめたうえで、今回のprocessが生成したfileだけを**raw bytesのまま上限+1 byteまでのbounded read**で搬送する（decodeも置換もしない。不正UTF-8とsize超過の判定はC-10のschema pipelineが原文で行う）。timeout後の停止失敗（C-03の`StopError`）とUTF-8へencodeできないprompt（unpaired surrogate）も固定stageで拒否し、C-03のnative detailや生の例外をfacade外へ出さない。reviewerのstderrは共通redaction registryを通した`RedactionResult`としてだけ公開し、生のnative出力を結果へ含めない。timeoutはC-03がtreeを停止した後に`ReviewerTimedOut`として返す。旧sandbox設定によるfallbackの残余（決定13の限界）は本facadeでも閉じておらず、`sandbox-state-meta`相当の取得は未実装である。
 14. preflightのevidenceはfacadeが取得した実測だけを認め、呼出側の申告値・過去の実測・configの解釈結果だけの確認で代替しない。evidenceは少なくとも**canonical executable pathと`codex --version`の出力、config digest（`CodexCanaryHome.configuration_digest`）、profile名、workspace root、protected roots、`CODEX_HOME`、reviewer envのdigest、probe interpreterとprobe digest、接続先、effective config・control・境界の観測結果**にbindする。spawn直前の再検証は、**同じ測定を再実行し、与えられたevidenceと完全一致する場合だけ通す**（再測定が正。PR #62）。過去turnのevidence、期待値で組み立てたdataclass、測定後に変わったsystem / managed configやbackendは、現在の測定と一致しない限り通らない。evidenceはreview turnごとに取り直し、前のturnの結果を再利用しない（fresh reviewer）。実測結果は固定stageで公開し、native出力は共通redaction registryを通す。
 16. **D-033の実装**（合意record後）: 専用configはWindowsで`[windows] sandbox = "elevated"`を明示する（backendの選択は`CODEX_HOME`のconfigで決まり、書かなければ`disabled`になる。追補(1)）。preflightの決定13 (a)は、helperが`ok`であっても、Windowsでは`sandbox.helpers`の`sandbox backend`が`elevated`、`sandbox provisioning`が`complete`でなければ`sandbox_backend`で停止する。両fieldはevidenceの`effective`へ記録し（無ければ空文字）、再測定の完全一致の対象になる。POSIX backendは未実測のため要求値を置かない。provisioningが`CODEX_HOME`単位に紐付く問題（追補の帰結）は本決定で解決せず、Windowsでは固定homeの経路が実装されるまでpreflightは`sandbox_unavailable`または`sandbox_backend`で停止する。
+17. **境界probeの複製**（2026-09-12）: 決定13 (b)の境界probeは、digest照合済みのprobe本文を**隔離checkout直下の本呼出だけの名前**（`<sentinel>.py`）へ通常のfileとして複製し、そのpathを`codex sandbox`へ渡す。専用profileは実repository（本packageの所在を含む）をdenyし、elevated backendではその読取拒否が強制されるため、package内のprobe fileを直接指定すると起動できない（追補(3)）。複製先に既存のentryがあれば`probe_copy`で停止し、書けなければ作成済みのentryを回収してから`probe_copy`で停止する（書込途中の失敗で残ったfileを回収できなければ`probe_residue`）。実行後は複製を必ず取り除き、取り除けなければ`probe_residue`で停止する。positive control（sandboxの外）は引き続きpackage内のprobe fileを実行し、複製と同じ本文であることはdigestで保証する。owner限定のACLは付けない（sandbox userが読めるのはworkspace rootから継承する権限であるため）。
 
 ## 実測（2026-09-09、codex-cli 0.153.4、Windows 11 非昇格user）
 
@@ -95,10 +96,27 @@ elevated backendはadmin権限による設定を要するため本節では未�
 
 観測: elevated backendはfilesystemのread deny / write denyをこの環境で強制した（AC-C09-05のcredential隔離はfilesystem側で成立する）。一方shell networkの禁止は、この環境では**実効しなかった**（Codexが作成したWindows Firewallのblock ruleは存在し有効表示であったが、TCP handshakeは成功した）。この環境ではthird-party firewallが有効であったが、無効化した対照実験やWindows Defender Firewallへの委譲後の再測定は行っておらず、**因果関係は未確認**である。`codex doctor`は同じ環境で`network sandbox: restricted`と報告するため、決定13 (a)のeffective config照合では検出できず、positive controlと境界probe（決定13 (b)）だけが検出する。決定13が(a)と(b)を両方必須にした設計が実環境で必要であることを示す実測である。
 
+### (3) 案Dの検証: provisioning成果物の複製（2026-09-12、UAC・password回転なし）
+
+案D（帰結の2点目）を実測した。`~/.codex`は読取のみで、provisioningは走らせていない。
+
+| 手順 | 観測 |
+| --- | --- |
+| 専用home生成直後の`codex doctor --json` | `sandbox backend: elevated`、`sandbox provisioning: incomplete`（helper `warning`） |
+| `~/.codex/.sandbox/setup_marker.json`（252 bytes）と`~/.codex/.sandbox-secrets/sandbox_users.json`（828 bytes）を専用homeへ複製 | `sandbox provisioning: complete`（helper `ok`）。openai/codexの`identity.rs`の`sandbox_setup_is_complete`が両fileのversion一致だけを見るため |
+| `run_sandbox_preflight`をそのまま実行 | doctor / positive controlは通過。境界probeは**起動できず**`sandbox_unavailable`: `python.exe: can't open file '<実repository>/.../sandbox_probe.py': Permission denied`。elevated backendがdeny rootの読取を実際に拒否した |
+| 実行後の専用home | `.sandbox-bin` / `cap_sid` / `tmp`が生成される（Codexのruntime成果物）。`auth.json`とsessionは生成されない |
+| 決定17（probe本体の複製）適用後に同じ`run_sandbox_preflight`を再実行 | 境界probeがelevated sandbox内で起動し、`workspace_write=allowed` / `protected_write=denied` / `credential_read=denied` / `network=allowed`。networkだけが期待値と異なり`boundary`で停止（追補(2)と同じfirewall構成依存） |
+| 実行後の`~/.codex` | `sandbox provisioning: complete`のまま（password回転なし） |
+
+観測: 案Dは成立する（複製だけで`complete`になり、`~/.codex`を壊さない）。境界probeが起動できなかったのは設計どおりのread deny強制であり、決定17（probe本体の複製）で対応する。専用homeは実行後にCodexのruntime成果物を含むため、「credentialを含まない」は「provider認証を含まない」へ改めた。
+
+**`sandbox-state-meta`の調査**（time-box）: `codex sandbox --sandbox-state-json`はMCP側（`codex_mcp::SandboxState`）から供給されたstateを**適用する**入口で、CLIにeffective sandbox stateを**出力する**機能は無い（`cli/src/debug_sandbox.rs`）。app-server protocolのJSON schemaにもsandbox stateの定義は無い。決定13の観測限界（旧`sandbox_mode`のfallback）は、doctorの`sandbox backend`照合（決定16）と境界probeの実測（決定13 (b) / 17）で覆い、state dumpによる閉じ方は採らない。
+
 ### 帰結（本追補では決めない）
 
 - D-033（elevated backend必須、fail closed）の下でも、現在のpreflightは専用homeでは`sandbox_unavailable`で停止する（(1)で確認済み）。provisioning済みhomeを用いた手動の境界probe（(2)）ではnetworkが`allowed`となり決定13 (b)の期待値を満たさなかったが、これは`-c`でprofileを与えた手動実行であり、現在の`run_sandbox_preflight`は専用homeのprofileを`-P`で選ぶだけで`-c`を使わない。固定homeを現行facadeへ接続する経路は未実装であり、その経路での停止stageは未確認である。fail closedは設計どおりで、緩めない。
-- reviewer用`CODEX_HOME`のprovisioning単位を決める必要がある。候補は、専用の固定`CODEX_HOME`（user配下の固定path）を一度だけ`codex sandbox setup --elevated --user <user> --codex-home <path>`でprovisioningし、runごとにconfigだけを書き直す方式（credentialを含めない点は変えない。決定12のprivate homeの検証はそのまま適用する）。同一userに複数homeをprovisioningできるかは昇格が要るため未確認。
+- reviewer用`CODEX_HOME`のprovisioning単位を決める必要がある。固定homeを追加provisioningする案は**採れない**: openai/codexの`sandbox_users.rs`（`provision_sandbox_users`）はsetupのたびにrandom passwordを生成して既存sandbox userへ上書きし、対象homeへsecretsを書くため、`~/.codex`以外をprovisioningすると`~/.codex`のsecretsが失効し、次のCodex利用時の自動setup（`core/src/windows_sandbox.rs`の`prepare_elevated_sandbox`）で再び回転する。代替は案D（runごとの専用homeへ`~/.codex`の成果物2 fileを複製。追補(3)で検証済み）で、provider認証を含めない点は変えない。決定12のprivate homeの検証はそのまま適用する。
 - network隔離はOSのfirewall構成に依存する。この環境でnetwork denyが実効しなかった原因と、有効な構成（製品側のrule、Windows Defender Firewallへの委譲等）は未確認であり、構成変更後に同じpositive control / 境界probeで再検証する。構成の選択はユーザー環境の判断であり、本projectの責務はpreflightで検出してfail closedすることまでとする。
 - 0.154.0のdoctorが報告する`sandbox backend` / `sandbox provisioning`を決定13 (a)の照合fieldへ加える（Windowsでは`elevated` / `complete`を要求）。D-033の合意record後に決定16として実装した。
 

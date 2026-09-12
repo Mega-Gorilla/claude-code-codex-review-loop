@@ -16,6 +16,7 @@ import os
 import socket
 import subprocess
 import sys
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -72,6 +73,7 @@ class FakeCodex:
             "residue_dir_at": None,
         }
         self.specs: list[SpawnSpec] = []
+        self.copies: list[Path] = []
 
     def doctor(self, **overrides: object) -> None:
         doctor: dict[str, object] = {"load_status": "ok", "helper_status": "ok", "details": dict(_GOOD_DETAILS)}
@@ -108,6 +110,11 @@ class FakeCodex:
             spec.stdout_path.write_text("\n".join(map(str, self.scenario["control_lines"])) + "\n", encoding="utf-8")  # type: ignore[call-overload]
             return Completed(exit_code=int(str(self.scenario["control_exit"])))
         if argv[1:2] == ("sandbox",):
+            # probe本体はworkspaceへの複製で、sandboxが動く間だけ存在し、内容は固定digestと一致する
+            copy = Path(argv[9])
+            assert argv[8] == _INTERPRETER and copy.parent == spec.cwd and copy.name.endswith(".py")
+            assert hashlib.sha256(copy.read_bytes().replace(b"\r\n", b"\n")).hexdigest() == module.PROBE_DIGEST
+            self.copies.append(copy)
             spec.stdout_path.write_text("\n".join(map(str, self.scenario["probe_lines"])) + "\n", encoding="utf-8")  # type: ignore[call-overload]
             return Completed(exit_code=int(str(self.scenario["sandbox_exit"])))
         raise AssertionError(argv)
@@ -221,15 +228,122 @@ class TestRunSandboxPreflight:
         )
         assert probe.argv == (
             codex, "sandbox", "-P", "c09-canary", "--include-managed-config", "-C", os.fspath(fx.workspace), "--",
-            _INTERPRETER, _PROBE_FILE, os.fspath(fx.workspace), os.fspath(fx.home.config_path), host, str(port),
+            _INTERPRETER, os.fspath(fx.workspace / f"{sentinel}.py"), os.fspath(fx.workspace),
+            os.fspath(fx.home.config_path), host, str(port),
             sentinel, os.fspath(fx.real_repository), os.fspath(fx.state_root),
         )
+        assert fx.fake.copies == [fx.workspace / f"{sentinel}.py"] and not fx.fake.copies[0].exists()
         assert not any(path.name.startswith(".cc-review-probe-") for path in fx.workspace.iterdir())
         for spec in fx.fake.specs:
             assert spec.cwd == fx.workspace
             assert spec.env == {**fx.reviewer_env, "CODEX_HOME": os.fspath(fx.home.root)}
             assert spec.stdout_path is not None and spec.stdout_path.parent == fx.evidence_root
         assert "-a" not in probe.argv and "-c" not in probe.argv
+
+    def test_unwritable_probe_copy_fails_closed_before_the_sandbox_runs(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        original = Path.write_bytes
+
+        def failing(self: Path, data: bytes) -> int:
+            if self.parent == fx.workspace and self.name.endswith(".py"):
+                raise OSError("test")
+            return original(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", failing)
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "probe_copy"
+        assert [spec.stdout_path.name for spec in fx.fake.specs if spec.stdout_path] == [
+            "version.stdout", "doctor.stdout", "control.stdout",
+        ]
+
+    def test_partially_written_probe_copy_is_removed_before_failing(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """disk full等で本文の一部を書いた後に失敗しても、複製を隔離checkoutへ残さない。"""
+        original = Path.write_bytes
+
+        def partial(self: Path, data: bytes) -> int:
+            if self.parent == fx.workspace and self.name.endswith(".py"):
+                original(self, data[:16])
+                raise OSError("disk full")
+            return original(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", partial)
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "probe_copy"
+        assert not any(path.name.endswith(".py") for path in fx.workspace.iterdir())
+
+    def test_partially_written_probe_copy_that_cannot_be_removed_is_residue(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        original = Path.write_bytes
+
+        def partial(self: Path, data: bytes) -> int:
+            if self.parent == fx.workspace and self.name.endswith(".py"):
+                original(self, data[:16])
+                raise OSError("disk full")
+            return original(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", partial)
+        monkeypatch.setattr(module, "_remove_probe_copy", lambda copy: True)
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "probe_residue"
+        monkeypatch.undo()
+        for path in fx.workspace.iterdir():
+            path.unlink()
+
+    def test_preexisting_entry_at_the_probe_copy_path_fails_closed(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """複製先に既にentryがあれば上書きせず停止する（sentinelはtestで固定する）。"""
+        fixed = uuid.UUID(int=7)
+        monkeypatch.setattr(module.uuid, "uuid4", lambda: fixed)
+        (fx.workspace / f".cc-review-probe-{fixed.hex}.py").write_text("stale", encoding="utf-8")
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "probe_copy"
+
+    def test_probe_copy_that_cannot_be_unlinked_is_reported_as_residue(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        original = Path.unlink
+
+        def refusing(self: Path, missing_ok: bool = False) -> None:
+            if self.parent == fx.workspace and self.name.endswith(".py"):
+                raise PermissionError("test")
+            original(self, missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", refusing)
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "probe_residue"
+        monkeypatch.undo()
+        for path in fx.workspace.iterdir():
+            path.unlink()
+
+    def test_leftover_probe_copy_is_reported_as_residue(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(module, "_remove_probe_copy", lambda copy: True)
+        with pytest.raises(PreflightError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "probe_residue"
+
+    def test_probe_copy_that_vanished_during_the_run_is_not_residue(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        original = fx.fake.run_tree
+
+        def deleting(spec: SpawnSpec, timeout_seconds: float, grace_seconds: float) -> object:
+            outcome = original(spec, timeout_seconds, grace_seconds)
+            if spec.argv[1:2] == ("sandbox",):
+                Path(spec.argv[9]).unlink()
+            return outcome
+
+        monkeypatch.setattr(module, "run_tree", deleting)
+        fx.run()
 
     def test_production_api_accepts_no_probe_target_or_argv_prefix(self) -> None:
         """probe・接続先・argv prefixは呼出側から注入できない（ADR-0027 決定9 / 14）。"""

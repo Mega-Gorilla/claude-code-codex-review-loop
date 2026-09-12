@@ -46,7 +46,11 @@ class CanaryError(Exception):
 
 @dataclass(frozen=True)
 class CodexCanaryHome:
-    """1 checkoutへbindされた、credentialを含まないprivateなCODEX_HOME。"""
+    """1 checkoutへbindされた、provider認証を含まないprivateなCODEX_HOME。
+
+    Windowsのelevated backendではsandbox provisioning材料（`.sandbox` / `.sandbox-secrets`）を含み得る
+    （ADR-0027 追補）。含まないのはprovider認証（auth.json等）である。
+    """
 
     root: Path
     config_path: Path
