@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import MISSING, fields
 from pathlib import Path
 
@@ -226,6 +227,18 @@ class TestRunReviewerTurn:
         # checkoutは破棄済み。専用home・evidenceは呼出側が所有するrun_rootに残る
         assert fx.leftover_checkouts() == []
         assert sorted(path.name for path in fx.run_root.iterdir()) == ["codex-home", "evidence", "reviewer-home"]
+
+    def test_real_repository_is_a_denied_root_of_the_sandbox_profile(self, fx: Fixture) -> None:
+        """AC-C06-03 / AC-C09-02の配線: 実repositoryは専用profileのdeny rootで、preflightの境界probeが
+        その書込拒否を実測できなければreviewerは起動しない（実sandboxでの実測はADR-0027 追補(3)）。
+        """
+        fx.run()
+        home = fx.launch.calls[0]["home"]
+        with home.config_path.open("rb") as handle:  # type: ignore[attr-defined]
+            config = tomllib.load(handle)
+        filesystem = config["permissions"]["c09-canary"]["filesystem"]
+        assert filesystem[os.fspath(fx.source)] == "deny" and filesystem[os.fspath(fx.state_root)] == "deny"
+        assert fx.source in home.protected_roots and fx.state_root in home.protected_roots  # type: ignore[attr-defined]
 
     def test_second_turn_on_the_same_head_is_independent(self, fx: Fixture, tmp_path: Path) -> None:
         """AC-C09-03: 同一headへの2回目のturnは前回のcheckout・home・promptに依存しない。"""
