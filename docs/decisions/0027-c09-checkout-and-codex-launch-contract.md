@@ -90,15 +90,15 @@ elevated backendはadmin権限による設定を要するため本節では未�
 | `api.github.com:443`へのTCP handshake | **allowed**（`--sandbox-state-disable-network`を付けても同じ） |
 | sandbox内のtoken | `whoami`: `CodexSandboxOffline`（SID末尾`-1005`）、group `CodexSandboxUsers`、Medium integrity |
 | Windows Firewall | `codex_sandbox_offline_block_outbound`（Outbound / Block / Enabled / LocalUser = 上記SID / RemoteAddress = loopback以外の全て）が存在し有効 |
-| firewall product | Security Centerに登録された有効なfirewallはthird-party製品（ESET。firewall helper service稼働）。Windows Defender Firewallのprofileは`State: オン`だが、Codexのblock ruleは実効していない |
+| firewall product | Security Centerに登録された有効なfirewallはthird-party製品（ESET。firewall helper service稼働）。Windows Defender Firewallのprofileは`State: オン` |
 
-観測: elevated backendはfilesystemのread deny / write denyをこの環境で強制した（AC-C09-05のcredential隔離はfilesystem側で成立する）。一方shell networkの禁止はWindows Firewallのlocal ruleに依存しており、third-party firewallが有効なこの機では**実効しなかった**。`codex doctor`は同じ環境で`network sandbox: restricted`と報告するため、決定13 (a)のeffective config照合では検出できず、positive controlと境界probe（決定13 (b)）だけが検出する。決定13が(a)と(b)を両方必須にした設計が実環境で必要であることを示す実測である。
+観測: elevated backendはfilesystemのread deny / write denyをこの環境で強制した（AC-C09-05のcredential隔離はfilesystem側で成立する）。一方shell networkの禁止は、この環境では**実効しなかった**（Codexが作成したWindows Firewallのblock ruleは存在し有効表示であったが、TCP handshakeは成功した）。この環境ではthird-party firewallが有効であったが、無効化した対照実験やWindows Defender Firewallへの委譲後の再測定は行っておらず、**因果関係は未確認**である。`codex doctor`は同じ環境で`network sandbox: restricted`と報告するため、決定13 (a)のeffective config照合では検出できず、positive controlと境界probe（決定13 (b)）だけが検出する。決定13が(a)と(b)を両方必須にした設計が実環境で必要であることを示す実測である。
 
 ### 帰結（本追補では決めない）
 
-- D-033（elevated backend必須、fail closed）の下でも、現在のpreflightはこの機で`sandbox_unavailable`（専用home）または`boundaries`（provisioning済みhome）で停止する。fail closedは設計どおりで、緩めない。
+- D-033（elevated backend必須、fail closed）の下でも、現在のpreflightは専用homeでは`sandbox_unavailable`で停止する（(1)で確認済み）。provisioning済みhomeを用いた手動の境界probe（(2)）ではnetworkが`allowed`となり決定13 (b)の期待値を満たさなかったが、これは`-c`でprofileを与えた手動実行であり、現在の`run_sandbox_preflight`は専用homeのprofileを`-P`で選ぶだけで`-c`を使わない。固定homeを現行facadeへ接続する経路は未実装であり、その経路での停止stageは未確認である。fail closedは設計どおりで、緩めない。
 - reviewer用`CODEX_HOME`のprovisioning単位を決める必要がある。候補は、専用の固定`CODEX_HOME`（user配下の固定path）を一度だけ`codex sandbox setup --elevated --user <user> --codex-home <path>`でprovisioningし、runごとにconfigだけを書き直す方式（credentialを含めない点は変えない。決定12のprivate homeの検証はそのまま適用する）。同一userに複数homeをprovisioningできるかは昇格が要るため未確認。
-- network隔離はOSのfirewall構成に依存する。third-party firewallが有効な環境でCodexのblock ruleを実効させる方法（製品側のrule、またはWindows Defender Firewallへの委譲）はユーザー環境の判断であり、本projectの責務はpreflightで検出してfail closedすることまでとする。
+- network隔離はOSのfirewall構成に依存する。この環境でnetwork denyが実効しなかった原因と、有効な構成（製品側のrule、Windows Defender Firewallへの委譲等）は未確認であり、構成変更後に同じpositive control / 境界probeで再検証する。構成の選択はユーザー環境の判断であり、本projectの責務はpreflightで検出してfail closedすることまでとする。
 - 0.154.0のdoctorが報告する`sandbox backend` / `sandbox provisioning`を決定13 (a)の照合fieldへ加える案（Windowsでは`elevated` / `complete`を要求）。D-033の合意record後に実装する。
 
 ## Open（ユーザー判断を要する。本ADRでは決めない）
