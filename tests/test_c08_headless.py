@@ -12,7 +12,7 @@ import json
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -28,7 +28,7 @@ from claude_code_codex_review_loop.identity.fs_permissions import (
 )
 from claude_code_codex_review_loop.policy.permission_profile import ForbiddenFlagError
 from claude_code_codex_review_loop.process import TreeRef
-from claude_code_codex_review_loop.runtime import HeadlessError, HeadlessHost, step, submit_result
+from claude_code_codex_review_loop.runtime import HeadlessError, HeadlessHost, host_headless, step, submit_result
 from claude_code_codex_review_loop.runtime.host_headless import LOG_FILE, STDERR_FILE, STDOUT_FILE
 from claude_code_codex_review_loop.state import (
     CheckpointLoaded,
@@ -122,6 +122,30 @@ def _ledger(env: RuntimeEnv):
     return read_active_trees(loaded.payload)
 
 
+class _ObservingHandle:
+    """本物の`TreeHandle`を包み、`wait`へ入る瞬間に台帳を読む（登録と待機の順序の観測点）。
+
+    親が`wait`を呼ぶのは登録（read-modify-writeと原子的置換）を終えた後なので、ここでの読取は
+    書き手と競合しない。子processは台帳に触れない。
+    """
+
+    def __init__(self, inner: object, observe: Callable[[], tuple[TreeRef, ...]]) -> None:
+        self._inner = inner
+        self._observe = observe
+        self.seen: list[tuple[TreeRef, ...]] = []
+
+    @property
+    def ref(self) -> TreeRef:
+        return self._inner.ref  # type: ignore[attr-defined]
+
+    def wait(self, timeout_seconds: float) -> int | None:
+        self.seen.append(self._observe())
+        return self._inner.wait(timeout_seconds)  # type: ignore[attr-defined]
+
+    def close(self) -> None:
+        self._inner.close()  # type: ignore[attr-defined]
+
+
 class TestCommand:
     def test_a_relative_command_is_refused(self, tmp_path: Path) -> None:
         """envを継承しないためPATH解決に依存できない（auto_modeと同じ検査）。"""
@@ -208,29 +232,28 @@ class TestResult:
 class TestProcessLedger:
     """ADR-0019 決定10の**書き手**。PR-3b1 / 3b2は読み手だけを持っていた。"""
 
-    def test_the_tree_is_registered_before_waiting(self, tmp_path: Path) -> None:
-        """子が自分を台帳の中に見る（親は`wait`で止まっている）。"""
+    def test_the_tree_is_registered_before_waiting(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`wait`へ入る時点で自分のtreeが台帳に載っている（ADR-0019 決定10: 登録は待機より先）。
+
+        観測点は親側の`TreeHandle.wait`の呼出。以前は子processに自分でcheckpointを読ませていたが、
+        子の読取が親の登録より先に走るraceがあり（CI runnerの負荷で窓が広がる）、Windowsでは親の
+        原子的置換（`os.replace`）が子の開いたhandleと衝突し得た（Issue #79）。
+        """
         env = _env(tmp_path)
         work = _issue(env)
-        script = write_fake_host(tmp_path)
-        plan = write_plan(tmp_path, [user_entry(RecordKind.USER_CANCEL)])
-        seen = tmp_path / "ledger-seen.json"
-        host = _host(
-            env,
-            tmp_path,
-            command=(sys.executable, str(script)),
-            env=host_env(
-                plan,
-                tmp_path / "st.json",
-                ledger_out=seen,
-                checkpoint=checkpoint_path(env.paths, RUN),
-            ),
-        )
-        host.execute(work)
+        real_spawn = host_headless.spawn_tree
+        handles: list[_ObservingHandle] = []
 
-        section = json.loads(seen.read_text(encoding="utf-8"))
-        assert section is not None, "実行中に台帳へ載っていない"
-        assert len(section["trees"]) == 1
+        def observing_spawn(spec: object) -> _ObservingHandle:
+            handle = _ObservingHandle(real_spawn(spec), lambda: _ledger(env))  # type: ignore[arg-type]
+            handles.append(handle)
+            return handle
+
+        monkeypatch.setattr(host_headless, "spawn_tree", observing_spawn)
+        _host(env, tmp_path).execute(work)
+
+        (handle,) = handles
+        assert handle.seen == [(handle.ref,)], "waitへ入る時点で台帳へ載っていない"
 
     def test_the_tree_is_removed_after_it_exits(self, tmp_path: Path) -> None:
         """残すとpid再利用で別treeへ到達し得る（ADR-0019 決定11）。"""

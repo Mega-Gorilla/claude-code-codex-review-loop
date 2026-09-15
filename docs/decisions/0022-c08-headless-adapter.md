@@ -57,7 +57,8 @@ PR-3b1（#45）でruntimeとentry pointが、PR-3b2（#46）で緊急停止の�
 16. `drive`や`DriveResult`を増やさず、**testが同じloopを2回まわして比較する**。`HostPort`が同一interfaceであることの意味は、engineから見た振る舞いが一致することだからである。
 17. 比較対象は**state遷移列**（`step` / `submit_result`の各呼び出し後のcheckpoint）と**canonical record列**（fake GitHubのchainをseq昇順）の2つ。driverは同じ関数で、違うのは`HostPort`の実装だけである。
 18. **fake headless hostは実行file**にする（fake ghと同じ置き方）。境界が実行fileなので、spawn・待機・stdout回収・台帳・redactionはすべて製品codeが走り、fakeなのは「何を返すか」だけになる。何を返すかはplan file（JSON）で与え、子が自分のstate fileで消費順を進める。
-19. **台帳の登録順序も子から観測する**。子は自分が生きている間のcheckpointの`processes` sectionを書き出す。親は`wait`で止まっているので、そこに自分のtreeが見えれば「登録は待機より先」が成り立っている。
+19. **台帳の登録順序は親側の`TreeHandle.wait`呼出で観測する**（2026-09-16改訂、Issue #79）。受入testは本物のhandleを包み、adapterが`wait`へ入る瞬間にcheckpointを読んで「自分のrefが登録済み」であることを確認する。親が`wait`を呼ぶのは登録（`checkpoint_guard`下のread-modify-writeと原子的置換）を終えた後なので、この読取は書き手と競合しない。決定18（fake hostは実行fileで、製品側のspawn・待機・台帳経路を通す）は維持し、子processは台帳に触れない。
+    - 改訂前は子processに自分が生きている間のcheckpointの`processes` sectionを書き出させていた。この方式は、子の読取が`spawn → 登録`の間に走るrace（CI runnerの負荷で窓が広がりubuntuで3回失敗）と、Windowsで親の原子的置換（`os.replace`）が子の開いたhandleに阻まれる共有違反を構造的に持つため廃止した（Issue #79）
 
 ## Consequences
 
