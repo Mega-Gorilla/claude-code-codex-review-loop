@@ -38,6 +38,7 @@ from claude_code_codex_review_loop.runtime.codex_preflight import (
     EXPECTED_BOUNDARIES,
     EXPECTED_CONTROL,
     NETWORK_CONTROL_TARGET,
+    AuthState,
     EffectiveSandbox,
     PreflightError,
     PreflightEvidence,
@@ -108,6 +109,10 @@ class Fixture:
         self.preflight_error: str | None = None
         monkeypatch.setattr(module, "run_tree", self.fake.run_tree)
         monkeypatch.setattr(module, "run_sandbox_preflight", self._fake_preflight)
+        # auth gateはWindows native限定（ADR-0031）。testはplatformを固定し、gateの各経路を別testで固定する
+        monkeypatch.setattr(module, "_platform", lambda: "win32")
+        self.auth = AuthState("ok", "Keyring")
+        self.codex_version = "codex-cli 0.154.0"
 
     def _fake_preflight(self, **kwargs: object) -> PreflightEvidence:
         self.preflight_calls += 1
@@ -119,7 +124,7 @@ class Fixture:
     def evidence(self) -> PreflightEvidence:
         return PreflightEvidence(
             codex_executable=os.fspath(self.codex_executable),
-            codex_version="codex-cli 0.0.0-fake",
+            codex_version=self.codex_version,
             configuration_digest=self.home.configuration_digest,
             profile_name="c09-canary",
             workspace_root=self.workspace,
@@ -130,6 +135,7 @@ class Fixture:
             probe_digest="0" * 64,
             network_target=NETWORK_CONTROL_TARGET,
             effective=EffectiveSandbox("Never", "restricted", "restricted", "true", "elevated", "complete"),
+            auth=self.auth,
             control=dict(EXPECTED_CONTROL),
             boundaries=dict(EXPECTED_BOUNDARIES),
         )
@@ -159,6 +165,10 @@ def fx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Fixture:
     return Fixture(tmp_path, monkeypatch)
 
 
+def test_platform_reports_the_running_interpreter_platform() -> None:
+    assert module._platform() == sys.platform
+
+
 class TestLaunchCodexReviewer:
     def test_preflight_then_spawn_with_prompt_on_stdin_and_last_message_file(self, fx: Fixture) -> None:
         result = fx.launch(prompt="please review\n")
@@ -181,6 +191,30 @@ class TestLaunchCodexReviewer:
         }
         if os.name == "posix":
             assert stat.S_IMODE((fx.evidence_root / "prompt.txt").stat().st_mode) == 0o600
+
+    @pytest.mark.parametrize(
+        ("platform", "version", "auth", "stage"),
+        (
+            ("linux", "codex-cli 0.154.0", AuthState("ok", "Keyring"), "auth_platform"),
+            ("darwin", "codex-cli 0.154.0", AuthState("ok", "Keyring"), "auth_platform"),
+            ("win32", "codex-cli 0.155.0", AuthState("ok", "Keyring"), "auth_version"),
+            ("win32", "codex-cli 0.154.0", AuthState("fail", "Keyring"), "auth"),
+            ("win32", "codex-cli 0.154.0", AuthState("ok", "File"), "auth"),
+            ("win32", "codex-cli 0.154.0", AuthState("", ""), "auth"),
+        ),
+        ids=("linux", "darwin", "version", "not_registered", "file_storage", "check_absent"),
+    )
+    def test_auth_gate_stops_before_the_prompt_file_and_spawn(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch, platform: str, version: str, auth: AuthState, stage: str
+    ) -> None:
+        """ADR-0031 決定5: Windows native以外・未対応version・未登録 / file保存の認証では起動しない。"""
+        monkeypatch.setattr(module, "_platform", lambda: platform)
+        fx.codex_version = version
+        fx.auth = auth
+        with pytest.raises(LaunchError) as stopped:
+            fx.launch()
+        assert stopped.value.stage == stage
+        assert fx.preflight_calls == 1 and fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
 
     def test_preflight_failure_prevents_spawn(self, fx: Fixture) -> None:
         fx.preflight_error = "sandbox_unavailable"

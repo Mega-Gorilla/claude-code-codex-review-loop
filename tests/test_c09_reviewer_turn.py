@@ -30,6 +30,7 @@ from claude_code_codex_review_loop.runtime.codex_preflight import (
     EXPECTED_CONTROL,
     NETWORK_CONTROL_TARGET,
     PROBE_DIGEST,
+    AuthState,
     EffectiveSandbox,
     PreflightError,
     PreflightEvidence,
@@ -146,6 +147,7 @@ class FakeLaunch:
             probe_digest=PROBE_DIGEST,
             network_target=NETWORK_CONTROL_TARGET,
             effective=EffectiveSandbox("Never", "restricted", "restricted", "true", "elevated", "complete"),
+            auth=AuthState("ok", "Keyring"),
             control=dict(EXPECTED_CONTROL),
             boundaries=dict(EXPECTED_BOUNDARIES),
         )
