@@ -181,9 +181,8 @@ def _require_auth_ready(evidence: PreflightEvidence) -> None:
 
 def keyring_target_for_home(home: Path) -> str:
     """固定homeに対応するWindows Credential Managerのtarget名（`{account}.{service}`）。"""
-    canonical = str(Path(home).resolve())
-    if not canonical.startswith(_EXTENDED_PREFIX):
-        canonical = _EXTENDED_PREFIX + canonical
+    # 既に拡張長形式ならいったん外し、常に接頭辞付きの形へ揃える（OSに依らず分岐を持たない）
+    canonical = _EXTENDED_PREFIX + str(Path(home).resolve()).removeprefix(_EXTENDED_PREFIX)
     account = "cli|" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
     return f"{account}.{KEYRING_SERVICE}"
 
