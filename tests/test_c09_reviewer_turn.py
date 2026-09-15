@@ -38,6 +38,7 @@ from claude_code_codex_review_loop.runtime.codex_provisioning import MARKER_RELA
 from claude_code_codex_review_loop.runtime.head_binding import HeadMismatch, HeadsBound
 from claude_code_codex_review_loop.runtime.ports import PortUnavailableError
 from claude_code_codex_review_loop.runtime.review_prompt import GitHubText, ReviewContext
+from claude_code_codex_review_loop.runtime.reviewer_home import MARKER_NAME
 from claude_code_codex_review_loop.runtime.reviewer_turn import (
     AdvertisedHeadPort,
     ReportHeadPort,
@@ -165,6 +166,10 @@ class Fixture:
         create_private_dir(self.run_root)
         self.state_root = (tmp_path / "state").resolve()
         self.state_root.mkdir()
+        self.homes = (tmp_path / "homes").resolve()
+        create_private_dir(self.homes)
+        self.coder_home = (tmp_path / "coder-codex").resolve()
+        self.coder_home.mkdir()
         self.launch = FakeLaunch()
         monkeypatch.setattr(module, "launch_codex_reviewer", self.launch)
         monkeypatch.setattr(module, "_platform", lambda: "linux")
@@ -180,6 +185,10 @@ class Fixture:
             "context": _context(self.first),
             "run_root": self.run_root,
             "protected_roots": (self.state_root,),
+            "reviewer_home_parent": self.homes,
+            "reviewer_home_name": "reviewer-codex-home",
+            "coder_homes": (self.coder_home,),
+            "declared_account_mode": "separate",
             "git_command": _git(),
             "codex_executable": Path(sys.executable).resolve(),
             "base_env": self.base_env,
@@ -204,6 +213,10 @@ class Fixture:
             report_head=report_head or ReportHeadFromMessage(),
             advertised_head=self.advertised,
         )
+
+    @property
+    def fixed_home(self) -> Path:
+        return self.homes / "reviewer-codex-home"
 
     def leftover_checkouts(self) -> list[Path]:
         return [path for path in self.run_root.iterdir() if path.name.startswith("reviewer-checkout-")]
@@ -243,7 +256,12 @@ class TestRunReviewerTurn:
         assert home.workspace_root.parent.parent == fx.run_root  # type: ignore[attr-defined]
         assert home.workspace_root.parent.name.startswith("reviewer-checkout-")  # type: ignore[attr-defined]
         assert home.protected_roots[:-1] == tuple(sorted((fx.source, fx.state_root), key=str))  # type: ignore[attr-defined]
-        assert home.root == fx.run_root / "codex-home"  # type: ignore[attr-defined]
+        # 専用homeは固定path。markerを持ち、configはkeyringを固定する（ADR-0031）
+        assert home.root == fx.fixed_home == turn.reviewer_home  # type: ignore[attr-defined]
+        assert (fx.fixed_home / MARKER_NAME).is_file()
+        assert 'cli_auth_credentials_store = "keyring"' in (fx.fixed_home / "config.toml").read_text(encoding="utf-8")
+        assert turn.declared_account_mode == "separate"
+        assert not (fx.homes / "reviewer-codex-home.lock").exists()
         prompt = call["prompt"]
         assert isinstance(prompt, str) and f"<<<GITHUB_DATA:{turn.prompt_boundary}" in prompt and fx.first in prompt
         env = call["reviewer_env"]
@@ -251,9 +269,9 @@ class TestRunReviewerTurn:
         assert env["HOME"].startswith(os.fspath(fx.run_root / "reviewer-home"))
         assert call["evidence_root"] == fx.run_root / "evidence"
         assert (call["timeout_seconds"], call["grace_seconds"]) == (60.0, 2.0)
-        # checkoutは破棄済み。専用home・evidenceは呼出側が所有するrun_rootに残る
+        # checkoutは破棄済み。evidence・reviewer homeは呼出側が所有するrun_rootに残り、専用homeは固定pathに残る
         assert fx.leftover_checkouts() == []
-        assert sorted(path.name for path in fx.run_root.iterdir()) == ["codex-home", "evidence", "reviewer-home"]
+        assert sorted(path.name for path in fx.run_root.iterdir()) == ["evidence", "reviewer-home"]
 
     def test_real_repository_is_a_denied_root_of_the_sandbox_profile(self, fx: Fixture) -> None:
         """AC-C06-03 / AC-C09-02の配線: 実repositoryは専用profileのdeny rootで、preflightの境界probeが
@@ -267,22 +285,31 @@ class TestRunReviewerTurn:
         assert filesystem[os.fspath(fx.source)] == "deny" and filesystem[os.fspath(fx.state_root)] == "deny"
         assert fx.source in home.protected_roots and fx.state_root in home.protected_roots  # type: ignore[attr-defined]
 
-    def test_second_turn_on_the_same_head_is_independent(self, fx: Fixture, tmp_path: Path) -> None:
-        """AC-C09-03: 同一headへの2回目のturnは前回のcheckout・home・promptに依存しない。"""
+    def test_second_turn_on_the_same_head_regenerates_the_fixed_home(self, fx: Fixture, tmp_path: Path) -> None:
+        """AC-C09-03: 同一headへの2回目のturnは前回のcheckout・promptに依存せず、固定homeは内容を再生成する。"""
         first = fx.run()
+        stale = fx.fixed_home / "tmp" / "leftover.txt"
+        stale.parent.mkdir()
+        stale.write_text("previous run", encoding="utf-8")
         other_root = (tmp_path / "run2").resolve()
         create_private_dir(other_root)
         second = fx.run(run_root=other_root)
         assert first.binding == second.binding == HeadsBound(fx.first)
         assert first.prompt_boundary != second.prompt_boundary
-        assert fx.launch.calls[0]["home"].root != fx.launch.calls[1]["home"].root  # type: ignore[attr-defined]
+        assert fx.launch.calls[0]["home"].root == fx.launch.calls[1]["home"].root == fx.fixed_home  # type: ignore[attr-defined]
+        assert not stale.exists() and (fx.fixed_home / MARKER_NAME).is_file()
+
+    def test_lock_is_held_while_the_reviewer_runs(self, fx: Fixture) -> None:
+        seen: list[bool] = []
+        fx.launch.on_launch = lambda kwargs: seen.append((fx.homes / "reviewer-codex-home.lock").is_dir())
+        fx.run()
+        assert seen == [True] and not (fx.homes / "reviewer-codex-home.lock").exists()
 
     def test_mirrors_provisioning_artifacts_only_on_windows(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
         source = fx.provisioning_source()
         assert fx.run(provisioning_source=source).provisioning is None
         monkeypatch.setattr(module, "_platform", lambda: "win32")
         fx.launch.calls.clear()
-        shutil.rmtree(fx.run_root / "codex-home")
         shutil.rmtree(fx.run_root / "reviewer-home")
         shutil.rmtree(fx.run_root / "evidence")
         turn = fx.run(provisioning_source=source)
@@ -419,6 +446,71 @@ class TestFailClosed:
         with pytest.raises(TurnError) as stopped:
             fx.run()
         assert stopped.value.stage == "preflight:boundary"
+
+    def test_invalid_declared_account_mode_stops_before_anything(self, fx: Fixture) -> None:
+        with pytest.raises(TurnError) as stopped:
+            fx.run(declared_account_mode="confirmed")
+        assert stopped.value.stage == "declared_account_mode" and fx.launch.calls == []
+        assert not (fx.run_root / "reviewer-home").exists()
+
+    def test_marker_write_failure_removes_the_fresh_home_and_the_next_turn_recovers(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ADR-0031 決定7-4: markerはconfigより先。marker失敗では今回作ったhomeを残さない。"""
+        with pytest.MonkeyPatch.context() as failing:
+            failing.setattr(
+                module, "write_home_marker", lambda home: (_ for _ in ()).throw(module.HomeError("marker"))
+            )
+            with pytest.raises(TurnError) as stopped:
+                fx.run()
+        assert stopped.value.stage == "canary:initialize" and fx.leftover_checkouts() == []
+        assert not fx.fixed_home.exists() and not (fx.homes / "reviewer-codex-home.lock").exists()
+        shutil.rmtree(fx.run_root / "reviewer-home")
+        assert fx.run().binding == HeadsBound(fx.first)
+
+    def test_config_write_failure_leaves_a_marked_home_that_the_next_turn_regenerates(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from claude_code_codex_review_loop.runtime import codex_canary
+
+        with pytest.MonkeyPatch.context() as failing:
+            failing.setattr(
+                codex_canary, "write_private_text",
+                lambda *args: (_ for _ in ()).throw(codex_canary.FsPermissionError("write", "t")),
+            )
+            with pytest.raises(TurnError) as stopped:
+                fx.run()
+        assert stopped.value.stage == "canary:configuration" and fx.leftover_checkouts() == []
+        assert (fx.fixed_home / MARKER_NAME).is_file() and not (fx.fixed_home / "config.toml").exists()
+        shutil.rmtree(fx.run_root / "reviewer-home")
+        turn = fx.run()
+        assert turn.binding == HeadsBound(fx.first) and (fx.fixed_home / "config.toml").is_file()
+
+    def test_locked_fixed_home_fails_closed_and_releases_the_checkout(self, fx: Fixture) -> None:
+        (fx.homes / "reviewer-codex-home.lock").mkdir()
+        with pytest.raises(TurnError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "home:home_locked" and fx.leftover_checkouts() == []
+        assert (fx.homes / "reviewer-codex-home.lock").is_dir()  # 他者のlockは奪わない
+
+    def test_foreign_directory_at_the_fixed_home_path_is_not_deleted(self, fx: Fixture) -> None:
+        """ADR-0031 決定7: markerが検証できないentryは削除せず停止する。"""
+        foreign = fx.fixed_home
+        foreign.mkdir()
+        (foreign / "auth.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(TurnError) as stopped:
+            fx.run()
+        assert stopped.value.stage == "home:home_marker"
+        assert (foreign / "auth.json").read_text(encoding="utf-8") == "{}" and fx.leftover_checkouts() == []
+
+    @pytest.mark.parametrize("kind", ("coder_home", "protected", "source"))
+    def test_fixed_home_overlapping_a_guarded_root_is_rejected(self, fx: Fixture, kind: str) -> None:
+        targets = {"coder_home": fx.coder_home, "protected": fx.state_root, "source": fx.source}
+        target = targets[kind]
+        with pytest.raises(TurnError) as stopped:
+            fx.run(reviewer_home_parent=fx.homes, coder_homes=(fx.homes / "reviewer-codex-home",))
+        assert stopped.value.stage == "home:home_overlap" and fx.leftover_checkouts() == []
+        assert target.exists()
 
     def test_report_head_port_is_fail_closed_until_c10(self, fx: Fixture) -> None:
         port: ReportHeadPort = UnavailableReportHead()

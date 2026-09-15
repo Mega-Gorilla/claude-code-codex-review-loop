@@ -37,6 +37,8 @@ from .errors import IdentityError
 from .fs_permissions import (
     FsPermissionError,
     create_private_dir,
+    reject_reparse_points,
+    remove_tree,
     verify_private_dir,
     verify_private_file,
     write_private_text,
@@ -109,6 +111,8 @@ __all__ = [
     "revalidate_user_decision",
     "validate_permission_resume",
     "verify_private_dir",
+    "reject_reparse_points",
+    "remove_tree",
     "verify_private_file",
     "verify_record_chain",
     "write_private_text",

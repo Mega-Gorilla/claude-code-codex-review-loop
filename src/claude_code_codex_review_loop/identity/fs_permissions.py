@@ -25,6 +25,7 @@ acl_windows）が実装する。OS分岐は本module末尾のconditional import 
 from __future__ import annotations
 
 import os
+import stat
 import sys
 import uuid
 from pathlib import Path
@@ -120,6 +121,84 @@ def replace_private_text(path: Path, text: str) -> None:
         raise FsPermissionError("replace", f"fileを置換できない: {path}", error.errno) from error
     _backend.sync_directory(directory)
     verify_private_file(path)
+
+
+def reject_reparse_points(path: Path, *, stop_at: Path) -> None:
+    """`stop_at`から`path`までの各要素がsymlink / junction / reparse pointでないことを検証する。
+
+    存在しない要素は検査しない（未作成のhomeを許す）。`path`が`stop_at`の配下でなければerror。
+    """
+    candidate = Path(path)
+    if candidate != stop_at and stop_at not in candidate.parents:
+        raise FsPermissionError("verify", f"pathが起点の配下にない: {candidate}")
+    current = candidate
+    while True:
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            info = None
+        if info is not None:
+            attributes = getattr(info, "st_file_attributes", 0)
+            if stat.S_ISLNK(info.st_mode) or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise FsPermissionError("verify", f"reparse pointを含む: {current}")
+        if current == stop_at:
+            return
+        current = current.parent
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    """symlink、またはWindowsのjunction / reparse point。
+
+    `os.walk(followlinks=False)`はjunctionを辿るため、lstatの属性で個別に判定する。
+    """
+    attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+if sys.platform == "win32":  # pragma: no cover - OS dispatch(単一分岐点。各backendは自OSのCIで検証する)
+
+    def _remove_link(entry: Path, info: os.stat_result) -> None:
+        """junction / directory symlinkは`rmdir`、file symlinkは`unlink`で、link先には触れない。"""
+        if getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_DIRECTORY:
+            os.rmdir(entry)
+        else:
+            os.unlink(entry)
+
+else:  # pragma: no cover - OS dispatch(単一分岐点。各backendは自OSのCIで検証する)
+
+    def _remove_link(entry: Path, info: os.stat_result) -> None:
+        """POSIXのsymlinkは種類によらず`unlink`で外す。link先には触れない。"""
+        os.unlink(entry)
+
+
+def _remove_entry(entry: Path) -> None:
+    """reparse pointはそれ自体だけを外し、先へは一切降りない。通常entryはread-onlyを外して消す。"""
+    info = os.lstat(entry)
+    if _is_reparse_point(info):
+        _remove_link(entry, info)
+        return
+    if stat.S_ISDIR(info.st_mode):
+        with os.scandir(entry) as children:
+            names = [child.name for child in children]
+        for name in names:
+            _remove_entry(entry / name)
+        os.chmod(entry, info.st_mode | stat.S_IWRITE)
+        os.rmdir(entry)
+        return
+    os.chmod(entry, info.st_mode | stat.S_IWRITE)
+    os.unlink(entry)
+
+
+def remove_tree(root: Path) -> None:
+    """read-only属性を外してからtreeを破棄する。symlink / junction / reparse pointは先へ降りず、
+    link自体だけを外す（chmodも含めてlink先を変更しない）。失敗は`remove`。
+    """
+    try:
+        if _is_reparse_point(os.lstat(root)):
+            raise FsPermissionError("remove", f"rootがreparse pointである: {root}")
+        _remove_entry(Path(root))
+    except OSError as error:
+        raise FsPermissionError("remove", f"treeを破棄できない: {root}", error.errno) from error
 
 
 def verify_private_dir(path: Path) -> None:
