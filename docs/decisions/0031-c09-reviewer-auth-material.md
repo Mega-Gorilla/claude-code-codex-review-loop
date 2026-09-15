@@ -60,7 +60,7 @@ POSIXの方式（keyringの可否、sandbox内からの到達不能、positive c
 | --- | --- |
 | `~/.codex/auth.json`を専用homeへ複製 | 認証fileをそのまま渡すことになり合意recordに反する。token refreshで2つのhomeの内容が乖離し、写し戻しが要る |
 | runごとのuuid homeへ短命のauth.jsonを配置 | 同上（fileでの供給）。refresh tokenの回転と写し戻しの問題も同じ |
-| `OPENAI_API_KEY`をreviewer envへ渡す | C-04の`TOKEN_ENV_NAMES`で構造的に禁止（ADR-0027、Issue #14 §3） |
+| `OPENAI_API_KEY`（または`CODEX_API_KEY` / `CODEX_ACCESS_TOKEN`等のCodex用alias）をreviewer envやauth-setupのenvへ渡す | C-04の`TOKEN_ENV_NAMES`で構造的に禁止（ADR-0027、Issue #14 §3）。aliasは対応CLI version（0.154.0）のbinaryとloginのhelpから棚卸しして同registryへ含める |
 | `cli_auth_credentials_store = "ephemeral"` | process内memoryだけで、非対話の`codex exec`に登録手段が無い |
 | 固定homeをそのまま再利用（再生成しない） | session・log・runtime成果物が残り、fresh reviewer（D-015）に反する |
 | ユーザーが素の`codex login`で登録 | 生成configが無い状態ではfile保存へ進み得る（決定3） |

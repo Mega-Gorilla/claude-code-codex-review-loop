@@ -310,14 +310,15 @@ class TestCodexCanaryInvocation:
             )
         assert stopped.value.stage == "integrity"
 
-    def test_token_environment_is_rejected_without_leaking_its_value(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("name", ("OPENAI_API_KEY", "CODEX_ACCESS_TOKEN", "codex_api_key"))
+    def test_token_environment_is_rejected_without_leaking_its_value(self, tmp_path: Path, name: str) -> None:
         home = _home(tmp_path)
         token = "sk-" + "x" * 40
         with pytest.raises(CanaryError) as stopped:
             build_codex_canary_invocation(
                 home=home,
                 codex_executable=Path(sys.executable).resolve(),
-                reviewer_env={"OPENAI_API_KEY": token},
+                reviewer_env={name: token},
             )
         assert stopped.value.stage == "environment"
         assert token not in str(stopped.value)
