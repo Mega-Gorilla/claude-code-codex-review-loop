@@ -12,10 +12,15 @@
 
 引数: `<workspace> <credential_file> <network_host> <network_port> <sentinel> [<protected_root>...]`
 sentinelはfacadeが1測定ごとに払い出す一意なfile名で、facadeがhost側で残留を確認する。
+
+`--credential-store <target>`の形では、OS credential storeの**exact lookup**だけを行い
+`credential_store=present|absent|unsupported`を報告する（ADR-0031 決定6）。列挙はせず、
+秘密値・名前・件数を出力しない。Windows以外は`unsupported`。
 """
 
 from __future__ import annotations
 
+import ctypes
 import socket
 import sys
 from collections.abc import Callable
@@ -24,6 +29,9 @@ from typing import Final
 
 PROBE_LABELS: Final = ("workspace_write", "protected_write", "credential_read", "network")
 CLEANUP_LABEL: Final = "cleanup"
+CREDENTIAL_STORE_LABEL: Final = "credential_store"
+CREDENTIAL_STORE_FLAG: Final = "--credential-store"
+_CRED_TYPE_GENERIC: Final = 1
 _NETWORK_TIMEOUT_SECONDS: Final = 5.0
 
 
@@ -80,7 +88,33 @@ def run_probe(
     return outcomes
 
 
+def credential_store_lookup(target: str) -> str:
+    """Windows Credential Managerのexact lookup。見えれば`present`、無い・読めなければ`absent`。
+
+    `CredReadW`はtarget名の完全一致でだけ検索する。結果のblobは読まずに直ちに解放する。
+    """
+    if sys.platform != "win32":  # pragma: no cover - OS分岐（各OSのCIで片側だけ実行される）
+        return "unsupported"
+    # x64 WindowsではWINAPI（stdcall）とcdeclの区別が無く、platform非依存の`CDLL`で呼べる
+    advapi32 = ctypes.CDLL("advapi32")  # pragma: no cover - Windows専用
+    credential = ctypes.c_void_p()  # pragma: no cover - Windows専用
+    found = advapi32.CredReadW(  # pragma: no cover - Windows専用
+        ctypes.c_wchar_p(target), _CRED_TYPE_GENERIC, 0, ctypes.byref(credential)
+    )
+    if not found:  # pragma: no cover - Windows専用
+        return "absent"
+    advapi32.CredFree(credential)  # pragma: no cover - Windows専用
+    return "present"  # pragma: no cover - Windows専用
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[0] == CREDENTIAL_STORE_FLAG:
+        try:
+            outcome = credential_store_lookup(argv[1])
+        except Exception:  # lookup自体の失敗は「見えない」と同じ扱いにしない。facadeが検出できるよう別値にする
+            outcome = "error"
+        sys.stdout.write(f"{CREDENTIAL_STORE_LABEL}={outcome}\n")
+        return 0
     if len(argv) < 5:
         sys.stdout.write("usage=error\n")
         return 0

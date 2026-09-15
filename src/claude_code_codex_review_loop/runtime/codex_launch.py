@@ -21,6 +21,7 @@ prompt本文の構成（P-008 fence、`ReviewContext`）、出力の受理・検
 
 from __future__ import annotations
 
+import hashlib
 import stat
 import sys
 from collections.abc import Mapping
@@ -32,13 +33,24 @@ from ..identity.fs_permissions import FsPermissionError, write_private_text
 from ..policy.redaction import RedactionResult, redact
 from ..process import Completed, SpawnError, SpawnSpec, StopError, run_tree
 from .codex_canary import CanaryError, CodexCanaryHome, build_codex_canary_invocation
-from .codex_preflight import PreflightEvidence, run_sandbox_preflight, verify_preflight_evidence
+from .codex_preflight import (
+    PreflightEvidence,
+    run_credential_store_probe,
+    run_sandbox_preflight,
+    verify_preflight_evidence,
+)
 
 MAX_PROMPT_BYTES: Final = 1_048_576
 # ADR-0031 決定5: keyring keyの導出（`CODEX_HOME`のpath hash）はCLIの内部実装への依存であり、実測した
 # versionにbindする。一致しなければ起動せず、対応versionの更新と再loginを案内する。
 SUPPORTED_CODEX_VERSIONS: Final = frozenset({"codex-cli 0.154.0"})
 REQUIRED_AUTH_STORAGE: Final = "Keyring"
+# Codex CLI 0.154.0のkeyring保存: service `Codex Auth`、account `cli|<sha256(canonical CODEX_HOME)[:16]>`。
+# Windowsのkeyring backend（keyring-rs 3.6.3 windows-native）はtarget名を`{account}.{service}`にする。
+# Rustの`canonicalize()`はWindowsで`\\?\`接頭辞付きの文字列を返すため、hash入力もその形にする。
+# いずれも内部実装への依存で、`SUPPORTED_CODEX_VERSIONS`へbindし、positive controlが不一致を検出する。
+KEYRING_SERVICE: Final = "Codex Auth"
+_EXTENDED_PREFIX: Final = "\\\\?\\"
 MAX_DIAGNOSTIC_BYTES: Final = 262_144
 # 最終messageのbounded readの上限。C-10はこの値以下の`max_input_bytes`で検証する前提で、
 # 上限+1 byteまで読むことで「上限を超えていた」ことをC-10のsize stageが判定できる。
@@ -89,10 +101,20 @@ def launch_codex_reviewer(
     timeout_seconds: float,
     grace_seconds: float,
 ) -> ReviewerCompleted | ReviewerTimedOut:
-    """preflight -> spawn直前の再測定 -> auth gate -> prompt file -> spawn -> 結果の読み取り。
+    """preflight -> 予備のauth gate -> credential probe -> spawn直前の再測定 -> 最終のauth gate -> prompt file
+    -> spawn -> 結果の読み取り。
 
-    preflightの失敗はそのまま伝播する。ADR-0027 決定14: 最初のevidenceを取得した後、spawn直前に同じ測定を
-    再実行し、完全一致した場合だけ進む。auth gate（ADR-0031 決定5）は再測定を通ったevidenceに対して成立させる。
+    preflightの失敗はそのまま伝播する。順序は固定で、呼出側が変えられない。
+
+    - 予備のauth gate（ADR-0031 決定5）: 未登録・未対応version・Windows native以外では、credential probe
+      （control + sandboxの2 process）を走らせずに止める
+    - credential probe（ADR-0031 決定6、AC-C09-06）: sandbox内から登録済みcredentialへ到達できないことを
+      positive control付きで実測する
+    - 再測定（ADR-0027 決定14）: credential probeの後、prompt fileの書込とspawnの**直前**に同じ測定を再実行し、
+      config digest・sandbox backend・境界・authを含む全evidenceの完全一致を要求する。probe中にこれらが
+      変化していれば`evidence_mismatch`で止まる
+    - 最終のauth gate: 再測定を通ったevidenceに対して成立させる（一致にはauthが含まれるため、予備gateと
+      同じ判定になる。spawn直前の契約を経路上で明示する）
     """
     _validate_prompt(prompt)
     evidence = run_sandbox_preflight(
@@ -100,6 +122,16 @@ def launch_codex_reviewer(
         codex_executable=codex_executable,
         reviewer_env=reviewer_env,
         evidence_root=evidence_root,
+        timeout_seconds=timeout_seconds,
+        grace_seconds=grace_seconds,
+    )
+    _require_auth_ready(evidence)
+    run_credential_store_probe(
+        home=home,
+        codex_executable=codex_executable,
+        reviewer_env=reviewer_env,
+        evidence_root=evidence_root,
+        target=keyring_target_for_home(home.root),
         timeout_seconds=timeout_seconds,
         grace_seconds=grace_seconds,
     )
@@ -173,6 +205,14 @@ def _require_auth_ready(evidence: PreflightEvidence) -> None:
         raise LaunchError("auth_version")
     if evidence.auth.status != "ok" or evidence.auth.storage_mode != REQUIRED_AUTH_STORAGE:
         raise LaunchError("auth")
+
+
+def keyring_target_for_home(home: Path) -> str:
+    """固定homeに対応するWindows Credential Managerのtarget名（`{account}.{service}`）。"""
+    # 既に拡張長形式ならいったん外し、常に接頭辞付きの形へ揃える（OSに依らず分岐を持たない）
+    canonical = _EXTENDED_PREFIX + str(Path(home).resolve()).removeprefix(_EXTENDED_PREFIX)
+    account = "cli|" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"{account}.{KEYRING_SERVICE}"
 
 
 def _platform() -> str:
