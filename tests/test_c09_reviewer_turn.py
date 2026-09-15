@@ -453,16 +453,38 @@ class TestFailClosed:
         assert stopped.value.stage == "declared_account_mode" and fx.launch.calls == []
         assert not (fx.run_root / "reviewer-home").exists()
 
-    def test_marker_write_failure_is_mapped_and_releases_everything(
+    def test_marker_write_failure_removes_the_fresh_home_and_the_next_turn_recovers(
         self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            module, "write_home_marker", lambda home: (_ for _ in ()).throw(module.HomeError("marker"))
-        )
-        with pytest.raises(TurnError) as stopped:
-            fx.run()
-        assert stopped.value.stage == "home:marker" and fx.leftover_checkouts() == []
-        assert not (fx.homes / "reviewer-codex-home.lock").exists()
+        """ADR-0031 決定7-4: markerはconfigより先。marker失敗では今回作ったhomeを残さない。"""
+        with pytest.MonkeyPatch.context() as failing:
+            failing.setattr(
+                module, "write_home_marker", lambda home: (_ for _ in ()).throw(module.HomeError("marker"))
+            )
+            with pytest.raises(TurnError) as stopped:
+                fx.run()
+        assert stopped.value.stage == "canary:initialize" and fx.leftover_checkouts() == []
+        assert not fx.fixed_home.exists() and not (fx.homes / "reviewer-codex-home.lock").exists()
+        shutil.rmtree(fx.run_root / "reviewer-home")
+        assert fx.run().binding == HeadsBound(fx.first)
+
+    def test_config_write_failure_leaves_a_marked_home_that_the_next_turn_regenerates(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from claude_code_codex_review_loop.runtime import codex_canary
+
+        with pytest.MonkeyPatch.context() as failing:
+            failing.setattr(
+                codex_canary, "write_private_text",
+                lambda *args: (_ for _ in ()).throw(codex_canary.FsPermissionError("write", "t")),
+            )
+            with pytest.raises(TurnError) as stopped:
+                fx.run()
+        assert stopped.value.stage == "canary:configuration" and fx.leftover_checkouts() == []
+        assert (fx.fixed_home / MARKER_NAME).is_file() and not (fx.fixed_home / "config.toml").exists()
+        shutil.rmtree(fx.run_root / "reviewer-home")
+        turn = fx.run()
+        assert turn.binding == HeadsBound(fx.first) and (fx.fixed_home / "config.toml").is_file()
 
     def test_locked_fixed_home_fails_closed_and_releases_the_checkout(self, fx: Fixture) -> None:
         (fx.homes / "reviewer-codex-home.lock").mkdir()

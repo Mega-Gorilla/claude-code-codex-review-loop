@@ -25,7 +25,6 @@ acl_windows）が実装する。OS分岐は本module末尾のconditional import 
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import sys
 import uuid
@@ -147,15 +146,45 @@ def reject_reparse_points(path: Path, *, stop_at: Path) -> None:
         current = current.parent
 
 
+def _is_reparse_point(info: os.stat_result) -> bool:
+    """symlink、またはWindowsのjunction / reparse point。
+
+    `os.walk(followlinks=False)`はjunctionを辿るため、lstatの属性で個別に判定する。
+    """
+    attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _remove_entry(entry: Path) -> None:
+    """reparse pointはそれ自体だけを外し、先へは一切降りない。通常entryはread-onlyを外して消す。"""
+    info = os.lstat(entry)
+    if _is_reparse_point(info):
+        # junction / directory symlinkは`rmdir`、file symlinkは`unlink`で、link先には触れない
+        if stat.S_ISDIR(info.st_mode) or (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_DIRECTORY):
+            os.rmdir(entry)
+        else:
+            os.unlink(entry)
+        return
+    if stat.S_ISDIR(info.st_mode):
+        with os.scandir(entry) as children:
+            names = [child.name for child in children]
+        for name in names:
+            _remove_entry(entry / name)
+        os.chmod(entry, info.st_mode | stat.S_IWRITE)
+        os.rmdir(entry)
+        return
+    os.chmod(entry, info.st_mode | stat.S_IWRITE)
+    os.unlink(entry)
+
+
 def remove_tree(root: Path) -> None:
-    """read-only属性を外してからtreeを破棄する。symlinkは辿らない。失敗は`remove`。"""
+    """read-only属性を外してからtreeを破棄する。symlink / junction / reparse pointは先へ降りず、
+    link自体だけを外す（chmodも含めてlink先を変更しない）。失敗は`remove`。
+    """
     try:
-        for directory, directories, files in os.walk(root, topdown=False, followlinks=False):
-            for name in (*directories, *files):
-                entry = Path(directory, name)
-                if not entry.is_symlink():
-                    os.chmod(entry, entry.stat().st_mode | stat.S_IWRITE)
-        shutil.rmtree(root)
+        if _is_reparse_point(os.lstat(root)):
+            raise FsPermissionError("remove", f"rootがreparse pointである: {root}")
+        _remove_entry(Path(root))
     except OSError as error:
         raise FsPermissionError("remove", f"treeを破棄できない: {root}", error.errno) from error
 
