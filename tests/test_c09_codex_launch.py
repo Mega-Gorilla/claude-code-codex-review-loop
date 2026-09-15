@@ -182,7 +182,9 @@ class TestKeyringTarget:
         account, _, service = target.rpartition(".")
         assert service == "Codex Auth" and account.startswith("cli|") and len(account) == 4 + 16
         assert keyring_target_for_home(tmp_path / "reviewer-home") == target  # 正規化してから導出
-        assert keyring_target_for_home(Path("\\\\?\\" + os.fspath(home))) == target  # 既に拡張形式でも同じ
+        if sys.platform == "win32":
+            # 既に拡張長形式（Rustのcanonicalize()の出力形）でも同じ導出になる。POSIXでは接頭辞が意味を持たない
+            assert keyring_target_for_home(Path("\\\\?\\" + os.fspath(home))) == target
 
     def test_different_homes_have_different_targets(self, tmp_path: Path) -> None:
         assert keyring_target_for_home(tmp_path / "a") != keyring_target_for_home(tmp_path / "b")
