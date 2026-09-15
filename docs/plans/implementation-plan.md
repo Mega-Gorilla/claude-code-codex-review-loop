@@ -8,7 +8,7 @@
 | Baseline | [target-experience.md](target-experience.md)（Status: Agreed） |
 | Parent roadmap | Issue #2 |
 | Owner | Mega-Gorilla |
-| Last updated | 2026-09-05 |
+| Last updated | 2026-09-15 |
 
 target experienceが定義した完成状態を、どのcomponent、どの依存、どの順序で作るかを定義する。用語は[glossary](../glossary.md)、全体像は[architecture overview](../architecture/overview.md)を参照。
 
@@ -474,7 +474,7 @@ target experienceのSection 4（DOD）とSection 13（MVP）を、componentとPh
 | MVP-04 | C-15 | 16 | AC-C15-01 |
 | MVP-05 | C-08、C-09 | 8、9 | AC-C08-01、AC-C09-03 |
 | MVP-06 | C-08 | 8 | AC-C08-04 |
-| MVP-07 | C-06、C-09 | 6、9 | AC-C06-03、AC-C09-01、AC-C09-04、AC-C09-05 |
+| MVP-07 | C-06、C-09 | 6、9 | AC-C06-03、AC-C09-01、AC-C09-04、AC-C09-05、AC-C09-06 |
 | MVP-08 | C-06 | 6 | AC-C06-04、AC-C06-10 |
 | MVP-09 | C-06 | 6 | AC-C06-11 |
 | MVP-10 | C-10 | 10 | AC-C10-01、AC-C10-02 |
@@ -536,8 +536,8 @@ schema検証は、runtime依存をゼロに保ち、必要なschema機能だけ�
 | 6 | canonical record検証とcredential隔離 | C-06 | AC-C06-01〜11 | record sequence high-water mark、既知comment ID、permission mode / profile、Permission ID、blockされたtool、要求scope、承認bind情報 |
 | 7 | resume | C-07 | AC-C07-01〜03、AC-C07-05、AC-C07-06 | run ID、state、base / observed / approved head SHA、PR lock、coder snapshot |
 | 8 | active host protocolとstep engine | C-08 | AC-C08-01〜07 | action ID、未完了`HOST_ACTION`、nonce、submit状態 |
-| 9 | fresh reviewer runtimeと隔離checkout | C-09 | AC-C09-01〜05。両provider拡張はSection 2.5 / #52と協調 | 隔離checkout、sandbox / network profile、実行したtest / build、dirty status、破棄結果 |
-| 10 | PR mode review loop | C-10 | AC-C10-01〜06。**CLI経由のdogfooding開始** | round、finding ledgerとresolution、coder実行前後HEAD、push後head |
+| 9 | fresh reviewer runtimeと隔離checkout | C-09 | AC-C09-01〜07。AC-C09-07の受理側（schema検証済み出力だけの受理）はC-10にまたがるため、Phase 10の結合後に横断完了とする。両provider拡張はSection 2.5 / #52と協調 | 隔離checkout、sandbox / network profile、実行したtest / build、dirty status、破棄結果 |
+| 10 | PR mode review loop | C-10 | AC-C10-01〜06、AC-C09-07の受理側（Phase 9と横断完了）。**CLI経由のdogfooding開始** | round、finding ledgerとresolution、coder実行前後HEAD、push後head |
 | 11 | decision / clarification / follow-up | C-11 | AC-C11-01〜07 | clarification counter、fingerprint、未解決decision request、follow-up候補と許可record |
 | 12 | qualificationとfinal reporter | C-12 | AC-C12-01〜07 | test command / result、GitHub check名 / result / URL、artifact path |
 | 13 | human merge gate | C-13 | AC-C13-01〜10 | merge gate intent、approved head SHA、入力経路、approval comment ID、merge method、API結果、merged commit SHA |

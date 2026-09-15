@@ -8,7 +8,7 @@
 | Origin | bootstrap設計討議で合意した完成イメージ |
 | Approval | 新repositoryのbootstrap前にユーザー合意済み |
 | Owner | Mega-Gorilla |
-| Last updated | 2026-09-05 |
+| Last updated | 2026-09-15 |
 | Scope | Windows PowerShell 7、Linux/SSH上のPowerShell 7 |
 
 ## 1. この文書の目的
@@ -21,7 +21,7 @@
 
 ### 2026-09-05の拡張: roleとproviderの分離（D-032、Decided）
 
-**Behavior: Decided（2026-09-15、[Issue #52の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52#issuecomment-5677019033）） / Implementation: 設定契約・永続化・runtime照合まで実装、native adapter未実装（ADR-0025 / 0026）、Issue #52で追跡。** 合意は要件の採択であり、native adapter・認証供給・C-10接続・4組み合わせの実CLI受入が完了したことを意味しない。以下は採択した拡張内容である。
+**Behavior: Decided（2026-09-15、[Issue #52の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52#issuecomment-5677019033)） / Implementation: 設定契約・永続化・runtime照合まで実装、native adapter未実装（ADR-0025 / 0026）、Issue #52で追跡。** 合意は要件の採択であり、native adapter・認証供給・C-10接続・4組み合わせの実CLI受入が完了したことを意味しない。以下は採択した拡張内容である。
 
 coderとreviewerは役割であり、Claude Code / Codexはその実行providerである。双方を独立に選べるため、従来のClaude coder + Codex reviewer、逆の組み合わせ、Claude同士、Codex同士の4組み合わせを対象とする。同一providerでもcoderとreviewerのsession・履歴・作業領域・実効sandbox権限・GitHub write credentialを共有しない。同一providerのアカウントまたは認証元は、明示設定がある場合に限り共有可能とし、既定では共有しない。これはcoderの設定領域（`~/.codex`等）や認証fileをそのままreviewerへ渡すことを意味しない。
 
