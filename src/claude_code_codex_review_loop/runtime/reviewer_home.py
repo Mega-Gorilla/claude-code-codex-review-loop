@@ -55,11 +55,20 @@ class FixedHomeLease:
     name: str
     home: Path
     lock: Path
+    # 取得時に払い出した固有token。lockの`owner.json`がこのtokenを持つときだけ外す
+    token: str
 
     def release(self) -> None:
-        """lockを外す。既に無ければ何もしない（停止理由を置き換えない）。"""
+        """自分が取得したlockだけを外す。既に無い、または別のleaseが取得済みなら何もしない。
+
+        解放後に同じhomeを別のturnが取得し、その後に古いleaseが再び`release`されても、
+        新しいlockは残る（ownerの照合）。停止理由を置き換えないため例外は握る。
+        """
+        owner = self.lock / "owner.json"
         try:
-            (self.lock / "owner.json").unlink(missing_ok=True)
+            if _lock_owner(owner) != self.token:
+                return
+            owner.unlink()
             self.lock.rmdir()
         except OSError:
             pass
@@ -77,18 +86,41 @@ def acquire_fixed_home(*, parent: Path, name: str, disjoint_from: tuple[Path, ..
         raise HomeError("home_locked") from error
     except OSError as error:
         raise HomeError("lock") from error
-    lease = FixedHomeLease(parent=root, name=name, home=home, lock=lock)
+    token = uuid.uuid4().hex
     try:
         write_private_text(
             lock / "owner.json",
-            json.dumps({"lease": uuid.uuid4().hex, "acquired_at": datetime.now(UTC).isoformat()}),
+            json.dumps({"lease": token, "acquired_at": datetime.now(UTC).isoformat()}),
         )
+    except BaseException:
+        # ownerを書けなかったlockは自分が作ったdirだけであり、他者は取得できていない
+        _discard_lock_dir(lock)
+        raise
+    lease = FixedHomeLease(parent=root, name=name, home=home, lock=lock, token=token)
+    try:
         _validate_placement(home, root, disjoint_from)
         _remove_previous_home(home)
     except BaseException:
         lease.release()
         raise
     return lease
+
+
+def _lock_owner(owner: Path) -> str | None:
+    try:
+        parsed = json.loads(owner.read_bytes().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    lease = parsed.get("lease") if isinstance(parsed, dict) else None
+    return lease if isinstance(lease, str) else None
+
+
+def _discard_lock_dir(lock: Path) -> None:
+    try:
+        (lock / "owner.json").unlink(missing_ok=True)
+        lock.rmdir()
+    except OSError:
+        pass
 
 
 def write_home_marker(home: Path) -> Path:

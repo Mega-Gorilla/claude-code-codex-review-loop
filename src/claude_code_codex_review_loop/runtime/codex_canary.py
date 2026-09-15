@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Final
@@ -25,6 +25,7 @@ from typing import Final
 from ..identity.fs_permissions import (
     FsPermissionError,
     create_private_dir,
+    remove_tree,
     verify_private_dir,
     verify_private_file,
     write_private_text,
@@ -74,11 +75,16 @@ def prepare_codex_canary_home(
     name: str,
     workspace_root: Path,
     protected_roots: Iterable[Path],
+    initialize: Callable[[Path], object] | None = None,
 ) -> CodexCanaryHome:
     """private root配下へ専用homeとpermission profileを排他的に作る。
 
     `protected_roots`には少なくとも実repositoryとstate rootを渡す。workspaceと重なる
     rootは拒否するため、誤って実repositoryをwrite許可対象にする構成は成立しない。
+
+    `initialize`はdirectory作成の**直後・config書込の前**に呼ぶ（ADR-0031 決定7-4: ownership markerを
+    先に置く）。失敗した場合は今回作ったdirectoryを取り除いて`initialize`で停止する。config書込に
+    失敗した場合はmarker付きのdirectoryが残り、次回の固定home取得が再生成で回復できる。
     """
     _validate_name(name)
     _validate_private_root(private_root)
@@ -87,6 +93,15 @@ def prepare_codex_canary_home(
     root = private_root / name
     try:
         create_private_dir(root)
+    except (FsPermissionError, OSError) as error:
+        raise CanaryError("configuration") from error
+    if initialize is not None:
+        try:
+            initialize(root)
+        except Exception as error:
+            _discard_new_root(root)
+            raise CanaryError("initialize") from error
+    try:
         config_path = root / _CONFIG_NAME
         # rootは末尾へ固定する。後段の再検証で「外部保護root」とCODEX_HOMEを区別し、
         # config出力だけは外部rootのpath順を決定的に保つ。
@@ -166,6 +181,14 @@ def _validate_private_root(path: Path) -> None:
         verify_private_dir(root)
     except (CanaryError, FsPermissionError) as error:
         raise CanaryError("private_root") from error
+
+
+def _discard_new_root(root: Path) -> None:
+    """今回作ったばかりのrootを取り除く（best effort。停止理由は呼出側が決める）。"""
+    try:
+        remove_tree(root)
+    except FsPermissionError:
+        pass
 
 
 def _canonical_directory(path: Path, stage: str) -> Path:

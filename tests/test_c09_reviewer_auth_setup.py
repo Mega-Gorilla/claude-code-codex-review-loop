@@ -158,14 +158,15 @@ class TestRunReviewerAuthSetup:
         with pytest.raises(AuthSetupError) as stopped:
             fx.run()
         assert stopped.value.stage == "storage_mode" and fx.login.calls == []
-        assert not (fx.home / MARKER_NAME).exists() and not (fx.parent / "reviewer-codex-home.lock").exists()
+        # markerはconfigより先に置かれるため、途中失敗後も次回の固定home取得が再生成で回復できる
+        assert (fx.home / MARKER_NAME).is_file() and not (fx.parent / "reviewer-codex-home.lock").exists()
 
     def test_login_that_writes_a_file_credential_is_rejected_and_the_file_removed(self, fx: Fixture) -> None:
         fx.login.write_auth_file = True
         with pytest.raises(AuthSetupError) as stopped:
             fx.run()
         assert stopped.value.stage == "file_credentials"
-        assert not (fx.home / "auth.json").exists() and not (fx.home / MARKER_NAME).exists()
+        assert not (fx.home / "auth.json").exists() and (fx.home / MARKER_NAME).is_file()
 
     def test_preexisting_file_credential_is_rejected_before_login(
         self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
@@ -185,7 +186,7 @@ class TestRunReviewerAuthSetup:
         fx.login.exit_code = 1
         with pytest.raises(AuthSetupError) as stopped:
             fx.run()
-        assert stopped.value.stage == "login" and not (fx.home / MARKER_NAME).exists()
+        assert stopped.value.stage == "login" and (fx.home / MARKER_NAME).is_file()
 
     @pytest.mark.parametrize(("status", "storage"), (("fail", "Keyring"), ("ok", "File")))
     def test_unregistered_credential_after_login_is_reported(self, fx: Fixture, status: str, storage: str) -> None:
@@ -193,7 +194,7 @@ class TestRunReviewerAuthSetup:
         fx.fake.storage_after = storage
         with pytest.raises(AuthSetupError) as stopped:
             fx.run()
-        assert stopped.value.stage == "not_registered" and not (fx.home / MARKER_NAME).exists()
+        assert stopped.value.stage == "not_registered" and (fx.home / MARKER_NAME).is_file()
 
     def test_unsupported_cli_version_stops_before_doctor(self, fx: Fixture) -> None:
         fx.fake.version = "codex-cli 0.155.0"
@@ -295,13 +296,35 @@ class TestRunReviewerAuthSetup:
         assert stopped.value.stage == "file_credentials"
         monkeypatch.undo()
 
-    def test_marker_write_failure_is_mapped(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_marker_write_failure_removes_the_fresh_home(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             module, "write_home_marker", lambda home: (_ for _ in ()).throw(module.HomeError("marker"))
         )
         with pytest.raises(AuthSetupError) as stopped:
             fx.run()
+        assert stopped.value.stage == "home:marker" and not fx.home.exists() and fx.fake.specs == []
+
+    def test_marker_write_failure_with_unremovable_home_still_stops(
+        self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            module, "write_home_marker", lambda home: (_ for _ in ()).throw(module.HomeError("marker"))
+        )
+        monkeypatch.setattr(
+            module, "remove_tree", lambda root: (_ for _ in ()).throw(module.FsPermissionError("remove", "t"))
+        )
+        with pytest.raises(AuthSetupError) as stopped:
+            fx.run()
         assert stopped.value.stage == "home:marker"
+
+    def test_failed_setup_is_recoverable_on_the_next_attempt(self, fx: Fixture) -> None:
+        """config失敗やlogin失敗の後でも、marker付きのhomeを次回の取得が再生成する。"""
+        fx.login.exit_code = 1
+        with pytest.raises(AuthSetupError):
+            fx.run()
+        fx.login.exit_code = 0
+        result = fx.run()
+        assert result.marker.is_file() and (fx.home / "config.toml").is_file()
 
     def test_stdout_read_failure_is_classified(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
         original = Path.open
