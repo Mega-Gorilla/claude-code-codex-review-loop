@@ -229,18 +229,17 @@ def _review_with_home(
     home_path: Path,
 ) -> tuple[ReviewerCompleted | ReviewerTimedOut, str, ProvisioningMirror | None, Path]:
     try:
+        # markerはdirectory作成の直後・config書込の前に置く（ADR-0031 決定7-4）。marker書込に失敗すれば
+        # 今回作ったdirectoryは取り除かれ、config書込に失敗してもmarker付きで残るため次回のrunが回復できる
         home = prepare_codex_canary_home(
             private_root=home_path.parent,
             name=home_path.name,
             workspace_root=checkout.repository,
             protected_roots=(request.source_repository, *request.protected_roots),
+            initialize=write_home_marker,
         )
     except CanaryError as error:
         raise TurnError(f"canary:{error.stage}") from error
-    try:
-        write_home_marker(home.root)
-    except HomeError as error:
-        raise TurnError(f"home:{error.stage}") from error
     provisioning: ProvisioningMirror | None = None
     if request.provisioning_source is not None and _platform() == "win32":
         try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +60,68 @@ class TestAcquireFixedHome:
         assert not lease.home.exists()  # 中身は呼出側が作る
         lease.release()
         assert not lease.lock.exists()
+
+    def test_stale_lease_release_does_not_remove_a_newer_lock(self, tmp_path: Path) -> None:
+        """解放済みの古いleaseを再び解放しても、後から取得した別leaseのlockは残る（owner tokenの照合）。"""
+        parent = _parent(tmp_path)
+        first = acquire_fixed_home(parent=parent, name="reviewer-home", disjoint_from=())
+        first.release()
+        second = acquire_fixed_home(parent=parent, name="reviewer-home", disjoint_from=())
+        first.release()
+        assert second.lock.is_dir() and (second.lock / "owner.json").is_file()
+        assert first.token != second.token
+        second.release()
+        assert not second.lock.exists()
+
+    def test_lock_without_a_matching_owner_is_left_alone(self, tmp_path: Path) -> None:
+        parent = _parent(tmp_path)
+        lease = acquire_fixed_home(parent=parent, name="reviewer-home", disjoint_from=())
+        (lease.lock / "owner.json").write_text(json.dumps({"lease": "someone-else"}), encoding="utf-8")
+        lease.release()
+        assert lease.lock.is_dir()
+        (lease.lock / "owner.json").write_text("{not json", encoding="utf-8")
+        lease.release()
+        assert lease.lock.is_dir()
+
+    def test_owner_write_failure_discards_only_the_fresh_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        parent = _parent(tmp_path)
+        monkeypatch.setattr(
+            module, "write_private_text", lambda *args: (_ for _ in ()).throw(FsPermissionError("write", "t"))
+        )
+        with pytest.raises(FsPermissionError):
+            acquire_fixed_home(parent=parent, name="reviewer-home", disjoint_from=())
+        assert not (parent / "reviewer-home.lock").exists()
+
+    def test_release_leaves_a_lock_whose_owner_file_is_missing_or_unremovable(self, tmp_path: Path) -> None:
+        parent = _parent(tmp_path)
+        lease = acquire_fixed_home(parent=parent, name="reviewer-home", disjoint_from=())
+        (lease.lock / "owner.json").unlink()
+        lease.release()
+        assert lease.lock.is_dir()  # ownerが読めないlockは自分のものと確認できないので触らない
+        lease.lock.rmdir()
+        lease = acquire_fixed_home(parent=parent, name="reviewer-home", disjoint_from=())
+        (lease.lock / "extra").write_text("x", encoding="utf-8")
+        lease.release()  # rmdirの失敗は握る（停止理由を置き換えない）
+        assert lease.lock.is_dir() and not (lease.lock / "owner.json").exists()
+
+    def test_owner_write_failure_with_unremovable_lock_dir_still_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        parent = _parent(tmp_path)
+        monkeypatch.setattr(
+            module, "write_private_text", lambda *args: (_ for _ in ()).throw(FsPermissionError("write", "t"))
+        )
+        original = Path.rmdir
+        def refusing(self: Path) -> None:
+            if self.name.endswith(".lock"):
+                raise PermissionError("t")
+            original(self)
+
+        monkeypatch.setattr(Path, "rmdir", refusing)
+        with pytest.raises(FsPermissionError):
+            acquire_fixed_home(parent=parent, name="reviewer-home", disjoint_from=())
 
     def test_release_is_idempotent(self, tmp_path: Path) -> None:
         lease = acquire_fixed_home(parent=_parent(tmp_path), name="reviewer-home", disjoint_from=())
@@ -274,6 +337,44 @@ class TestFsHelpers:
             pytest.skip("symlinkを作成できない環境")
         remove_tree(root)
         assert not root.exists() and (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+    def test_remove_tree_leaves_nested_junction_targets_and_their_attributes_untouched(self, tmp_path: Path) -> None:
+        """入れ子のjunction / symlinkの先へは降りず、chmodも行わない（read-only属性が不変）。"""
+        root = tmp_path / "tree"
+        (root / "nested").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "readonly.txt"
+        victim.write_text("keep", encoding="utf-8")
+        os.chmod(victim, 0o444)
+        _junction(root / "nested" / "link", outside)
+        (root / "nested" / "own.txt").write_text("x", encoding="utf-8")
+        os.chmod(root / "nested" / "own.txt", 0o444)
+        remove_tree(root)
+        assert not root.exists()
+        assert victim.read_text(encoding="utf-8") == "keep"
+        assert not os.stat(victim).st_mode & stat.S_IWRITE
+
+    def test_remove_tree_removes_file_symlinks_without_touching_targets(self, tmp_path: Path) -> None:
+        root = tmp_path / "tree"
+        root.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("keep", encoding="utf-8")
+        try:
+            (root / "file-link").symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinkを作成できない環境")
+        remove_tree(root)
+        assert not root.exists() and outside.read_text(encoding="utf-8") == "keep"
+
+    def test_remove_tree_refuses_a_root_that_is_a_reparse_point(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep", encoding="utf-8")
+        _junction(tmp_path / "link", outside)
+        with pytest.raises(FsPermissionError) as stopped:
+            remove_tree(tmp_path / "link")
+        assert stopped.value.stage == "remove" and (outside / "keep.txt").exists()
 
     def test_remove_tree_failure_is_classified(self, tmp_path: Path) -> None:
         with pytest.raises(FsPermissionError) as stopped:
