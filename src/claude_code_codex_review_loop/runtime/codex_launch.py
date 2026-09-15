@@ -22,6 +22,7 @@ prompt本文の構成（P-008 fence、`ReviewContext`）、出力の受理・検
 from __future__ import annotations
 
 import stat
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,9 +32,13 @@ from ..identity.fs_permissions import FsPermissionError, write_private_text
 from ..policy.redaction import RedactionResult, redact
 from ..process import Completed, SpawnError, SpawnSpec, StopError, run_tree
 from .codex_canary import CanaryError, CodexCanaryHome, build_codex_canary_invocation
-from .codex_preflight import PreflightEvidence, run_sandbox_preflight
+from .codex_preflight import PreflightEvidence, run_sandbox_preflight, verify_preflight_evidence
 
 MAX_PROMPT_BYTES: Final = 1_048_576
+# ADR-0031 決定5: keyring keyの導出（`CODEX_HOME`のpath hash）はCLIの内部実装への依存であり、実測した
+# versionにbindする。一致しなければ起動せず、対応versionの更新と再loginを案内する。
+SUPPORTED_CODEX_VERSIONS: Final = frozenset({"codex-cli 0.154.0"})
+REQUIRED_AUTH_STORAGE: Final = "Keyring"
 MAX_DIAGNOSTIC_BYTES: Final = 262_144
 # 最終messageのbounded readの上限。C-10はこの値以下の`max_input_bytes`で検証する前提で、
 # 上限+1 byteまで読むことで「上限を超えていた」ことをC-10のsize stageが判定できる。
@@ -84,7 +89,11 @@ def launch_codex_reviewer(
     timeout_seconds: float,
     grace_seconds: float,
 ) -> ReviewerCompleted | ReviewerTimedOut:
-    """preflight -> prompt file -> spawn -> 結果の読み取り。preflightの失敗はそのまま伝播する。"""
+    """preflight -> spawn直前の再測定 -> auth gate -> prompt file -> spawn -> 結果の読み取り。
+
+    preflightの失敗はそのまま伝播する。ADR-0027 決定14: 最初のevidenceを取得した後、spawn直前に同じ測定を
+    再実行し、完全一致した場合だけ進む。auth gate（ADR-0031 決定5）は再測定を通ったevidenceに対して成立させる。
+    """
     _validate_prompt(prompt)
     evidence = run_sandbox_preflight(
         home=home,
@@ -94,6 +103,16 @@ def launch_codex_reviewer(
         timeout_seconds=timeout_seconds,
         grace_seconds=grace_seconds,
     )
+    verify_preflight_evidence(
+        evidence,
+        home=home,
+        codex_executable=codex_executable,
+        reviewer_env=reviewer_env,
+        evidence_root=evidence_root,
+        timeout_seconds=timeout_seconds,
+        grace_seconds=grace_seconds,
+    )
+    _require_auth_ready(evidence)
     root = Path(evidence_root)
     prompt_path = root / _PROMPT_NAME
     last_message_path = root / _LAST_MESSAGE_NAME
@@ -139,6 +158,25 @@ def launch_codex_reviewer(
         diagnostic=diagnostic,
         evidence=evidence,
     )
+
+
+def _require_auth_ready(evidence: PreflightEvidence) -> None:
+    """起動前のauth gate（ADR-0031 決定5）。
+
+    Windows native以外は方式が未確定（Open）で`auth_platform`。CLI versionが実測versionと違えば`auth_version`。
+    credentialがOS credential storeに登録済み（`ok` / `Keyring`）でなければ`auth`。preflightのdoctor出力を
+    そのまま使うため、この判定はspawn前・prompt fileの書込前に行い、認証なしのcanaryはpreflightで完結する。
+    """
+    if _platform() != "win32":
+        raise LaunchError("auth_platform")
+    if evidence.codex_version not in SUPPORTED_CODEX_VERSIONS:
+        raise LaunchError("auth_version")
+    if evidence.auth.status != "ok" or evidence.auth.storage_mode != REQUIRED_AUTH_STORAGE:
+        raise LaunchError("auth")
+
+
+def _platform() -> str:
+    return sys.platform
 
 
 def _validate_prompt(prompt: str) -> None:

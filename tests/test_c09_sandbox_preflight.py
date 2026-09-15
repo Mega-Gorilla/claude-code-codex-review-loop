@@ -32,6 +32,7 @@ from claude_code_codex_review_loop.runtime.codex_preflight import (
     EXPECTED_BOUNDARIES,
     EXPECTED_CONTROL,
     NETWORK_CONTROL_TARGET,
+    AuthState,
     EffectiveSandbox,
     PreflightError,
     PreflightEvidence,
@@ -133,6 +134,16 @@ class FakeCodex:
                         },
                     },
                     "sandbox.helpers": {"status": doctor["helper_status"], "details": doctor["details"]},
+                    **(
+                        {}
+                        if doctor.get("auth_absent")
+                        else {
+                            "auth.credentials": {
+                                "status": doctor.get("auth_status", "ok"),
+                                "details": {"auth storage mode": doctor.get("auth_storage", "Keyring")},
+                            }
+                        }
+                    ),
                 }
             }
         )
@@ -214,6 +225,7 @@ class TestRunSandboxPreflight:
         assert evidence.effective == EffectiveSandbox(
             "Never", "restricted", "restricted", "true", "elevated", "complete"
         )
+        assert evidence.auth == AuthState("ok", "Keyring")
         assert dict(evidence.control) == dict(EXPECTED_CONTROL)
         assert dict(evidence.boundaries) == dict(EXPECTED_BOUNDARIES)
         version, doctor, control, probe = fx.fake.specs
@@ -465,6 +477,21 @@ class TestRunSandboxPreflight:
         assert stopped.value.stage == "sandbox_backend"
         assert len(fx.fake.specs) == 2
 
+    @pytest.mark.parametrize(
+        ("overrides", "expected"),
+        (
+            ({"auth_status": "fail", "auth_storage": "File"}, AuthState("fail", "File")),
+            ({"auth_absent": True}, AuthState("", "")),
+        ),
+        ids=("file", "absent"),
+    )
+    def test_auth_state_is_recorded_without_being_required_by_preflight(
+        self, fx: Fixture, overrides: dict[str, object], expected: AuthState
+    ) -> None:
+        """preflightは認証を要さない（credential-free canary）。状態はevidenceへ記録し、起動facadeが照合する。"""
+        fx.fake.doctor(**overrides)
+        assert fx.run().auth == expected
+
     def test_backend_fields_are_recorded_but_not_required_outside_windows(
         self, fx: Fixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -558,7 +585,7 @@ class TestVerifyPreflightEvidence:
         (
             "codex_executable", "codex_version", "configuration_digest", "profile_name", "workspace_root",
             "protected_roots", "codex_home", "environment_digest", "probe_interpreter", "probe_digest",
-            "network_target", "effective", "control", "boundaries",
+            "network_target", "effective", "auth", "control", "boundaries",
         ),
     )
     def test_forged_or_stale_evidence_is_rejected_against_fresh_measurement(self, fx: Fixture, field: str) -> None:
@@ -578,6 +605,7 @@ class TestVerifyPreflightEvidence:
             "effective": EffectiveSandbox("UnlessTrusted", "restricted", "restricted", "true", "elevated", "complete"),
             "control": {**EXPECTED_CONTROL, "network": "denied"},
             "boundaries": {**EXPECTED_BOUNDARIES, "network": "allowed"},
+            "auth": AuthState("fail", "File"),
         }
         with pytest.raises(PreflightError) as stopped:
             fx.verify(replace(evidence, **{field: forged[field]}))

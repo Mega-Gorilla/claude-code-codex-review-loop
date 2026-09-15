@@ -102,6 +102,17 @@ class EffectiveSandbox:
 
 
 @dataclass(frozen=True)
+class AuthState:
+    """`codex doctor --json`の`auth.credentials`から読み取った認証の状態（ADR-0031 決定5）。
+
+    preflight自体は認証を要さない。起動facadeがspawn前にこの値を照合する。checkが無ければ空文字。
+    """
+
+    status: str
+    storage_mode: str
+
+
+@dataclass(frozen=True)
 class PreflightEvidence:
     """facadeが取得した実測evidence。spawn直前に同じ測定を再実行して照合する。"""
 
@@ -117,6 +128,7 @@ class PreflightEvidence:
     probe_digest: str
     network_target: tuple[str, int]
     effective: EffectiveSandbox
+    auth: AuthState
     control: Mapping[str, str]
     boundaries: Mapping[str, str]
 
@@ -136,7 +148,7 @@ def run_sandbox_preflight(
     _validate_evidence_root(evidence_root, home)
     runner = _Runner(invocation.env, home.workspace_root, evidence_root, timeout_seconds, grace_seconds)
     version = _read_version(runner, executable)
-    effective = _read_effective_config(runner, executable, home)
+    effective, auth = _read_effective_config(runner, executable, home)
     probe = _canonical_probe()
     # sentinelは1測定ごとに払い出す一意なfile名。probeの書込先をhost側で残留確認するために使い、
     # 再測定で値が変わるためevidenceには含めない。
@@ -156,6 +168,7 @@ def run_sandbox_preflight(
         probe_digest=PROBE_DIGEST,
         network_target=NETWORK_CONTROL_TARGET,
         effective=effective,
+        auth=auth,
         control=control,
         boundaries=boundaries,
     )
@@ -248,7 +261,9 @@ def _read_version(runner: _Runner, executable: str) -> str:
     return version
 
 
-def _read_effective_config(runner: _Runner, executable: str, home: CodexCanaryHome) -> EffectiveSandbox:
+def _read_effective_config(
+    runner: _Runner, executable: str, home: CodexCanaryHome
+) -> tuple[EffectiveSandbox, AuthState]:
     """doctorの終了codeは認証欠如でもfailになるため見ず、JSONの該当checkだけを照合する。"""
     _, text = runner.output("doctor", (executable, "doctor", "--json"))
     try:
@@ -270,6 +285,7 @@ def _read_effective_config(runner: _Runner, executable: str, home: CodexCanaryHo
         )
         home_seen = str(load_details["CODEX_HOME"])
         cwd_seen = str(load_details["cwd"])
+        auth = auth_state_from_check(checks.get("auth.credentials"))
     except (ValueError, KeyError, TypeError) as error:
         raise PreflightError("doctor_output") from error
     if load_status != "ok" or home_seen != str(home.root) or cwd_seen != str(home.workspace_root):
@@ -282,7 +298,16 @@ def _read_effective_config(runner: _Runner, executable: str, home: CodexCanaryHo
     # D-033: helperがokでも、Windowsでelevated backendがprovisioning済みでなければ起動しない。
     if _platform() == "win32" and _backend_fields(effective) != dict(_WINDOWS_EXPECTED_BACKEND):
         raise PreflightError("sandbox_backend")
-    return effective
+    return effective, auth
+
+
+def auth_state_from_check(check: object) -> AuthState:
+    """`auth.credentials` checkの観測値。無い・形が違う場合は空文字（起動facadeが拒否する）。auth-setupも使う。"""
+    if not isinstance(check, dict):
+        return AuthState(status="", storage_mode="")
+    details = check.get("details")
+    storage = details.get("auth storage mode", "") if isinstance(details, dict) else ""
+    return AuthState(status=str(check.get("status", "")), storage_mode=str(storage))
 
 
 @dataclass(frozen=True)
