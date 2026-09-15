@@ -27,6 +27,7 @@ _BASE_WITH_SECRETS = {
     "GH_TOKEN": "ghp_" + "a" * 36,
     "ANTHROPIC_API_KEY": "sk-ant-" + "b" * 24,
     "AWS_SESSION_TOKEN": "c" * 40,
+    "CODEX_ACCESS_TOKEN": "d" * 40,
     "HOME": "/home/real-user",
     "GH_CONFIG_DIR": "/home/real-user/.config/gh",
     "UNRELATED_VAR": "value",
@@ -118,7 +119,7 @@ class TestBuildReviewerEnv:
         assert env["HOME"] == str(home.root)
         assert env["CODEX_PROFILE"] == "readonly"
 
-    @pytest.mark.parametrize("name", ["GH_TOKEN", "gh_token", "ANTHROPIC_API_KEY"])
+    @pytest.mark.parametrize("name", ["GH_TOKEN", "gh_token", "ANTHROPIC_API_KEY", "CODEX_ACCESS_TOKEN"])
     def test_token_name_in_extra_is_rejected(self, tmp_path: Path, name: str) -> None:
         """二重防御: allowlist構築でも届かないが、extra経由の混入をerrorにする。"""
         with pytest.raises(CredentialIsolationError) as excinfo:

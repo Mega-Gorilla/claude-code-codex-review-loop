@@ -171,6 +171,12 @@ def _discard_fresh_home(home: Path) -> None:
 
 
 def _environment(reviewer_env: Mapping[str, str]) -> dict[str, str]:
+    """envはC-06のallowlist（`build_reviewer_env`）で構築されたものを受け取る前提で、ここは二重防御。
+
+    C-04の正本`TOKEN_ENV_NAMES`（Codex CLIが認証材料として読む`CODEX_ACCESS_TOKEN` /
+    `CODEX_API_KEY`等のaliasを含む）と大文字小文字を無視して一致するkeyがあれば、home作成・
+    子processの起動より前に`environment`で停止する。値は読まず、例外へも載せない。
+    """
     env = dict(reviewer_env)
     if {name.upper() for name in env} & set(TOKEN_ENV_NAMES):
         raise AuthSetupError("environment")

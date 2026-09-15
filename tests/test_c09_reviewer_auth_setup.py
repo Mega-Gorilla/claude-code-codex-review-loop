@@ -229,11 +229,20 @@ class TestRunReviewerAuthSetup:
             fx.run()
         assert stopped.value.stage == stage and fx.login.calls == []
 
-    def test_token_environment_is_rejected_before_anything(self, fx: Fixture) -> None:
+    @pytest.mark.parametrize(
+        "name",
+        ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "codex_access_token", "Codex_Access_Token"),
+    )
+    def test_token_environment_is_rejected_before_anything(self, fx: Fixture, name: str) -> None:
+        """Codex CLIが認証材料として読むalias（`codex login --with-access-token`の`CODEX_ACCESS_TOKEN`を含む）は、
+        大文字小文字を問わず、home作成・version / doctor / loginのどれよりも前に`environment`で止まる。
+        """
+        secret = "sk-" + "x" * 40
         with pytest.raises(AuthSetupError) as stopped:
-            fx.run(reviewer_env={**fx.env, "OPENAI_API_KEY": "sk-" + "x" * 40})
-        assert stopped.value.stage == "environment" and fx.fake.specs == []
-        assert "sk-" not in str(stopped.value)
+            fx.run(reviewer_env={**fx.env, name: secret})
+        assert stopped.value.stage == "environment"
+        assert fx.fake.specs == [] and fx.login.calls == [] and not fx.home.exists()
+        assert secret not in str(stopped.value)
 
     @pytest.mark.parametrize("kind", ("relative", "missing"))
     def test_invalid_executable_is_rejected(self, fx: Fixture, kind: str) -> None:
