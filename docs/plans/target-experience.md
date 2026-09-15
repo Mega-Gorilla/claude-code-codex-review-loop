@@ -8,29 +8,29 @@
 | Origin | bootstrap設計討議で合意した完成イメージ |
 | Approval | 新repositoryのbootstrap前にユーザー合意済み |
 | Owner | Mega-Gorilla |
-| Last updated | 2026-09-05 |
+| Last updated | 2026-09-15 |
 | Scope | Windows PowerShell 7、Linux/SSH上のPowerShell 7 |
 
 ## 1. この文書の目的
 
-この文書は、Claude Codeをcoder、Codexをread-only reviewerとして利用し、PRの実装・修正・再レビュー、ユーザーの明示的なmerge承認、merge実行・確認までを支援するloopの完成イメージを定義する。両roleのproviderを独立選択する拡張はD-032の提案として区別する。
+この文書は、Claude Codeをcoder、Codexをread-only reviewerとして利用し、PRの実装・修正・再レビュー、ユーザーの明示的なmerge承認、merge実行・確認までを支援するloopの完成イメージを定義する。両roleのproviderを独立選択する拡張はD-032（Decided、2026-09-15）として区別する。
 
 実装詳細を決める前に、ユーザーから見た操作、表示、停止条件、復旧、最終成果物を合意するためのゴールドキュメントとして使用する。
 
 この文書は本repositoryで合意済みの設計baselineである。labelの定義は「用語と合意状態」の表を参照する。`Proposed`から`Decided`への変更にはGitHub上のユーザー明示合意recordを要する。文書全体の`Agreed`は、個別の`Proposed`を合意済みにするものではない。
 
-### 2026-09-05の拡張案: roleとproviderの分離（D-032）
+### 2026-09-05の拡張: roleとproviderの分離（D-032、Decided）
 
-**Behavior: Proposed / Implementation: 設定契約・永続化・runtime照合まで実装、native adapter未実装（ADR-0025 / 0026）、Issue #52で追跡。** 会話でのユーザー要望を受けた提案であり、GitHub上のユーザー明示合意recordは未取得。Issue #52自体を合意根拠とは扱わず、同IssueまたはPR #53でD-032への明示合意を得た後、そのcomment URLをdecision logへ記録して`Decided`へ変更する。それまでは既存の合意済みbaselineを置き換えない。以下は採択時の拡張内容である。
+**Behavior: Decided（2026-09-15、[Issue #52の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52#issuecomment-5677019033)） / Implementation: 設定契約・永続化・runtime照合まで実装、native adapter未実装（ADR-0025 / 0026）、Issue #52で追跡。** 合意は要件の採択であり、native adapter・認証供給・C-10接続・4組み合わせの実CLI受入が完了したことを意味しない。以下は採択した拡張内容である。
 
-coderとreviewerは役割であり、Claude Code / Codexはその実行providerである。双方を独立に選べるため、従来のClaude coder + Codex reviewer、逆の組み合わせ、Claude同士、Codex同士の4組み合わせを対象とする。同一providerでもcoderとreviewerのsession・作業領域・権限を共有しない。
+coderとreviewerは役割であり、Claude Code / Codexはその実行providerである。双方を独立に選べるため、従来のClaude coder + Codex reviewer、逆の組み合わせ、Claude同士、Codex同士の4組み合わせを対象とする。同一providerでもcoderとreviewerのsession・履歴・作業領域・実効sandbox権限・GitHub write credentialを共有しない。同一providerのアカウントまたは認証元は、明示設定がある場合に限り共有可能とし、既定では共有しない。これはcoderの設定領域（`~/.codex`等）や認証fileをそのままreviewerへ渡すことを意味しない。
 
 - active coderは選択したproviderの既存sessionでcontextを維持する。TUIキー注入や、別provider／headlessへの無断切替をしない
 - reviewerはproviderを問わずfreshな隔離環境で動き、実repositoryとGitHubへ永続変更しない。coderは許可された作業branchの変更まで、merge等はユーザー承認後のControllerに限る
 - provider選択とmodel選択、permission profile、active/headlessの実行方式は区別する。CLI未対応や必要な隔離機能がない場合は停止し、権限を緩めて対応済みとしない
 - 第三のproviderやGUIアプリ自動操作は今回の必須範囲に含めない。両providerのactive入口・配布形式、final reporterのprovider選択、旧設定の扱いは実装ADRで確定する
 
-D-032の採択までは、以下のClaude coder / Codex reviewerという固有名の手順が既存baselineである。採択後は従来の組み合わせの例として読み、D-010 / D-011 / D-013 / D-014 / D-015 / D-017 / D-024 / D-025 / D-026 / D-028 / D-029の**役割に対応するprovider固定部分だけ**を一般化する案とする。context維持・fresh review・権限分離・ユーザー承認の契約は維持する。Claude固有のAuto mode等をCodexへ機械的に置き換える意味ではない。配布もClaude Code Pluginだけで両host対応済みとはしない。
+D-032の採択（2026-09-15）により、以下のClaude coder / Codex reviewerという固有名の手順は従来の組み合わせ（既存baseline）の例として読み、D-010 / D-011 / D-013 / D-014 / D-015 / D-017 / D-024 / D-025 / D-026 / D-028 / D-029の**役割に対応するprovider固定部分だけ**を一般化する。context維持・fresh review・権限分離・ユーザー承認の契約は維持する。Claude固有のAuto mode等をCodexへ機械的に置き換える意味ではない。配布もClaude Code Pluginだけで両host対応済みとはしない。
 
 ## 2. 用語と合意状態
 
@@ -41,7 +41,7 @@ D-032の採択までは、以下のClaude coder / Codex reviewerという固有�
 | `Open` | ユーザー判断または技術検証が必要 |
 | `Superseded` | 後の合意により置き換えられた過去の決定 |
 
-主要な役割（role名で表記するが、合意済みproviderはcoderがClaude Code、reviewer / final reporterがCodex。以下の独立選択表記はD-032採択時の案）:
+主要な役割（role名で表記する。従来の組み合わせはcoderがClaude Code、reviewer / final reporterがCodexで、D-032の採択により両roleへ独立に設定できる。実装状況はIssue #52）:
 
 - **User**: 実行を開始し、必要な判断を行い、`READY_FOR_HUMAN_MERGE`で質問・修正依頼または明示的なmerge承認を入力する
 - **Controller**: LLMを内包せず、GitHub、worktree、agent、test、CI、state、logと、明示承認後のmergeを決定論的に調整する
@@ -867,27 +867,27 @@ IDは[implementation plan](implementation-plan.md)のtraceabilityから参照す
 | D-007 | 2026-08-17 | 初期要件整理と完成イメージ合意を別の討議として分けて進める | Decided | 完成イメージ合意 |
 | D-008 | 2026-08-17 | 既存docsは初回整理で移動せず、indexで分類する | Decided | 完成イメージ合意の準備 |
 | D-009 | 2026-08-17 | Issue modeは指定Issueの内容を実装要件とし、対応PRが既にあれば重複作成せず再利用する | Decided | 完成イメージ合意 |
-| D-010 | 2026-08-17 | Claudeのdraft decision requestをCodexが判断要否も含めてreviewし、`ASK_USER`時はClaudeが最終briefを作成して停止、`PROCEED_WITH_RECORD`時はPRへ記録して継続する | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | 完成イメージ合意 |
-| D-011 | 2026-08-17 | ClaudeはCodexの返答へ同一topicあたり最大5 clarification turnsまで再問い合わせでき、解決・no-progress・ユーザー判断移行時は早期終了する | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | 完成イメージ合意 |
+| D-010 | 2026-08-17 | Claudeのdraft decision requestをCodexが判断要否も含めてreviewし、`ASK_USER`時はClaudeが最終briefを作成して停止、`PROCEED_WITH_RECORD`時はPRへ記録して継続する | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | 完成イメージ合意 |
+| D-011 | 2026-08-17 | ClaudeはCodexの返答へ同一topicあたり最大5 clarification turnsまで再問い合わせでき、解決・no-progress・ユーザー判断移行時は早期終了する | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | 完成イメージ合意 |
 | D-012 | 2026-08-17 | GitHub Issue / PRをagent・ユーザー間の正式なconversation sourceとし、各論理turnを投稿・read-after-write確認してから次agentを起動する | Decided | 完成イメージ合意 |
-| D-013 | 2026-08-17 | `READY_FOR_HUMAN_MERGE`をClaude Code PowerShell画面で質問・修正依頼・明示承認を受ける対話gateとし、明示承認をGitHubへ記録後、Controllerが同一headを再検証・merge・確認して`MERGED`を正常な最終状態とする | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | 完成イメージ合意 |
-| D-014 | 2026-08-17 | 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを呼び出し、active sessionの会話contextを維持したままClaudeがhost / coderを担当する。`cc-review` CLIはheadless・復旧用の補助経路とする | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | 完成イメージ合意 |
-| D-015 | 2026-08-17 | Codex reviewer / final reporterは既存の対話sessionを再利用せず、現在headとGitHub canonical conversationを入力に毎回freshなread-only subprocessとして実行する | Decided; durable read-onlyと検証用一時書込の境界はD-025で補足; provider固定部分の拡張案はD-032（Proposed、未置換） | 完成イメージ合意 |
+| D-013 | 2026-08-17 | `READY_FOR_HUMAN_MERGE`をClaude Code PowerShell画面で質問・修正依頼・明示承認を受ける対話gateとし、明示承認をGitHubへ記録後、Controllerが同一headを再検証・merge・確認して`MERGED`を正常な最終状態とする | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | 完成イメージ合意 |
+| D-014 | 2026-08-17 | 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを呼び出し、active sessionの会話contextを維持したままClaudeがhost / coderを担当する。`cc-review` CLIはheadless・復旧用の補助経路とする | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | 完成イメージ合意 |
+| D-015 | 2026-08-17 | Codex reviewer / final reporterは既存の対話sessionを再利用せず、現在headとGitHub canonical conversationを入力に毎回freshなread-only subprocessとして実行する | Decided; durable read-onlyと検証用一時書込の境界はD-025で補足; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | 完成イメージ合意 |
 | D-016 | 2026-08-17 | 最初のreleaseへPR modeとIssue modeの両方を含める。内部実装はPR modeを先行可能だが、Issue取得・実装・既存PR再利用・Issue→PR handoff・共通review loopまで完成する前に初回releaseとしない | Decided | 完成イメージ合意 |
-| D-017 | 2026-08-17 | agentごとのtab / paneは既定で自動起動せず、ユーザーがClaude Code画面から明示要求した場合だけ任意wrapperで監視paneを開く。wrapperなしでもcore loopは動作し、Codex paneはfresh subprocessのread-only log監視に限定する | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | 完成イメージ合意 |
+| D-017 | 2026-08-17 | agentごとのtab / paneは既定で自動起動せず、ユーザーがClaude Code画面から明示要求した場合だけ任意wrapperで監視paneを開く。wrapperなしでもcore loopは動作し、Codex paneはfresh subprocessのread-only log監視に限定する | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | 完成イメージ合意 |
 | D-018 | 2026-08-17 | Linux/SSHでは対応`tmux` wrapper内のrunをSSH切断後もユーザー判断不要な範囲で継続する。判断が必要ならGitHubへ資料を投稿して`AWAITING_USER_DECISION`、merge-readyならfinal reportを投稿して`READY_FOR_HUMAN_MERGE`でmergeせず終了する。wrapper外はprocess生存を保証せずGitHub checkpointからresumeし、独自daemonはMVP外とする | Decided | 完成イメージ合意 |
 | D-019 | 2026-08-17 | final report言語はrepository設定ファイルで選択可能にし、repository設定、user-level設定、組込み既定値の順に解決する。未設定時の既定は日本語とする | Decided | 完成イメージ合意 |
 | D-020 | 2026-08-17 | CI pending時は設定可能なbounded foreground wait（既定20分・30秒間隔）を行い、上限後もpendingならGitHubへ記録して`WAITING_CI`で終了し、CI完了後に明示resumeする | Decided | 完成イメージ合意 |
 | D-021 | 2026-08-17 | MVPではGitHub commentへ直接入力されたユーザー回答を次の明示Skill resume時に取得する。comment watcher / webhookによる非同期自動resumeは認可・重複・編集・head bindingを備える後続releaseとする | Decided | 完成イメージ合意 |
 | D-022 | 2026-08-17 | merge methodはrepository設定で`merge` / `squash` / `rebase`を選択可能にする。未設定で許可方式が複数ならユーザー判断を求め、承認をheadとmethodの両方へbindする | Decided | 完成イメージ合意 |
 | D-023 | 2026-08-17 | local artifactは正常runを既定30日、`FAILED` / `BLOCKED` / salvageを90日保持し、active / locked runを除外して起動時または明示commandでbounded cleanupする | Decided | 完成イメージ合意 |
-| D-024 | 2026-08-17 | Approved follow-upは自動Issue化せず、Claudeが最大3件のdeduplicate済み候補をdraftし、Codexが必要性・現在PR対応要否・重複・scopeをread-only reviewした後、ユーザーが候補ごとに明示許可した場合だけControllerがIssueを作成する。不許可・未回答はfinal reportへ残し、非blockingなfollow-upのpermission状態はmergeを妨げない | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | 完成イメージ合意 |
-| D-025 | 2026-08-17 | 対応環境のClaude CodeではAuto modeを通常の実装・test・build・read-only Web調査・feature branchへのcommit / pushに使用し、非対応時は限定permission profileへfallbackする。tool permissionとworkflow承認を分離し、例外blockは`AWAITING_TOOL_PERMISSION`で標準permission設定後に明示resumeする。Codexは各roundをfresh sessionで実行し、GitHub contextを再構築したexact-head隔離checkout内でtest・build・再現・Web調査を許可するが、実repositoryとGitHubへの永続変更権限を持たない | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | 完成イメージ合意 |
-| D-026 | 2026-08-17 | Claude Code Pluginを正式配布単位とし、Skillと薄いplatform wrapperをversion管理する。Controllerは任意repositoryから呼べるinstall済みCLI packageとし、repo-local Skillは開発・test、user-level単体Skillはfallbackに限定する。MCP serverとしての実装・配布は行わない | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | 完成イメージ合意 |
+| D-024 | 2026-08-17 | Approved follow-upは自動Issue化せず、Claudeが最大3件のdeduplicate済み候補をdraftし、Codexが必要性・現在PR対応要否・重複・scopeをread-only reviewした後、ユーザーが候補ごとに明示許可した場合だけControllerがIssueを作成する。不許可・未回答はfinal reportへ残し、非blockingなfollow-upのpermission状態はmergeを妨げない | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | 完成イメージ合意 |
+| D-025 | 2026-08-17 | 対応環境のClaude CodeではAuto modeを通常の実装・test・build・read-only Web調査・feature branchへのcommit / pushに使用し、非対応時は限定permission profileへfallbackする。tool permissionとworkflow承認を分離し、例外blockは`AWAITING_TOOL_PERMISSION`で標準permission設定後に明示resumeする。Codexは各roundをfresh sessionで実行し、GitHub contextを再構築したexact-head隔離checkout内でtest・build・再現・Web調査を許可するが、実repositoryとGitHubへの永続変更権限を持たない | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | 完成イメージ合意 |
+| D-026 | 2026-08-17 | Claude Code Pluginを正式配布単位とし、Skillと薄いplatform wrapperをversion管理する。Controllerは任意repositoryから呼べるinstall済みCLI packageとし、repo-local Skillは開発・test、user-level単体Skillはfallbackに限定する。MCP serverとしての実装・配布は行わない | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | 完成イメージ合意 |
 | D-027 | 2026-08-18 | 本repositoryのIssue #2を親roadmapとし、target experience、implementation plan、子Issueをここから参照する。implementation planは`docs/plans/implementation-plan.md`として作成する | Decided | PR #1 merge後のroadmap整備 |
-| D-028 | 2026-08-19 | merge承認は、既存の対話型Claude Code sessionでの自然言語入力＋明示確認を主経路とし、head SHAとmerge methodを指定する固定commandを補助・復旧経路として併用する | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
-| D-029 | 2026-08-19 | MVPの正式検証対象は公式MSI installerで配布されるPowerShell 7（`Microsoft.PowerShell` winget packageによる導入を含む）とする。Windows Store版は未検証riskとして明記し、必要になった時点でCodex確認後に別Issue作成の許可を改めて求める | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
+| D-028 | 2026-08-19 | merge承認は、既存の対話型Claude Code sessionでの自然言語入力＋明示確認を主経路とし、head SHAとmerge methodを指定する固定commandを補助・復旧経路として併用する | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
+| D-029 | 2026-08-19 | MVPの正式検証対象は公式MSI installerで配布されるPowerShell 7（`Microsoft.PowerShell` winget packageによる導入を含む）とする。Windows Store版は未検証riskとして明記し、必要になった時点でCodex確認後に別Issue作成の許可を改めて求める | Decided; provider固定部分の拡張はD-032（Decided、2026-09-15。native adapter実装まで固有名の記述を維持） | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
 | D-030 | 2026-08-19 | GitHub canonical conversation transportは新しい公開interfaceを設計し、参考実装を一括移植・一括破棄せず、実績あるalgorithmとtestをcomponent単位で評価して、出典・license・理由・testを記録したうえで選択移植する | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
 | D-031 | 2026-08-19 | GitHub上のユーザー判断を受理できる主体は、repository / user設定で明示したGitHub login allowlistとの完全一致を必須とする。`authorAssociation`とrepository permissionは補助条件とし、単独では承認根拠にしない | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
-| D-032 | 2026-09-05 | coderとreviewerにClaude Code / Codexを独立に設定し、同一provider同士を含む4組み合わせへ対応する。roleによる権限分離、active coderのcontext維持、fresh reviewer、単一engineとhuman merge gateは維持する。同一providerのアカウントまたは認証元は明示設定により共有可能とし（既定は共有しない）、session・workspace・実効sandbox権限・GitHub write credential・coderの設定領域全体は共有しない。実行adapter・resume互換性・両host配布を含めて実装し、設定項目やfake testだけで対応完了としない | Proposed | 会話でのユーザー要望を受けた提案。[Issue #52](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52) / PR #53でGitHub上の明示合意recordを待つ（Issue起草自体は合意根拠ではない）。2026-09-12、アカウント・認証元の共有を明示設定で許す緩和案を[Issue #14の整理](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/14#issuecomment-5645824357)で提示（権限分離は維持）。緩和案を含めて合意recordを待つ |
+| D-032 | 2026-09-05 | coderとreviewerにClaude Code / Codexを独立に設定し、同一provider同士を含む4組み合わせへ対応する。roleによる権限分離、active coderのcontext維持、fresh reviewer、単一engineとhuman merge gateは維持する。同一providerのアカウントまたは認証元は明示設定により共有可能とし（既定は共有しない）、session・履歴・workspace・実効sandbox権限・GitHub write credential・coderの設定領域全体は共有しない。実行adapter・resume互換性・両host配布を含めて実装し、設定項目やfake testだけで対応完了としない | Decided | 会話でのユーザー要望（2026-09-05）を受けた提案を、緩和案（[Issue #14の整理](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/14#issuecomment-5645824357)、PR #73）を含めて2026-09-15に[Issue #52の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52#issuecomment-5677019033)で確定した。同recordでAC-C09-06（provider認証材料の非取得。緩和の必須安全条件）とAC-C09-07（prompt境界。認証共有の有無にかかわらず全reviewerへ適用）を採択。要件の採択であり、実装完了（native adapter・認証供給・C-10接続・4組み合わせの実CLI受入）を意味しない |
 | D-033 | 2026-09-10 | Windows nativeのreviewer sandboxはelevated Windows sandbox backendを必須とし、sandbox preflightがread denyとshell network禁止の強制を実測できない環境ではreviewerを起動しない（fail closed）。非昇格backendの書込制限だけでの継続や、Windows nativeの対象外化は採らない | Decided | 実測（ADR-0027）で非昇格backendは書込制限しか強制しないことが判明した。会話での合意（2026-09-10）を受けた提案を、2026-09-12に[Issue #14の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/14#issuecomment-5644657388)で確定した。elevated backendの実測追補（ADR-0027）では、provisioningが`CODEX_HOME`単位に紐付くことと、network禁止がOSのfirewall構成に依存することが判明しており、いずれもpreflightがfail closedで検出する |

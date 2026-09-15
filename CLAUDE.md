@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-既存baselineは承認済みで、Phase 8までの実行基盤が実装されています。両providerへの実接続と後続workflowの完成とは区別してください。role別provider選択の追加案D-032は`Proposed`です。Windows nativeのreviewer sandboxをelevated backend必須（fail closed）とするD-033は、Issue #14の合意record（2026-09-12）で`Decided`です（ADR-0027）。設定契約・永続化・runtime照合は実装済み（ADR-0025 / 0026）、native adapterは未実装で、Issue #52が追跡します（2026-09-05時点）。
+既存baselineは承認済みで、Phase 8までの実行基盤が実装されています。両providerへの実接続と後続workflowの完成とは区別してください。role別provider選択のD-032は、Issue #52の合意record（2026-09-15）で`Decided`です（要件の採択であり、native adapter・認証供給・C-10接続は未完）。Windows nativeのreviewer sandboxをelevated backend必須（fail closed）とするD-033は、Issue #14の合意record（2026-09-12）で`Decided`です（ADR-0027）。設定契約・永続化・runtime照合は実装済み（ADR-0025 / 0026）、native adapterは未実装で、Issue #52が追跡します（2026-09-05時点）。
 
 | 正本 | 役割 |
 | --- | --- |
-| `docs/plans/target-experience.md`（Status: **Agreed**） | 何を作るか。user-visible behaviorと合意済み制約。decision log（D-001〜D-033、D-032はProposed）を含む |
+| `docs/plans/target-experience.md`（Status: **Agreed**） | 何を作るか。user-visible behaviorと合意済み制約。decision log（D-001〜D-033）を含む |
 | `docs/plans/implementation-plan.md`（Status: **Accepted**） | どう作るか。設計原則P-002〜P-015、component C-01〜C-15、Phase 0〜17、受入条件AC-CNN-NNと横断条件案AC-RP-NN |
 
 親roadmapはIssue #2、実装子IssueはPhase 0〜17に対応する#5〜#22です。最新の進捗を各Issueで確認し、dependency順に進めます。Phase 9 #14のruntime契約は追加案#52と調整します。
@@ -62,13 +62,13 @@ CI（`.github/workflows/test.yml`）はubuntu-latest / windows-latestのPython 3
 | `Research` | informative。判断材料であり要件ではない |
 | `Non-normative example` | 例示。正本と食い違えば正本を優先 |
 
-文書は正本を複製せず、安定ID（`D-NNN` / `AC-CNN-NN` / `AC-RP-NN` / `DOD-NN` / `MVP-NN` / `P-NNN`）とlinkで参照します。`AC-RP-NN`はrole / provider横断の受入条件で、単一の所有componentを持たず、Issue #52で横断追跡します（D-032の合意までは条件案）。節番号は編集で変わるため参照に使いません。
+文書は正本を複製せず、安定ID（`D-NNN` / `AC-CNN-NN` / `AC-RP-NN` / `DOD-NN` / `MVP-NN` / `P-NNN`）とlinkで参照します。`AC-RP-NN`はrole / provider横断の受入条件で、単一の所有componentを持たず、Issue #52で横断追跡します（D-032の採択により受入条件）。節番号は編集で変わるため参照に使いません。
 
 ## Architecture（設計上の中心的な制約）
 
-製品は、coderとread-only reviewerがGitHub Issue / PRを正式な会話履歴に据え、人間の明示承認までを進めるdevelopment loopです。承認済みbaselineはClaude Code coder / Codex reviewerです。両roleへClaude Code / Codexを独立設定するD-032は`Proposed`であり、GitHub上の明示合意recordを得るまでbaselineを置き換えません。以下のrole名による説明はprovider対応済みを意味しません。
+製品は、coderとread-only reviewerがGitHub Issue / PRを正式な会話履歴に据え、人間の明示承認までを進めるdevelopment loopです。承認済みbaselineはClaude Code coder / Codex reviewerです。両roleへClaude Code / Codexを独立設定するD-032は`Decided`（2026-09-15）ですが、native adapterは未実装で、以下のrole名による説明はprovider対応済みを意味しません。同一providerのアカウント・認証元の共有は明示設定時に限り、session・workspace・実効権限・GitHub write credential・coderの設定領域全体は共有しません。
 
-**5つのrole**: User（実行開始と明示承認）/ Controller（LLMを内包しない決定論的state machine）/ host・coder（既存の対話型sessionのまま実装を担当）/ reviewer（turnごとに新規起動するdurable read-only subprocess）/ final reporter（承認済みheadの変更と検証履歴をread-onlyで説明）。同一providerでもcoderとreviewerのsession・権限を共有しないことがD-032案の条件です。
+**5つのrole**: User（実行開始と明示承認）/ Controller（LLMを内包しない決定論的state machine）/ host・coder（既存の対話型sessionのまま実装を担当）/ reviewer（turnごとに新規起動するdurable read-only subprocess）/ final reporter（承認済みheadの変更と検証履歴をread-onlyで説明）。同一providerでもcoderとreviewerのsession・権限を共有しないことがD-032の条件です（アカウント・認証元の共有は明示設定時のみ）。
 
 **起動主体**: 主経路のcoderはactive hostが実行し、Controllerは起動しない。headless復旧経路のcoderだけはControllerがsubprocess adapterとして起動する。reviewerとfinal reporterはControllerがfresh subprocessとして起動する。
 
