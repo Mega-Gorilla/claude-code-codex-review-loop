@@ -214,6 +214,9 @@ def _render_configuration(workspace: Path, protected_roots: tuple[Path, ...]) ->
         # top-levelのconfigで固定する（ADR-0027 決定11）。sandboxが唯一の強制点になるので、
         # 起動はpreflightで強制が実測できた場合に限る。
         'approval_policy = "never"',
+        # ADR-0031 決定1: reviewerの認証はOS credential storeへ置き、auth.jsonをfileで渡さない。
+        # keyは`CODEX_HOME`のcanonical pathから導出されるため、homeのpathは固定する（reviewer_home）。
+        'cli_auth_credentials_store = "keyring"',
         f"default_permissions = {_toml_string(PROFILE_NAME)}",
         "",
         f"[permissions.{PROFILE_NAME}]",

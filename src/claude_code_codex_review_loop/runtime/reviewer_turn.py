@@ -8,7 +8,8 @@ Phase 9の各部品（checkout / canary home / preflight / launch / prompt / hea
 1. promptの構築（純粋。失敗はcheckoutより前に分かる）
 2. reviewer専用home / env（C-06。provider認証・token envは渡らない）
 3. 隔離checkout（exact head、detached、remoteなし）
-4. 専用`CODEX_HOME`（workspace = 隔離checkout、protected = 実repository + 呼出側のroot）
+4. 固定path・内容再生成の専用`CODEX_HOME`（ADR-0031。lock → 配置の検証 → markerが検証できる前回entryだけ削除 →
+   再作成。workspace = 隔離checkout、protected = 実repository + 呼出側のroot）
 5. Windowsではprovisioning成果物の複製（ADR-0029。provisioningは走らせない）
 6. 起動facade（preflightを同じ呼出の中で行い、成立しなければspawnしない）
 7. 隔離checkoutのHEADと**GitHub上のadvertised head**を再観測し、reportの対象headと三者照合（AC-C09-04）。
@@ -27,7 +28,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 
 from ..identity import (
     CredentialIsolationError,
@@ -45,6 +46,7 @@ from .codex_provisioning import ProvisioningError, ProvisioningMirror, mirror_pr
 from .head_binding import HeadMismatch, HeadsBound, verify_review_target
 from .ports import PortUnavailableError
 from .review_prompt import PromptError, ReviewContext, build_review_prompt
+from .reviewer_home import HomeError, acquire_fixed_home, write_home_marker
 
 
 class ReportHeadPort(Protocol):
@@ -93,6 +95,13 @@ class ReviewerTurnRequest:
     context: ReviewContext
     run_root: Path
     protected_roots: tuple[Path, ...]
+    # 固定`CODEX_HOME`はparent直下のnameで、runごとに内容を再生成する（ADR-0031 決定2 / 7）
+    reviewer_home_parent: Path
+    reviewer_home_name: str
+    # coderの`CODEX_HOME`候補（環境変数の値と`~/.codex`）。固定homeと重なってはならない
+    coder_homes: tuple[Path, ...]
+    # 同一providerのアカウント共有はユーザーの申告であり、Controllerは同一性を検証しない（決定4）
+    declared_account_mode: str
     git_command: tuple[str, ...]
     codex_executable: Path
     base_env: Mapping[str, str]
@@ -117,13 +126,22 @@ class ReviewerTurn:
     release: CheckoutRelease
     provisioning: ProvisioningMirror | None
     evidence_root: Path
+    reviewer_home: Path
+    declared_account_mode: str
+
+
+ACCOUNT_MODES: Final = frozenset({"shared", "separate"})
 
 
 def run_reviewer_turn(
     request: ReviewerTurnRequest, *, report_head: ReportHeadPort, advertised_head: AdvertisedHeadPort
 ) -> ReviewerTurn:
     """固定順序でturnを実行する。どの段階で失敗しても、作成済みのcheckoutは破棄を試みる。"""
-    _validate_run_root(request.run_root, (request.source_repository, *request.protected_roots))
+    if request.declared_account_mode not in ACCOUNT_MODES:
+        raise TurnError("declared_account_mode")
+    _validate_run_root(
+        request.run_root, (request.source_repository, *request.protected_roots, request.reviewer_home_parent)
+    )
     if request.advertised_head != request.context.target_head_sha:
         # 起動前にheadが動いている。reviewを走らせても投稿できないため、checkoutを作る前に止める
         raise TurnError("head:advertised_moved")
@@ -149,7 +167,7 @@ def run_reviewer_turn(
     except CheckoutError as error:
         raise TurnError(f"checkout:{error.stage}") from error
     try:
-        launch, observed, provisioning, evidence_root = _review_in_checkout(
+        launch, observed, provisioning, evidence_root, home_root = _review_in_checkout(
             request, checkout, reviewer_env, prompt.text
         )
     except BaseException:
@@ -174,21 +192,55 @@ def run_reviewer_turn(
         release=release,
         provisioning=provisioning,
         evidence_root=evidence_root,
+        reviewer_home=home_root,
+        declared_account_mode=request.declared_account_mode,
     )
 
 
 def _review_in_checkout(
     request: ReviewerTurnRequest, checkout: ReviewerCheckout, reviewer_env: Mapping[str, str], prompt_text: str
+) -> tuple[ReviewerCompleted | ReviewerTimedOut, str, ProvisioningMirror | None, Path, Path]:
+    try:
+        lease = acquire_fixed_home(
+            parent=request.reviewer_home_parent,
+            name=request.reviewer_home_name,
+            disjoint_from=(
+                request.source_repository,
+                *request.protected_roots,
+                *request.coder_homes,
+                request.run_root,
+                checkout.root,
+            ),
+        )
+    except HomeError as error:
+        raise TurnError(f"home:{error.stage}") from error
+    try:
+        return (*_review_with_home(request, checkout, reviewer_env, prompt_text, lease.home), lease.home)
+    finally:
+        # lockはreviewerの終了と観測が済むまで保持する（決定7-5）。homeの中身は次のrunの再生成で消える
+        lease.release()
+
+
+def _review_with_home(
+    request: ReviewerTurnRequest,
+    checkout: ReviewerCheckout,
+    reviewer_env: Mapping[str, str],
+    prompt_text: str,
+    home_path: Path,
 ) -> tuple[ReviewerCompleted | ReviewerTimedOut, str, ProvisioningMirror | None, Path]:
     try:
         home = prepare_codex_canary_home(
-            private_root=request.run_root,
-            name="codex-home",
+            private_root=home_path.parent,
+            name=home_path.name,
             workspace_root=checkout.repository,
             protected_roots=(request.source_repository, *request.protected_roots),
         )
     except CanaryError as error:
         raise TurnError(f"canary:{error.stage}") from error
+    try:
+        write_home_marker(home.root)
+    except HomeError as error:
+        raise TurnError(f"home:{error.stage}") from error
     provisioning: ProvisioningMirror | None = None
     if request.provisioning_source is not None and _platform() == "win32":
         try:

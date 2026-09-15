@@ -25,6 +25,8 @@ acl_windows）が実装する。OS分岐は本module末尾のconditional import 
 from __future__ import annotations
 
 import os
+import shutil
+import stat
 import sys
 import uuid
 from pathlib import Path
@@ -120,6 +122,42 @@ def replace_private_text(path: Path, text: str) -> None:
         raise FsPermissionError("replace", f"fileを置換できない: {path}", error.errno) from error
     _backend.sync_directory(directory)
     verify_private_file(path)
+
+
+def reject_reparse_points(path: Path, *, stop_at: Path) -> None:
+    """`stop_at`から`path`までの各要素がsymlink / junction / reparse pointでないことを検証する。
+
+    存在しない要素は検査しない（未作成のhomeを許す）。`path`が`stop_at`の配下でなければerror。
+    """
+    candidate = Path(path)
+    if candidate != stop_at and stop_at not in candidate.parents:
+        raise FsPermissionError("verify", f"pathが起点の配下にない: {candidate}")
+    current = candidate
+    while True:
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            info = None
+        if info is not None:
+            attributes = getattr(info, "st_file_attributes", 0)
+            if stat.S_ISLNK(info.st_mode) or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise FsPermissionError("verify", f"reparse pointを含む: {current}")
+        if current == stop_at:
+            return
+        current = current.parent
+
+
+def remove_tree(root: Path) -> None:
+    """read-only属性を外してからtreeを破棄する。symlinkは辿らない。失敗は`remove`。"""
+    try:
+        for directory, directories, files in os.walk(root, topdown=False, followlinks=False):
+            for name in (*directories, *files):
+                entry = Path(directory, name)
+                if not entry.is_symlink():
+                    os.chmod(entry, entry.stat().st_mode | stat.S_IWRITE)
+        shutil.rmtree(root)
+    except OSError as error:
+        raise FsPermissionError("remove", f"treeを破棄できない: {root}", error.errno) from error
 
 
 def verify_private_dir(path: Path) -> None:

@@ -52,6 +52,7 @@ class TestPrepareCodexCanaryHome:
         filesystem = profile["filesystem"]
         assert config["default_permissions"] == "c09-canary"
         assert config["approval_policy"] == "never"
+        assert config["cli_auth_credentials_store"] == "keyring"  # ADR-0031 決定1
         assert profile["extends"] == ":workspace"
         assert filesystem[":root"] == "deny"
         assert filesystem[":minimal"] == "read"
