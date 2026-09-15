@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import uuid
 from collections.abc import Mapping
@@ -45,14 +46,14 @@ from .codex_canary import (
     CodexCanaryInvocation,
     build_codex_canary_invocation,
 )
-from .sandbox_probe import CLEANUP_LABEL, PROBE_LABELS
+from .sandbox_probe import CLEANUP_LABEL, CREDENTIAL_STORE_FLAG, CREDENTIAL_STORE_LABEL, PROBE_LABELS
 
 # sandboxの外で同じprobeが到達できることを先に確かめる接続先。reviewerが到達して
 # はならない先（AC-C09-05）をそのまま使う。TCP handshakeだけで、requestは送らない。
 NETWORK_CONTROL_TARGET: Final[tuple[str, int]] = ("api.github.com", 443)
 # `sandbox_probe.py`の内容（改行をLFへ正規化）のSHA-256。probeを変更したら更新し、
 # testが実fileと一致することを固定する。一致しなければprobeを信頼せず起動しない。
-PROBE_DIGEST: Final = "ba4b0262cca6b4698ee4cc13b8c8da8732cab09458569bef5c3d61c1979b04e4"
+PROBE_DIGEST: Final = "446d86ce32d608fd13325c7fb4b478cb98c0c1e7f2ffa3cc5ef6481fd36a57e0"
 
 EXPECTED_BOUNDARIES: Final[Mapping[str, str]] = {
     "workspace_write": "allowed",
@@ -74,6 +75,7 @@ _EXPECTED_EFFECTIVE: Final[Mapping[str, str]] = {
 }
 # D-033: Windows nativeではelevated backendが必須で、provisioningが完了していなければ起動しない。
 # backendの選択は`CODEX_HOME`のconfigで決まり、provisioningは`CODEX_HOME`ごとに紐付く（ADR-0027 追補）。
+_CONTROL_CHARACTERS: Final = re.compile(r"[\x00-\x1f\x7f]")
 _WINDOWS_EXPECTED_BACKEND: Final[Mapping[str, str]] = {
     "sandbox backend": "elevated",
     "sandbox provisioning": "complete",
@@ -172,6 +174,72 @@ def run_sandbox_preflight(
         control=control,
         boundaries=boundaries,
     )
+
+
+def run_credential_store_probe(
+    *,
+    home: CodexCanaryHome,
+    codex_executable: Path,
+    reviewer_env: Mapping[str, str],
+    evidence_root: Path,
+    target: str,
+    timeout_seconds: float,
+    grace_seconds: float,
+) -> Mapping[str, str]:
+    """AC-C09-06のnegative test（ADR-0031 決定6）。認証が登録済みの起動経路でだけ呼ぶ。
+
+    sandboxの外で同じprobeがreviewer credentialの**存在**を確認できること（positive control。
+    `absent`なら登録かprobeが壊れている）を先に要求し、sandboxの内で同じ対象のlookupが
+    失敗すること（`absent`）を要求する。列挙は使わず、秘密値・名前・件数を出力しない。
+    """
+    invocation = _invocation(home, codex_executable, reviewer_env)
+    executable = invocation.argv[0]
+    _validate_evidence_root(evidence_root, home)
+    # service名（`Codex Auth`）は空白を含む。拒否するのは空と制御文字だけ
+    if not target or _CONTROL_CHARACTERS.search(target):
+        raise PreflightError("credential_target")
+    runner = _Runner(invocation.env, home.workspace_root, evidence_root, timeout_seconds, grace_seconds)
+    probe = _canonical_probe()
+    control = _credential_stage(
+        runner, "credential_control", (probe.interpreter, probe.source, CREDENTIAL_STORE_FLAG, target)
+    )
+    if control != "present":
+        raise PreflightError("credential_control")
+    copy = _stage_probe_copy(home, f".cc-review-credential-{uuid.uuid4().hex}", probe.content)
+    argv = (
+        executable,
+        "sandbox",
+        "-P",
+        PROFILE_NAME,
+        "--include-managed-config",
+        "-C",
+        str(home.workspace_root),
+        "--",
+        probe.interpreter,
+        str(copy),
+        CREDENTIAL_STORE_FLAG,
+        target,
+    )
+    try:
+        inside = _credential_stage(runner, "credential_probe", argv)
+    finally:
+        leftover = _remove_probe_copy(copy)
+    if leftover:
+        raise PreflightError("probe_residue")
+    if inside != "absent":
+        raise PreflightError("credential_boundary")
+    return {"control": control, "sandbox": inside}
+
+
+def _credential_stage(runner: _Runner, stage: str, argv: tuple[str, ...]) -> str:
+    exit_code, text = runner.output(stage, argv)
+    if exit_code != 0:
+        raise PreflightError(stage)
+    for line in text.splitlines():
+        label, separator, outcome = line.strip().partition("=")
+        if separator and label == CREDENTIAL_STORE_LABEL and outcome in {"present", "absent"}:
+            return outcome
+    raise PreflightError(f"{stage}_output")
 
 
 def verify_preflight_evidence(

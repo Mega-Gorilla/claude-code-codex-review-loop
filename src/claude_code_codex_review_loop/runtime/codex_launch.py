@@ -21,6 +21,7 @@ prompt本文の構成（P-008 fence、`ReviewContext`）、出力の受理・検
 
 from __future__ import annotations
 
+import hashlib
 import stat
 import sys
 from collections.abc import Mapping
@@ -32,13 +33,19 @@ from ..identity.fs_permissions import FsPermissionError, write_private_text
 from ..policy.redaction import RedactionResult, redact
 from ..process import Completed, SpawnError, SpawnSpec, StopError, run_tree
 from .codex_canary import CanaryError, CodexCanaryHome, build_codex_canary_invocation
-from .codex_preflight import PreflightEvidence, run_sandbox_preflight
+from .codex_preflight import PreflightEvidence, run_credential_store_probe, run_sandbox_preflight
 
 MAX_PROMPT_BYTES: Final = 1_048_576
 # ADR-0031 決定5: keyring keyの導出（`CODEX_HOME`のpath hash）はCLIの内部実装への依存であり、実測した
 # versionにbindする。一致しなければ起動せず、対応versionの更新と再loginを案内する。
 SUPPORTED_CODEX_VERSIONS: Final = frozenset({"codex-cli 0.154.0"})
 REQUIRED_AUTH_STORAGE: Final = "Keyring"
+# Codex CLI 0.154.0のkeyring保存: service `Codex Auth`、account `cli|<sha256(canonical CODEX_HOME)[:16]>`。
+# Windowsのkeyring backend（keyring-rs 3.6.3 windows-native）はtarget名を`{account}.{service}`にする。
+# Rustの`canonicalize()`はWindowsで`\\?\`接頭辞付きの文字列を返すため、hash入力もその形にする。
+# いずれも内部実装への依存で、`SUPPORTED_CODEX_VERSIONS`へbindし、positive controlが不一致を検出する。
+KEYRING_SERVICE: Final = "Codex Auth"
+_EXTENDED_PREFIX: Final = "\\\\?\\"
 MAX_DIAGNOSTIC_BYTES: Final = 262_144
 # 最終messageのbounded readの上限。C-10はこの値以下の`max_input_bytes`で検証する前提で、
 # 上限+1 byteまで読むことで「上限を超えていた」ことをC-10のsize stageが判定できる。
@@ -100,6 +107,16 @@ def launch_codex_reviewer(
         grace_seconds=grace_seconds,
     )
     _require_auth_ready(evidence)
+    # AC-C09-06（ADR-0031 決定6）: sandbox内からreviewer credentialへ到達できないことを、positive control付きで実測
+    run_credential_store_probe(
+        home=home,
+        codex_executable=codex_executable,
+        reviewer_env=reviewer_env,
+        evidence_root=evidence_root,
+        target=keyring_target_for_home(home.root),
+        timeout_seconds=timeout_seconds,
+        grace_seconds=grace_seconds,
+    )
     root = Path(evidence_root)
     prompt_path = root / _PROMPT_NAME
     last_message_path = root / _LAST_MESSAGE_NAME
@@ -160,6 +177,15 @@ def _require_auth_ready(evidence: PreflightEvidence) -> None:
         raise LaunchError("auth_version")
     if evidence.auth.status != "ok" or evidence.auth.storage_mode != REQUIRED_AUTH_STORAGE:
         raise LaunchError("auth")
+
+
+def keyring_target_for_home(home: Path) -> str:
+    """固定homeに対応するWindows Credential Managerのtarget名（`{account}.{service}`）。"""
+    canonical = str(Path(home).resolve())
+    if not canonical.startswith(_EXTENDED_PREFIX):
+        canonical = _EXTENDED_PREFIX + canonical
+    account = "cli|" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"{account}.{KEYRING_SERVICE}"
 
 
 def _platform() -> str:

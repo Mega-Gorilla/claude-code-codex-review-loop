@@ -32,6 +32,7 @@ from claude_code_codex_review_loop.runtime.codex_launch import (
     LaunchError,
     ReviewerCompleted,
     ReviewerTimedOut,
+    keyring_target_for_home,
     launch_codex_reviewer,
 )
 from claude_code_codex_review_loop.runtime.codex_preflight import (
@@ -109,6 +110,9 @@ class Fixture:
         self.preflight_error: str | None = None
         monkeypatch.setattr(module, "run_tree", self.fake.run_tree)
         monkeypatch.setattr(module, "run_sandbox_preflight", self._fake_preflight)
+        self.credential_calls: list[dict[str, object]] = []
+        self.credential_error: str | None = None
+        monkeypatch.setattr(module, "run_credential_store_probe", self._fake_credential_probe)
         # auth gateはWindows native限定（ADR-0031）。testはplatformを固定し、gateの各経路を別testで固定する
         monkeypatch.setattr(module, "_platform", lambda: "win32")
         self.auth = AuthState("ok", "Keyring")
@@ -120,6 +124,12 @@ class Fixture:
         if self.preflight_error:
             raise PreflightError(self.preflight_error)
         return self.evidence()
+
+    def _fake_credential_probe(self, **kwargs: object) -> dict[str, str]:
+        self.credential_calls.append(kwargs)
+        if self.credential_error:
+            raise PreflightError(self.credential_error)
+        return {"control": "present", "sandbox": "absent"}
 
     def evidence(self) -> PreflightEvidence:
         return PreflightEvidence(
@@ -163,6 +173,19 @@ class Fixture:
 @pytest.fixture
 def fx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Fixture:
     return Fixture(tmp_path, monkeypatch)
+
+
+class TestKeyringTarget:
+    def test_target_is_account_dot_service_from_the_extended_canonical_path(self, tmp_path: Path) -> None:
+        home = (tmp_path / "reviewer-home").resolve()
+        target = keyring_target_for_home(home)
+        account, _, service = target.rpartition(".")
+        assert service == "Codex Auth" and account.startswith("cli|") and len(account) == 4 + 16
+        assert keyring_target_for_home(tmp_path / "reviewer-home") == target  # 正規化してから導出
+        assert keyring_target_for_home(Path("\\\\?\\" + os.fspath(home))) == target  # 既に拡張形式でも同じ
+
+    def test_different_homes_have_different_targets(self, tmp_path: Path) -> None:
+        assert keyring_target_for_home(tmp_path / "a") != keyring_target_for_home(tmp_path / "b")
 
 
 def test_platform_reports_the_running_interpreter_platform() -> None:
@@ -215,6 +238,27 @@ class TestLaunchCodexReviewer:
             fx.launch()
         assert stopped.value.stage == stage
         assert fx.preflight_calls == 1 and fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
+
+    def test_credential_store_probe_runs_after_the_auth_gate_and_before_spawn(self, fx: Fixture) -> None:
+        """AC-C09-06: 登録済みcredentialへsandbox内から到達できないことを、spawn前にpositive control付きで実測する。"""
+        fx.launch()
+        (call,) = fx.credential_calls
+        assert call["home"] is fx.home and call["evidence_root"] == fx.evidence_root
+        assert call["target"] == keyring_target_for_home(fx.home.root)
+        assert (call["timeout_seconds"], call["grace_seconds"]) == (60.0, 1.0)
+
+    def test_credential_store_probe_failure_prevents_spawn(self, fx: Fixture) -> None:
+        fx.credential_error = "credential_boundary"
+        with pytest.raises(PreflightError) as stopped:
+            fx.launch()
+        assert stopped.value.stage == "credential_boundary"
+        assert fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
+
+    def test_auth_gate_runs_before_the_credential_store_probe(self, fx: Fixture) -> None:
+        fx.auth = AuthState("fail", "Keyring")
+        with pytest.raises(LaunchError):
+            fx.launch()
+        assert fx.credential_calls == []
 
     def test_preflight_failure_prevents_spawn(self, fx: Fixture) -> None:
         fx.preflight_error = "sandbox_unavailable"

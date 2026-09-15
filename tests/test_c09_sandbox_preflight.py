@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from claude_code_codex_review_loop.runtime.codex_preflight import (
     EffectiveSandbox,
     PreflightError,
     PreflightEvidence,
+    run_credential_store_probe,
     run_sandbox_preflight,
     verify_preflight_evidence,
 )
@@ -72,6 +74,9 @@ class FakeCodex:
             "silent_at": None,
             "residue_at": None,
             "residue_dir_at": None,
+            "credential_control": "credential_store=present",
+            "credential_sandbox": "credential_store=absent",
+            "credential_exit": 0,
         }
         self.specs: list[SpawnSpec] = []
         self.copies: list[Path] = []
@@ -100,6 +105,16 @@ class FakeCodex:
         if sentinel and self.scenario["residue_dir_at"] == stage:
             (spec.cwd / sentinel).mkdir()
             (spec.cwd / sentinel / "inner").write_text("blocks unlink", encoding="utf-8")
+        if sandbox_probe.CREDENTIAL_STORE_FLAG in argv:
+            inside = argv[1:2] == ("sandbox",)
+            line = self.scenario["credential_sandbox" if inside else "credential_control"]
+            if inside:
+                copy = Path(argv[9])
+                assert copy.parent == spec.cwd and copy.name.startswith(".cc-review-credential-")
+                assert hashlib.sha256(copy.read_bytes().replace(b"\r\n", b"\n")).hexdigest() == module.PROBE_DIGEST
+                self.copies.append(copy)
+            spec.stdout_path.write_text(f"{line}\n", encoding="utf-8")
+            return Completed(exit_code=int(str(self.scenario["credential_exit"])) if inside else 0)
         if argv[1:] == ("--version",):
             spec.stdout_path.write_text(str(self.scenario["version"]), encoding="utf-8")
             return Completed(exit_code=int(str(self.scenario["version_exit"])))
@@ -189,6 +204,19 @@ class Fixture:
         }
         values.update(overrides)
         return run_sandbox_preflight(**values)  # type: ignore[arg-type]
+
+    def credential(self, **overrides: object) -> Mapping[str, str]:
+        values: dict[str, object] = {
+            "home": self.home,
+            "codex_executable": self.codex_executable,
+            "reviewer_env": self.reviewer_env,
+            "evidence_root": self.evidence_root,
+            "target": "cli|0123456789abcdef.Codex Auth",
+            "timeout_seconds": 60.0,
+            "grace_seconds": 1.0,
+        }
+        values.update(overrides)
+        return run_credential_store_probe(**values)  # type: ignore[arg-type]
 
     def verify(self, evidence: PreflightEvidence, **overrides: object) -> None:
         values: dict[str, object] = {
@@ -616,6 +644,79 @@ class TestVerifyPreflightEvidence:
         with pytest.raises(PreflightError) as stopped:
             fx.verify(evidence, reviewer_env={**fx.reviewer_env, "EXTRA": "1"})
         assert stopped.value.stage == "evidence_mismatch"
+
+
+class TestCredentialStoreProbe:
+    """AC-C09-06（ADR-0031 決定6）: positive control付きのexact lookup。"""
+
+    def test_control_present_and_sandbox_absent_is_required(self, fx: Fixture) -> None:
+        result = fx.credential()
+        assert dict(result) == {"control": "present", "sandbox": "absent"}
+        control, probe = fx.fake.specs
+        target = "cli|0123456789abcdef.Codex Auth"
+        assert control.argv == (_INTERPRETER, _PROBE_FILE, "--credential-store", target)
+        assert probe.argv[:8] == (
+            os.fspath(fx.codex_executable), "sandbox", "-P", "c09-canary", "--include-managed-config", "-C",
+            os.fspath(fx.workspace), "--",
+        )
+        assert probe.argv[8] == _INTERPRETER and probe.argv[10:] == ("--credential-store", target)
+        assert fx.fake.copies and not fx.fake.copies[0].exists()
+        assert not any(path.name.startswith(".cc-review-credential-") for path in fx.workspace.iterdir())
+        for spec in fx.fake.specs:
+            assert spec.env["CODEX_HOME"] == os.fspath(fx.home.root) and spec.cwd == fx.workspace
+
+    @pytest.mark.parametrize(
+        ("overrides", "stage", "specs"),
+        (
+            ({"credential_control": "credential_store=absent"}, "credential_control", 1),
+            ({"credential_control": "credential_store=error"}, "credential_control_output", 1),
+            ({"credential_control": "garbage"}, "credential_control_output", 1),
+            ({"credential_sandbox": "credential_store=present"}, "credential_boundary", 2),
+            ({"credential_sandbox": "credential_store=unsupported"}, "credential_probe_output", 2),
+            ({"credential_exit": 2}, "credential_probe", 2),
+        ),
+        ids=(
+            "control_absent", "control_error", "control_garbage", "sandbox_present", "sandbox_unsupported",
+            "sandbox_exit",
+        ),
+    )
+    def test_each_failure_is_a_fixed_stage(
+        self, fx: Fixture, overrides: dict[str, object], stage: str, specs: int
+    ) -> None:
+        fx.fake.scenario.update(overrides)
+        with pytest.raises(PreflightError) as stopped:
+            fx.credential()
+        assert stopped.value.stage == stage and len(fx.fake.specs) == specs
+        assert not any(path.name.startswith(".cc-review-credential-") for path in fx.workspace.iterdir())
+
+    @pytest.mark.parametrize("target", ("", "tab\tname", "nul\x00", "line\nbreak"))
+    def test_invalid_target_is_rejected_before_any_process(self, fx: Fixture, target: str) -> None:
+        with pytest.raises(PreflightError) as stopped:
+            fx.credential(target=target)
+        assert stopped.value.stage == "credential_target" and fx.fake.specs == []
+
+    def test_leftover_probe_copy_is_residue(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(module, "_remove_probe_copy", lambda copy: True)
+        with pytest.raises(PreflightError) as stopped:
+            fx.credential()
+        assert stopped.value.stage == "probe_residue"
+
+    def test_lookup_on_this_platform_reports_absent_or_unsupported(self) -> None:
+        """存在しないtargetのexact lookup。Windowsでは`absent`、他では`unsupported`。列挙はしない。"""
+        outcome = sandbox_probe.credential_store_lookup("cli|ffffffffffffffff.Codex Auth")
+        assert outcome == ("absent" if sys.platform == "win32" else "unsupported")
+
+    def test_probe_main_reports_the_lookup_and_errors(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert sandbox_probe.main(["--credential-store", "cli|ffffffffffffffff.Codex Auth"]) == 0
+        expected = "absent" if sys.platform == "win32" else "unsupported"
+        assert capsys.readouterr().out == f"credential_store={expected}\n"
+        monkeypatch.setattr(
+            sandbox_probe, "credential_store_lookup", lambda target: (_ for _ in ()).throw(OSError("x"))
+        )
+        assert sandbox_probe.main(["--credential-store", "x"]) == 0
+        assert capsys.readouterr().out == "credential_store=error\n"
 
 
 class TestSandboxProbe:
