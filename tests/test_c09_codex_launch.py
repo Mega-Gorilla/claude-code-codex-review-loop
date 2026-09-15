@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -109,30 +110,39 @@ class Fixture:
         self.fake = FakeReviewer()
         self.preflight_calls = 0
         self.preflight_error: str | None = None
-        monkeypatch.setattr(module, "run_tree", self.fake.run_tree)
+        # facadeが外部へ出す呼出の順序（preflight / credential / spawn）。順序そのものを固定するために記録する
+        self.order: list[str] = []
+        monkeypatch.setattr(module, "run_tree", self._run_tree)
         monkeypatch.setattr(module, "run_sandbox_preflight", self._fake_preflight)
         self.credential_calls: list[dict[str, object]] = []
         self.credential_error: str | None = None
         monkeypatch.setattr(module, "run_credential_store_probe", self._fake_credential_probe)
         # spawn直前の再測定（`verify_preflight_evidence`）は本物を使い、その内側の測定だけをfakeにする
         monkeypatch.setattr(preflight_module, "run_sandbox_preflight", self._fake_preflight)
-        self.second_auth: AuthState | None = None
+        # 2回目以降の測定（再測定）で変化させるfield（credential probe中のsystem driftを模す）
+        self.drift: dict[str, object] = {}
         # auth gateはWindows native限定（ADR-0031）。testはplatformを固定し、gateの各経路を別testで固定する
         monkeypatch.setattr(module, "_platform", lambda: "win32")
         self.auth = AuthState("ok", "Keyring")
         self.codex_version = "codex-cli 0.154.0"
 
+    def _run_tree(self, spec: SpawnSpec, timeout_seconds: float, grace_seconds: float) -> object:
+        self.order.append("spawn")
+        return self.fake.run_tree(spec, timeout_seconds, grace_seconds)
+
     def _fake_preflight(self, **kwargs: object) -> PreflightEvidence:
         self.preflight_calls += 1
+        self.order.append("preflight")
         assert kwargs["home"] is self.home and kwargs["evidence_root"] == self.evidence_root
         if self.preflight_error:
             raise PreflightError(self.preflight_error)
-        if self.preflight_calls >= 2 and self.second_auth is not None:
-            # 再測定でauthの状態が変わっていた（例: 1回目は登録済み、2回目は失効）
-            self.auth = self.second_auth
+        if self.preflight_calls >= 2 and self.drift:
+            # 再測定で観測値が変わっていた（例: 1回目は登録済み、2回目は失効）
+            return replace(self.evidence(), **self.drift)
         return self.evidence()
 
     def _fake_credential_probe(self, **kwargs: object) -> dict[str, str]:
+        self.order.append("credential")
         self.credential_calls.append(kwargs)
         if self.credential_error:
             raise PreflightError(self.credential_error)
@@ -208,8 +218,9 @@ class TestLaunchCodexReviewer:
         assert result.exit_code == 0 and result.last_message == b"LGTM"
         assert result.evidence == fx.evidence()
         assert result.diagnostic.text == "progress\n" and result.diagnostic.hits == ()
-        # 測定は2回: 最初のevidence取得と、spawn直前の再測定（ADR-0027 決定14）
+        # 測定は2回: 最初のevidence取得と、credential probeの後・spawn直前の再測定（ADR-0027 決定14）
         assert fx.preflight_calls == 2 and fx.fake.seen_prompt == "please review\n"
+        assert fx.order == ["preflight", "credential", "preflight", "spawn"]
         (spec,) = fx.fake.specs
         assert spec.argv == (
             os.fspath(fx.codex_executable), "exec", "--ephemeral", "--ignore-rules", "-C", os.fspath(fx.workspace),
@@ -240,27 +251,42 @@ class TestLaunchCodexReviewer:
     def test_auth_gate_stops_before_the_prompt_file_and_spawn(
         self, fx: Fixture, monkeypatch: pytest.MonkeyPatch, platform: str, version: str, auth: AuthState, stage: str
     ) -> None:
-        """ADR-0031 決定5: Windows native以外・未対応version・未登録 / file保存の認証では起動しない。"""
+        """ADR-0031 決定5: Windows native以外・未対応version・未登録 / file保存の認証では起動しない。
+
+        予備のauth gateは最初の測定の直後に判定し、credential probe（2 process）も再測定も走らせない。
+        """
         monkeypatch.setattr(module, "_platform", lambda: platform)
         fx.codex_version = version
         fx.auth = auth
         with pytest.raises(LaunchError) as stopped:
             fx.launch()
         assert stopped.value.stage == stage
-        assert fx.preflight_calls == 2 and fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
+        assert fx.order == ["preflight"] and fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
 
     @pytest.mark.parametrize(
-        "second",
-        (AuthState("fail", "Keyring"), AuthState("ok", "File"), AuthState("", "")),
-        ids=("revoked", "file_storage", "check_absent"),
+        "drift",
+        (
+            {"auth": AuthState("fail", "Keyring")},
+            {"auth": AuthState("ok", "File")},
+            {"auth": AuthState("", "")},
+            {"configuration_digest": "f" * 64},
+            {"effective": EffectiveSandbox("Never", "restricted", "restricted", "true", "", "")},
+            {"boundaries": {**EXPECTED_BOUNDARIES, "protected_write": "allowed"}},
+        ),
+        ids=("revoked", "file_storage", "check_absent", "config_digest", "sandbox_backend", "boundary"),
     )
-    def test_auth_that_changes_between_measurement_and_spawn_is_rejected(self, fx: Fixture, second: AuthState) -> None:
-        """ADR-0027 決定14 + ADR-0031 決定5: 再測定で一致しなければ、auth gate以前にevidence_mismatchで止まる。"""
-        fx.second_auth = second
+    def test_drift_during_the_credential_probe_is_rejected_before_spawn(
+        self, fx: Fixture, drift: dict[str, object]
+    ) -> None:
+        """ADR-0027 決定14 + ADR-0031 決定5 / 6: credential probeの間にdoctorのauth・config digest・sandbox
+        backend・境界のどれかが変わっていれば、probe後の再測定で`evidence_mismatch`となり、prompt fileもspawnも無い。
+        """
+        fx.drift = drift
         with pytest.raises(PreflightError) as stopped:
             fx.launch()
         assert stopped.value.stage == "evidence_mismatch"
-        assert fx.preflight_calls == 2 and fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
+        assert fx.order == ["preflight", "credential", "preflight"]
+        assert fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
 
     def test_re_measurement_failure_prevents_spawn(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = {"n": 0}
@@ -276,10 +302,16 @@ class TestLaunchCodexReviewer:
         with pytest.raises(PreflightError) as stopped:
             fx.launch()
         assert stopped.value.stage == "boundary" and fx.fake.specs == []
+        # 再測定はcredential probeの後に走る
+        assert calls["n"] == 2 and len(fx.credential_calls) == 1
 
-    def test_credential_store_probe_runs_after_the_auth_gate_and_before_spawn(self, fx: Fixture) -> None:
-        """AC-C09-06: 登録済みcredentialへsandbox内から到達できないことを、spawn前にpositive control付きで実測する。"""
+    def test_credential_store_probe_runs_after_the_auth_gate_and_before_the_re_measurement(self, fx: Fixture) -> None:
+        """AC-C09-06: 登録済みcredentialへsandbox内から到達できないことを、spawn前にpositive control付きで実測する。
+
+        probeは予備のauth gateの後・再測定の前に1回だけ走る。
+        """
         fx.launch()
+        assert fx.order == ["preflight", "credential", "preflight", "spawn"]
         (call,) = fx.credential_calls
         assert call["home"] is fx.home and call["evidence_root"] == fx.evidence_root
         assert call["target"] == keyring_target_for_home(fx.home.root)
@@ -290,13 +322,14 @@ class TestLaunchCodexReviewer:
         with pytest.raises(PreflightError) as stopped:
             fx.launch()
         assert stopped.value.stage == "credential_boundary"
+        assert fx.order == ["preflight", "credential"]
         assert fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
 
     def test_auth_gate_runs_before_the_credential_store_probe(self, fx: Fixture) -> None:
         fx.auth = AuthState("fail", "Keyring")
         with pytest.raises(LaunchError):
             fx.launch()
-        assert fx.credential_calls == []
+        assert fx.credential_calls == [] and fx.order == ["preflight"]
 
     def test_preflight_failure_prevents_spawn(self, fx: Fixture) -> None:
         fx.preflight_error = "sandbox_unavailable"

@@ -101,10 +101,20 @@ def launch_codex_reviewer(
     timeout_seconds: float,
     grace_seconds: float,
 ) -> ReviewerCompleted | ReviewerTimedOut:
-    """preflight -> spawn直前の再測定 -> auth gate -> prompt file -> spawn -> 結果の読み取り。
+    """preflight -> 予備のauth gate -> credential probe -> spawn直前の再測定 -> 最終のauth gate -> prompt file
+    -> spawn -> 結果の読み取り。
 
-    preflightの失敗はそのまま伝播する。ADR-0027 決定14: 最初のevidenceを取得した後、spawn直前に同じ測定を
-    再実行し、完全一致した場合だけ進む。auth gate（ADR-0031 決定5）は再測定を通ったevidenceに対して成立させる。
+    preflightの失敗はそのまま伝播する。順序は固定で、呼出側が変えられない。
+
+    - 予備のauth gate（ADR-0031 決定5）: 未登録・未対応version・Windows native以外では、credential probe
+      （control + sandboxの2 process）を走らせずに止める
+    - credential probe（ADR-0031 決定6、AC-C09-06）: sandbox内から登録済みcredentialへ到達できないことを
+      positive control付きで実測する
+    - 再測定（ADR-0027 決定14）: credential probeの後、prompt fileの書込とspawnの**直前**に同じ測定を再実行し、
+      config digest・sandbox backend・境界・authを含む全evidenceの完全一致を要求する。probe中にこれらが
+      変化していれば`evidence_mismatch`で止まる
+    - 最終のauth gate: 再測定を通ったevidenceに対して成立させる（一致にはauthが含まれるため、予備gateと
+      同じ判定になる。spawn直前の契約を経路上で明示する）
     """
     _validate_prompt(prompt)
     evidence = run_sandbox_preflight(
@@ -112,6 +122,16 @@ def launch_codex_reviewer(
         codex_executable=codex_executable,
         reviewer_env=reviewer_env,
         evidence_root=evidence_root,
+        timeout_seconds=timeout_seconds,
+        grace_seconds=grace_seconds,
+    )
+    _require_auth_ready(evidence)
+    run_credential_store_probe(
+        home=home,
+        codex_executable=codex_executable,
+        reviewer_env=reviewer_env,
+        evidence_root=evidence_root,
+        target=keyring_target_for_home(home.root),
         timeout_seconds=timeout_seconds,
         grace_seconds=grace_seconds,
     )
@@ -125,16 +145,6 @@ def launch_codex_reviewer(
         grace_seconds=grace_seconds,
     )
     _require_auth_ready(evidence)
-    # AC-C09-06（ADR-0031 決定6）: sandbox内からreviewer credentialへ到達できないことを、positive control付きで実測
-    run_credential_store_probe(
-        home=home,
-        codex_executable=codex_executable,
-        reviewer_env=reviewer_env,
-        evidence_root=evidence_root,
-        target=keyring_target_for_home(home.root),
-        timeout_seconds=timeout_seconds,
-        grace_seconds=grace_seconds,
-    )
     root = Path(evidence_root)
     prompt_path = root / _PROMPT_NAME
     last_message_path = root / _LAST_MESSAGE_NAME
