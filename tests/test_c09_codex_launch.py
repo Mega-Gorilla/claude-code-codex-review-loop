@@ -26,6 +26,7 @@ from claude_code_codex_review_loop.process import (
     TimedOut,
 )
 from claude_code_codex_review_loop.runtime import codex_launch as module
+from claude_code_codex_review_loop.runtime import codex_preflight as preflight_module
 from claude_code_codex_review_loop.runtime.codex_canary import prepare_codex_canary_home
 from claude_code_codex_review_loop.runtime.codex_launch import (
     MAX_PROMPT_BYTES,
@@ -113,6 +114,9 @@ class Fixture:
         self.credential_calls: list[dict[str, object]] = []
         self.credential_error: str | None = None
         monkeypatch.setattr(module, "run_credential_store_probe", self._fake_credential_probe)
+        # spawn直前の再測定（`verify_preflight_evidence`）は本物を使い、その内側の測定だけをfakeにする
+        monkeypatch.setattr(preflight_module, "run_sandbox_preflight", self._fake_preflight)
+        self.second_auth: AuthState | None = None
         # auth gateはWindows native限定（ADR-0031）。testはplatformを固定し、gateの各経路を別testで固定する
         monkeypatch.setattr(module, "_platform", lambda: "win32")
         self.auth = AuthState("ok", "Keyring")
@@ -123,6 +127,9 @@ class Fixture:
         assert kwargs["home"] is self.home and kwargs["evidence_root"] == self.evidence_root
         if self.preflight_error:
             raise PreflightError(self.preflight_error)
+        if self.preflight_calls >= 2 and self.second_auth is not None:
+            # 再測定でauthの状態が変わっていた（例: 1回目は登録済み、2回目は失効）
+            self.auth = self.second_auth
         return self.evidence()
 
     def _fake_credential_probe(self, **kwargs: object) -> dict[str, str]:
@@ -201,7 +208,8 @@ class TestLaunchCodexReviewer:
         assert result.exit_code == 0 and result.last_message == b"LGTM"
         assert result.evidence == fx.evidence()
         assert result.diagnostic.text == "progress\n" and result.diagnostic.hits == ()
-        assert fx.preflight_calls == 1 and fx.fake.seen_prompt == "please review\n"
+        # 測定は2回: 最初のevidence取得と、spawn直前の再測定（ADR-0027 決定14）
+        assert fx.preflight_calls == 2 and fx.fake.seen_prompt == "please review\n"
         (spec,) = fx.fake.specs
         assert spec.argv == (
             os.fspath(fx.codex_executable), "exec", "--ephemeral", "--ignore-rules", "-C", os.fspath(fx.workspace),
@@ -239,7 +247,35 @@ class TestLaunchCodexReviewer:
         with pytest.raises(LaunchError) as stopped:
             fx.launch()
         assert stopped.value.stage == stage
-        assert fx.preflight_calls == 1 and fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
+        assert fx.preflight_calls == 2 and fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
+
+    @pytest.mark.parametrize(
+        "second",
+        (AuthState("fail", "Keyring"), AuthState("ok", "File"), AuthState("", "")),
+        ids=("revoked", "file_storage", "check_absent"),
+    )
+    def test_auth_that_changes_between_measurement_and_spawn_is_rejected(self, fx: Fixture, second: AuthState) -> None:
+        """ADR-0027 決定14 + ADR-0031 決定5: 再測定で一致しなければ、auth gate以前にevidence_mismatchで止まる。"""
+        fx.second_auth = second
+        with pytest.raises(PreflightError) as stopped:
+            fx.launch()
+        assert stopped.value.stage == "evidence_mismatch"
+        assert fx.preflight_calls == 2 and fx.fake.specs == [] and not (fx.evidence_root / "prompt.txt").exists()
+
+    def test_re_measurement_failure_prevents_spawn(self, fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = {"n": 0}
+
+        def flaky(**kwargs: object) -> PreflightEvidence:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise PreflightError("boundary")
+            return fx.evidence()
+
+        monkeypatch.setattr(module, "run_sandbox_preflight", flaky)
+        monkeypatch.setattr(preflight_module, "run_sandbox_preflight", flaky)
+        with pytest.raises(PreflightError) as stopped:
+            fx.launch()
+        assert stopped.value.stage == "boundary" and fx.fake.specs == []
 
     def test_credential_store_probe_runs_after_the_auth_gate_and_before_spawn(self, fx: Fixture) -> None:
         """AC-C09-06: 登録済みcredentialへsandbox内から到達できないことを、spawn前にpositive control付きで実測する。"""

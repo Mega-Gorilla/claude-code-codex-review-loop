@@ -33,7 +33,12 @@ from ..identity.fs_permissions import FsPermissionError, write_private_text
 from ..policy.redaction import RedactionResult, redact
 from ..process import Completed, SpawnError, SpawnSpec, StopError, run_tree
 from .codex_canary import CanaryError, CodexCanaryHome, build_codex_canary_invocation
-from .codex_preflight import PreflightEvidence, run_credential_store_probe, run_sandbox_preflight
+from .codex_preflight import (
+    PreflightEvidence,
+    run_credential_store_probe,
+    run_sandbox_preflight,
+    verify_preflight_evidence,
+)
 
 MAX_PROMPT_BYTES: Final = 1_048_576
 # ADR-0031 決定5: keyring keyの導出（`CODEX_HOME`のpath hash）はCLIの内部実装への依存であり、実測した
@@ -96,9 +101,22 @@ def launch_codex_reviewer(
     timeout_seconds: float,
     grace_seconds: float,
 ) -> ReviewerCompleted | ReviewerTimedOut:
-    """preflight -> prompt file -> spawn -> 結果の読み取り。preflightの失敗はそのまま伝播する。"""
+    """preflight -> spawn直前の再測定 -> auth gate -> prompt file -> spawn -> 結果の読み取り。
+
+    preflightの失敗はそのまま伝播する。ADR-0027 決定14: 最初のevidenceを取得した後、spawn直前に同じ測定を
+    再実行し、完全一致した場合だけ進む。auth gate（ADR-0031 決定5）は再測定を通ったevidenceに対して成立させる。
+    """
     _validate_prompt(prompt)
     evidence = run_sandbox_preflight(
+        home=home,
+        codex_executable=codex_executable,
+        reviewer_env=reviewer_env,
+        evidence_root=evidence_root,
+        timeout_seconds=timeout_seconds,
+        grace_seconds=grace_seconds,
+    )
+    verify_preflight_evidence(
+        evidence,
         home=home,
         codex_executable=codex_executable,
         reviewer_env=reviewer_env,

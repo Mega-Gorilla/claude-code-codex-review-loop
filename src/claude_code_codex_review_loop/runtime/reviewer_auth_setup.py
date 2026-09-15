@@ -4,11 +4,12 @@
 ユーザーが素の`codex login`を実行する形は採らない。生成configが無い状態ではfile保存へ進み、
 禁止している`auth.json`が作られ得るためである。順序:
 
-1. 固定homeを取得する（lock → 配置の検証 → markerが検証できる前回entryだけ削除。`reviewer_home`）
+1. 固定homeを取得する（lock → 配置の検証 → markerが検証できる前回entryだけ削除。`reviewer_home`）。
+   directoryを作った直後にownership markerを置く（ADR-0031 決定7-4。途中失敗後も次回が再生成で回復できる）
 2. 管理下config（`cli_auth_credentials_store = "keyring"`）を生成する
 3. `codex doctor --json`で`auth storage mode: Keyring`を確認する（`File` / `Auto`なら停止）
 4. `CODEX_HOME`を明示したenvで**productが**`codex login --device-auth`を起動し、ユーザーが認証する
-5. `auth.json`が無いこと、`auth.credentials`が`ok`かつ`Keyring`であることを確認し、markerを置く
+5. `auth.json`が無いこと、`auth.credentials`が`ok`かつ`Keyring`であることを確認する
 
 途中で失敗した場合はcredentialを使用せず停止する。`auth.json`が作られていれば削除して`file_credentials`
 として報告する。device codeの表示はCLI層（C-15）がstdout fileを読んで行う。本moduleはtokenを
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
-from ..identity.fs_permissions import FsPermissionError, verify_private_dir, write_private_text
+from ..identity.fs_permissions import FsPermissionError, remove_tree, verify_private_dir, write_private_text
 from ..policy.permission_profile import ensure_argv_allowed
 from ..policy.redaction import TOKEN_ENV_NAMES
 from ..process import Completed, SpawnError, SpawnSpec, StopError, run_tree
@@ -128,6 +129,12 @@ def _setup_in_home(
 ) -> AuthSetupResult:
     try:
         create_home_dir(home)
+        # markerはconfigより先。marker書込に失敗したら今回作ったdirectoryを残さない
+        try:
+            marker = write_home_marker(home)
+        except HomeError:
+            _discard_fresh_home(home)
+            raise
     except HomeError as error:
         raise AuthSetupError(f"home:{error.stage}") from error
     try:
@@ -152,11 +159,15 @@ def _setup_in_home(
     after = _read_auth_state(executable, env, home, evidence_root, "doctor_after", timeout_seconds, grace_seconds)
     if after.status != "ok" or after.storage_mode != REQUIRED_AUTH_STORAGE:
         raise AuthSetupError("not_registered")
-    try:
-        marker = write_home_marker(home)
-    except HomeError as error:
-        raise AuthSetupError(f"home:{error.stage}") from error
     return AuthSetupResult(home=home, marker=marker, codex_version=version, storage_mode=after.storage_mode)
+
+
+def _discard_fresh_home(home: Path) -> None:
+    """今回作ったばかりのhomeを取り除く（best effort。停止理由は呼出側が決める）。"""
+    try:
+        remove_tree(home)
+    except FsPermissionError:
+        pass
 
 
 def _environment(reviewer_env: Mapping[str, str]) -> dict[str, str]:

@@ -159,6 +159,75 @@ class TestPrepareCodexCanaryHome:
         assert stopped.value.stage == "configuration"
 
 
+class TestInitializeHook:
+    def test_initialize_runs_after_directory_creation_and_before_config(self, tmp_path: Path) -> None:
+        private, workspace, real_repository, state_root = _paths(tmp_path)
+        seen: list[tuple[bool, bool]] = []
+
+        def initialize(root: Path) -> None:
+            seen.append((root.is_dir(), (root / "config.toml").exists()))
+            (root / "marker").write_text("m", encoding="utf-8")
+
+        home = prepare_codex_canary_home(
+            private_root=private, name="codex-home", workspace_root=workspace,
+            protected_roots=(real_repository, state_root), initialize=initialize,
+        )
+        assert seen == [(True, False)] and (home.root / "marker").is_file() and home.config_path.is_file()
+
+    def test_directory_creation_failure_is_classified(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        private, workspace, real_repository, state_root = _paths(tmp_path)
+        monkeypatch.setattr(
+            module, "create_private_dir", lambda path: (_ for _ in ()).throw(module.FsPermissionError("create", "t"))
+        )
+        with pytest.raises(CanaryError) as stopped:
+            prepare_codex_canary_home(
+                private_root=private, name="codex-home", workspace_root=workspace,
+                protected_roots=(real_repository, state_root),
+            )
+        assert stopped.value.stage == "configuration"
+
+    def test_initialize_failure_with_unremovable_directory_still_stops(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        private, workspace, real_repository, state_root = _paths(tmp_path)
+        monkeypatch.setattr(
+            module, "remove_tree", lambda root: (_ for _ in ()).throw(module.FsPermissionError("remove", "t"))
+        )
+        with pytest.raises(CanaryError) as stopped:
+            prepare_codex_canary_home(
+                private_root=private, name="codex-home", workspace_root=workspace,
+                protected_roots=(real_repository, state_root),
+                initialize=lambda root: (_ for _ in ()).throw(RuntimeError("marker")),
+            )
+        assert stopped.value.stage == "initialize"
+
+    def test_initialize_failure_removes_the_fresh_directory(self, tmp_path: Path) -> None:
+        private, workspace, real_repository, state_root = _paths(tmp_path)
+        with pytest.raises(CanaryError) as stopped:
+            prepare_codex_canary_home(
+                private_root=private, name="codex-home", workspace_root=workspace,
+                protected_roots=(real_repository, state_root),
+                initialize=lambda root: (_ for _ in ()).throw(RuntimeError("marker")),
+            )
+        assert stopped.value.stage == "initialize" and not (private / "codex-home").exists()
+
+    def test_config_failure_after_initialize_leaves_the_initialized_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """config書込に失敗しても、initializeが置いたmarkerは残る（次回の固定home取得が回復できる）。"""
+        private, workspace, real_repository, state_root = _paths(tmp_path)
+        monkeypatch.setattr(
+            module, "write_private_text", lambda *args: (_ for _ in ()).throw(module.FsPermissionError("write", "t"))
+        )
+        with pytest.raises(CanaryError) as stopped:
+            prepare_codex_canary_home(
+                private_root=private, name="codex-home", workspace_root=workspace,
+                protected_roots=(real_repository, state_root),
+                initialize=lambda root: (root / "marker").write_text("m", encoding="utf-8"),
+            )
+        assert stopped.value.stage == "configuration" and (private / "codex-home" / "marker").is_file()
+
+
 class TestCodexCanaryInvocation:
     def test_uses_managed_home_and_fixed_argv_without_legacy_sandbox_flags(self, tmp_path: Path) -> None:
         home = _home(tmp_path)
