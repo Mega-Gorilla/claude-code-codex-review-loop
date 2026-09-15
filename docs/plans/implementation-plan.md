@@ -16,7 +16,7 @@ target experienceが定義した完成状態を、どのcomponent、どの依存
 
 ### 安定IDの規約
 
-`AC-CNN-NN`はcomponent別の受入条件、`AC-RP-NN`はrole / provider横断の受入条件である。後者は単一の所有componentを持たず、Issue #52が横断追跡し、担当componentと完了時期はD-032の拡張案に示す。D-032が`Proposed`の間、AC-RPは条件案であり、既存のACやPhase完了条件を置き換えない。
+`AC-CNN-NN`はcomponent別の受入条件、`AC-RP-NN`はrole / provider横断の受入条件である。後者は単一の所有componentを持たず、Issue #52が横断追跡し、担当componentと完了時期はD-032の拡張（Section 2.5）に示す。D-032の採択（2026-09-15）により、AC-RPは受入条件であり、既存のACやPhase完了条件へ追加される（置き換えではない）。
 
 ## 1. 設計原則
 
@@ -81,7 +81,7 @@ engine.advance(run_id) -> HOST_ACTION | AWAIT_USER | TERMINAL
 
 ### 2.4 agentごとの起動主体
 
-roleによる責務は既存baselineを維持する。表の両providerへの拡張はD-032（Proposed）の採択時の案で、現行の独立選択対応を示すものではない。
+roleによる責務は既存baselineを維持する。表の両providerへの拡張はD-032（Decided、2026-09-15）の要件で、実装は未完である（Issue #52）。
 
 | Agent | 起動主体 | 理由 |
 | --- | --- | --- |
@@ -91,15 +91,14 @@ roleによる責務は既存baselineを維持する。表の両providerへの拡
 
 ### 2.5 role別provider選択（D-032 / Issue #52）
 
-**追加要件案・Proposed**。設定契約・永続化・runtime照合は実装済み（ADR-0025 / 0026）、native adapterは未実装。D-032のGitHub上の明示合意record取得までは、既存baselineを置き換えず、以下を採択時の計画案として扱う。Phase 8までの完了を取り消さず、既存基盤への拡張として追跡する。coder / reviewerを独立にClaude Code / Codexへ設定し、4組み合わせを扱う。本節でAC-RPの条件案を管理し、D-032採択後に追加分の受入条件の正本とする。Issue単独では確定・変更しない。
+**追加要件・Decided（2026-09-15、[Issue #52の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52#issuecomment-5677019033)）**。設定契約・永続化・runtime照合は実装済み（ADR-0025 / 0026）、native adapterは未実装。合意は要件の採択であり、native adapter・認証供給・C-10接続・4組み合わせの実CLI受入の完了を意味しない。Phase 8までの完了を取り消さず、既存基盤への拡張として追跡する。coder / reviewerを独立にClaude Code / Codexへ設定し、4組み合わせを扱う。本節がAC-RPの受入条件の正本である。Issue単独では確定・変更しない。
 
 product名`Claude Code–Codex Review Loop`、repository / package名`claude-code-codex-review-loop`、Python package名`claude_code_codex_review_loop`、CLI名`cc-review`はD-032の一般化対象外であり、変更しない（`tests/test_repository_contract.py`の命名契約を維持）。
 
 役割による権限・state遷移と、providerによるCLI起動・出力正規化・認証・安全profileを分離する。既存の`RequestCodexReview` / `CodexPurpose` / `CODEX_*`は実装上の識別子で、名称だけで実行providerを決めない。永続化済み文字列を変更する場合はADR-0004に基づく互換性設計を先に行う。
 
 - C-02 / C-07 / C-08: role別provider/modelと実行方式・安全profile・adapter契約versionの解決済みsnapshot、復元・設定変更の検出、head / nonce / bindingを保つ共通protocol
-- C-04 / C-06 / C-09: provider別の認証・argv・sandbox能力を検証し、reviewerの実repository／GitHub書込を禁止。同一providerでもcoder credentialやsessionを引き継がない。CLIの名称やpromptだけを安全性の根拠にしない
-  - **緩和案（2026-09-12、Proposed、非規範）**: 同一providerの**アカウントまたは認証元**に限り、明示設定により共有可能とする（既定は共有しない）。session・workspace・実効sandbox権限はroleごとに分離し、coderの設定領域（`~/.codex`等）全体をreviewerへ渡さず、reviewerのmodel-generated commandからprovider認証材料を取得できないこと、GitHub write credentialへ到達できないことをnegative testする。GitHub上の明示合意recordを得てD-032を`Decided`にするまで、本項の前段（現行規範）を置き換えない。提示先: [Issue #14の整理comment](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/14#issuecomment-5645824357)
+- C-04 / C-06 / C-09: provider別の認証・argv・sandbox能力を検証し、reviewerの実repository／GitHub書込を禁止。同一providerの**アカウントまたは認証元**は、明示設定がある場合に限り共有可能とする（既定は共有しない）。これはcoderの設定領域（`~/.codex`等）や認証fileをそのままreviewerへ渡すことを意味しない。session・履歴・workspace・実効sandbox権限・GitHub write credentialはroleごとに分離し、reviewerのmodel-generated commandからprovider認証材料を取得できないこと（AC-C09-06）、GitHub write credentialへ到達できないこと（AC-C09-05）をnegative testする。CLIの名称やpromptだけを安全性の根拠にしない
 - C-09: fresh reviewer共通のcheckout・停止・出力検証と、Claude / Codex固有adapterを分離。C-08のheadless基盤はenvelope入力・SUBMIT出力を要求するため、native CLIをそのまま指定して対応としない
 - C-10 / C-11 / C-12 / C-13: review以外のclarification・decision・最終報告・ユーザー説明にも選択結果を反映。C-12で設定解決し、coreへ暗黙のprovider既定値を置かない。final reporterをreviewer providerへ従わせる案は実装ADRで確定する
 - C-15: 両providerのactive入口と設定例・対応OS／CLI version表を提供。GUIキー注入やprovider別の独自round loopは作らない
@@ -118,7 +117,7 @@ product名`Claude Code–Codex Review Loop`、repository / package名`claude-cod
 
 **順序**: Issue #52の計画・設定／adapter契約を先に確定し、Phase 9 #14の共通runtimeとprovider adapterを実装する。Codex固有の安全性spikeは並行できるが、Codex固定のinterfaceを後続へ広げない。Phase 10以降のworkflow、Phase 16のhost入口・配布、Phase 17の4組み合わせ受入まで追跡し、fake成功だけで#52をcloseしない。既存Phase番号とcomponent IDは増やさない。
 
-D-032採択前は本書のClaude coder / Codex reviewer表記が既存baselineである。採択後は従来の組み合わせの例または既存code名として読み、役割の一般化には本節を優先する。ただしClaude固有のAuto mode等の設定語彙をCodexへ転用しない。#14が提案中のAC-C09-06 / 07の採否は別のplan変更で扱い、本節で暗黙に確定しない。
+D-032の採択（2026-09-15）により、本書のClaude coder / Codex reviewer表記は従来の組み合わせの例または既存code名として読み、役割の一般化には本節を優先する。ただしClaude固有のAuto mode等の設定語彙をCodexへ転用しない。AC-C09-06 / 07は同じ合意recordで採択し、Section 5のC-09受入条件に置く。
 
 ## 3. Package layout
 
@@ -352,13 +351,8 @@ Section 2のprotocolを実装する。active host adapterとheadless adapterを�
 | AC-C09-03 | 同一headに対する2回のreviewが、前回session状態に依存しない |
 | AC-C09-04 | 隔離checkoutのHEAD、PRのadvertised head、review出力の対象headが一致する |
 | AC-C09-05 | read-only Web調査を許可したprofileでも、GitHub write credentialへ到達できない |
-
-**受入条件の追加案（Proposed、非規範）**。Issue #14「正本への変更提案」の2件を、D-032の緩和案（Section 2.5）と同じ合意recordで採否を決める。合意までは条件案であり、上表の受入条件ではない。
-
-| ID（案） | 追加受入条件（案） |
-| --- | --- |
-| AC-C09-06 | reviewerのproviderが正常に認証・実行できる一方、model-generated commandからprovider認証材料（Codex / OpenAIの認証情報等）を取得できない。認証元の共有はD-032の明示設定だけで成立し、既定では共有しない |
-| AC-C09-07 | 予約delimiterやfence markerを含むIssue本文・comment・diffでもprompt境界を破れず、GitHub由来のtextは指示として扱われない。schema検証済み出力だけが受理される（受理側はC-10） |
+| AC-C09-06 | reviewerのproviderが正常に認証・実行できる一方、model-generated commandからprovider認証材料（Codex / OpenAIの認証情報等）を取得できないことをnegative testする。成立しない環境ではfail closedする。認証元の共有はD-032の明示設定だけで成立し、既定では共有しない（D-032緩和の必須安全条件。2026-09-15採択） |
+| AC-C09-07 | 予約delimiterやfence markerを含むIssue本文・comment・diffでもprompt境界を破れず、GitHub由来のtextは指示として扱われない。schema検証済み出力だけが受理される（受理側はC-10）。認証共有の有無にかかわらず全reviewerへ適用する（2026-09-15採択） |
 
 ### C-10 PR mode review loop
 

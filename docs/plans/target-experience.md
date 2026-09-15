@@ -19,18 +19,18 @@
 
 この文書は本repositoryで合意済みの設計baselineである。labelの定義は「用語と合意状態」の表を参照する。`Proposed`から`Decided`への変更にはGitHub上のユーザー明示合意recordを要する。文書全体の`Agreed`は、個別の`Proposed`を合意済みにするものではない。
 
-### 2026-09-05の拡張案: roleとproviderの分離（D-032）
+### 2026-09-05の拡張: roleとproviderの分離（D-032、Decided）
 
-**Behavior: Proposed / Implementation: 設定契約・永続化・runtime照合まで実装、native adapter未実装（ADR-0025 / 0026）、Issue #52で追跡。** 会話でのユーザー要望を受けた提案であり、GitHub上のユーザー明示合意recordは未取得。Issue #52自体を合意根拠とは扱わず、同IssueまたはPR #53でD-032への明示合意を得た後、そのcomment URLをdecision logへ記録して`Decided`へ変更する。それまでは既存の合意済みbaselineを置き換えない。以下は採択時の拡張内容である。
+**Behavior: Decided（2026-09-15、[Issue #52の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52#issuecomment-5677019033）） / Implementation: 設定契約・永続化・runtime照合まで実装、native adapter未実装（ADR-0025 / 0026）、Issue #52で追跡。** 合意は要件の採択であり、native adapter・認証供給・C-10接続・4組み合わせの実CLI受入が完了したことを意味しない。以下は採択した拡張内容である。
 
-coderとreviewerは役割であり、Claude Code / Codexはその実行providerである。双方を独立に選べるため、従来のClaude coder + Codex reviewer、逆の組み合わせ、Claude同士、Codex同士の4組み合わせを対象とする。同一providerでもcoderとreviewerのsession・作業領域・権限を共有しない。
+coderとreviewerは役割であり、Claude Code / Codexはその実行providerである。双方を独立に選べるため、従来のClaude coder + Codex reviewer、逆の組み合わせ、Claude同士、Codex同士の4組み合わせを対象とする。同一providerでもcoderとreviewerのsession・履歴・作業領域・実効sandbox権限・GitHub write credentialを共有しない。同一providerのアカウントまたは認証元は、明示設定がある場合に限り共有可能とし、既定では共有しない。これはcoderの設定領域（`~/.codex`等）や認証fileをそのままreviewerへ渡すことを意味しない。
 
 - active coderは選択したproviderの既存sessionでcontextを維持する。TUIキー注入や、別provider／headlessへの無断切替をしない
 - reviewerはproviderを問わずfreshな隔離環境で動き、実repositoryとGitHubへ永続変更しない。coderは許可された作業branchの変更まで、merge等はユーザー承認後のControllerに限る
 - provider選択とmodel選択、permission profile、active/headlessの実行方式は区別する。CLI未対応や必要な隔離機能がない場合は停止し、権限を緩めて対応済みとしない
 - 第三のproviderやGUIアプリ自動操作は今回の必須範囲に含めない。両providerのactive入口・配布形式、final reporterのprovider選択、旧設定の扱いは実装ADRで確定する
 
-D-032の採択までは、以下のClaude coder / Codex reviewerという固有名の手順が既存baselineである。採択後は従来の組み合わせの例として読み、D-010 / D-011 / D-013 / D-014 / D-015 / D-017 / D-024 / D-025 / D-026 / D-028 / D-029の**役割に対応するprovider固定部分だけ**を一般化する案とする。context維持・fresh review・権限分離・ユーザー承認の契約は維持する。Claude固有のAuto mode等をCodexへ機械的に置き換える意味ではない。配布もClaude Code Pluginだけで両host対応済みとはしない。
+D-032の採択（2026-09-15）により、以下のClaude coder / Codex reviewerという固有名の手順は従来の組み合わせ（既存baseline）の例として読み、D-010 / D-011 / D-013 / D-014 / D-015 / D-017 / D-024 / D-025 / D-026 / D-028 / D-029の**役割に対応するprovider固定部分だけ**を一般化する。context維持・fresh review・権限分離・ユーザー承認の契約は維持する。Claude固有のAuto mode等をCodexへ機械的に置き換える意味ではない。配布もClaude Code Pluginだけで両host対応済みとはしない。
 
 ## 2. 用語と合意状態
 
@@ -41,7 +41,7 @@ D-032の採択までは、以下のClaude coder / Codex reviewerという固有�
 | `Open` | ユーザー判断または技術検証が必要 |
 | `Superseded` | 後の合意により置き換えられた過去の決定 |
 
-主要な役割（role名で表記するが、合意済みproviderはcoderがClaude Code、reviewer / final reporterがCodex。以下の独立選択表記はD-032採択時の案）:
+主要な役割（role名で表記する。従来の組み合わせはcoderがClaude Code、reviewer / final reporterがCodexで、D-032の採択により両roleへ独立に設定できる。実装状況はIssue #52）:
 
 - **User**: 実行を開始し、必要な判断を行い、`READY_FOR_HUMAN_MERGE`で質問・修正依頼または明示的なmerge承認を入力する
 - **Controller**: LLMを内包せず、GitHub、worktree、agent、test、CI、state、logと、明示承認後のmergeを決定論的に調整する
@@ -889,5 +889,5 @@ IDは[implementation plan](implementation-plan.md)のtraceabilityから参照す
 | D-029 | 2026-08-19 | MVPの正式検証対象は公式MSI installerで配布されるPowerShell 7（`Microsoft.PowerShell` winget packageによる導入を含む）とする。Windows Store版は未検証riskとして明記し、必要になった時点でCodex確認後に別Issue作成の許可を改めて求める | Decided; provider固定部分の拡張案はD-032（Proposed、未置換） | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
 | D-030 | 2026-08-19 | GitHub canonical conversation transportは新しい公開interfaceを設計し、参考実装を一括移植・一括破棄せず、実績あるalgorithmとtestをcomponent単位で評価して、出典・license・理由・testを記録したうえで選択移植する | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
 | D-031 | 2026-08-19 | GitHub上のユーザー判断を受理できる主体は、repository / user設定で明示したGitHub login allowlistとの完全一致を必須とする。`authorAssociation`とrepository permissionは補助条件とし、単独では承認根拠にしない | Decided | [PR #4のユーザー判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/pull/4#issuecomment-5337114104) |
-| D-032 | 2026-09-05 | coderとreviewerにClaude Code / Codexを独立に設定し、同一provider同士を含む4組み合わせへ対応する。roleによる権限分離、active coderのcontext維持、fresh reviewer、単一engineとhuman merge gateは維持する。同一providerのアカウントまたは認証元は明示設定により共有可能とし（既定は共有しない）、session・workspace・実効sandbox権限・GitHub write credential・coderの設定領域全体は共有しない。実行adapter・resume互換性・両host配布を含めて実装し、設定項目やfake testだけで対応完了としない | Proposed | 会話でのユーザー要望を受けた提案。[Issue #52](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52) / PR #53でGitHub上の明示合意recordを待つ（Issue起草自体は合意根拠ではない）。2026-09-12、アカウント・認証元の共有を明示設定で許す緩和案を[Issue #14の整理](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/14#issuecomment-5645824357)で提示（権限分離は維持）。緩和案を含めて合意recordを待つ |
+| D-032 | 2026-09-05 | coderとreviewerにClaude Code / Codexを独立に設定し、同一provider同士を含む4組み合わせへ対応する。roleによる権限分離、active coderのcontext維持、fresh reviewer、単一engineとhuman merge gateは維持する。同一providerのアカウントまたは認証元は明示設定により共有可能とし（既定は共有しない）、session・履歴・workspace・実効sandbox権限・GitHub write credential・coderの設定領域全体は共有しない。実行adapter・resume互換性・両host配布を含めて実装し、設定項目やfake testだけで対応完了としない | Decided | 会話でのユーザー要望（2026-09-05）を受けた提案を、緩和案（[Issue #14の整理](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/14#issuecomment-5645824357)、PR #73）を含めて2026-09-15に[Issue #52の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/52#issuecomment-5677019033)で確定した。同recordでAC-C09-06（provider認証材料の非取得。緩和の必須安全条件）とAC-C09-07（prompt境界。認証共有の有無にかかわらず全reviewerへ適用）を採択。要件の採択であり、実装完了（native adapter・認証供給・C-10接続・4組み合わせの実CLI受入）を意味しない |
 | D-033 | 2026-09-10 | Windows nativeのreviewer sandboxはelevated Windows sandbox backendを必須とし、sandbox preflightがread denyとshell network禁止の強制を実測できない環境ではreviewerを起動しない（fail closed）。非昇格backendの書込制限だけでの継続や、Windows nativeの対象外化は採らない | Decided | 実測（ADR-0027）で非昇格backendは書込制限しか強制しないことが判明した。会話での合意（2026-09-10）を受けた提案を、2026-09-12に[Issue #14の明示合意record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/14#issuecomment-5644657388)で確定した。elevated backendの実測追補（ADR-0027）では、provisioningが`CODEX_HOME`単位に紐付くことと、network禁止がOSのfirewall構成に依存することが判明しており、いずれもpreflightがfail closedで検出する |
