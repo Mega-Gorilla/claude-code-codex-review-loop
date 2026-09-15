@@ -155,15 +155,27 @@ def _is_reparse_point(info: os.stat_result) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
+if sys.platform == "win32":  # pragma: no cover - OS dispatch(単一分岐点。各backendは自OSのCIで検証する)
+
+    def _remove_link(entry: Path, info: os.stat_result) -> None:
+        """junction / directory symlinkは`rmdir`、file symlinkは`unlink`で、link先には触れない。"""
+        if getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_DIRECTORY:
+            os.rmdir(entry)
+        else:
+            os.unlink(entry)
+
+else:  # pragma: no cover - OS dispatch(単一分岐点。各backendは自OSのCIで検証する)
+
+    def _remove_link(entry: Path, info: os.stat_result) -> None:
+        """POSIXのsymlinkは種類によらず`unlink`で外す。link先には触れない。"""
+        os.unlink(entry)
+
+
 def _remove_entry(entry: Path) -> None:
     """reparse pointはそれ自体だけを外し、先へは一切降りない。通常entryはread-onlyを外して消す。"""
     info = os.lstat(entry)
     if _is_reparse_point(info):
-        # junction / directory symlinkは`rmdir`、file symlinkは`unlink`で、link先には触れない
-        if stat.S_ISDIR(info.st_mode) or (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_DIRECTORY):
-            os.rmdir(entry)
-        else:
-            os.unlink(entry)
+        _remove_link(entry, info)
         return
     if stat.S_ISDIR(info.st_mode):
         with os.scandir(entry) as children:
