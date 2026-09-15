@@ -2,7 +2,7 @@
 
 # ADR-0031: reviewerのprovider認証材料の供給方式（OS credential storeと固定path・内容再生成のreviewer home）
 
-- Status: Proposed（C-09の技術判断。D-032（Decided、2026-09-15）とAC-C09-06の実装方式を決める。レビューとユーザーの明示承認を経てAcceptedにする。**本ADRの決定はWindows nativeのelevated backendに限定**し、Linux / SSHはOpen）
+- Status: Accepted（C-09の技術判断。D-032（Decided、2026-09-15）とAC-C09-06の実装方式を決める。2026-09-15に[Issue #14の判断record](https://github.com/Mega-Gorilla/claude-code-codex-review-loop/issues/14#issuecomment-5679368555)でユーザーが承認。**本ADRの決定はWindows nativeのelevated backendに限定**し、Linux / SSHはOpen。方式の承認であり、real-auth canaryの成功やLinux / SSH対応の完了を意味しない）
 - Date: 2026-09-15
 
 ## Context
