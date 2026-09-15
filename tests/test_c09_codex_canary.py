@@ -310,14 +310,15 @@ class TestCodexCanaryInvocation:
             )
         assert stopped.value.stage == "integrity"
 
-    def test_token_environment_is_rejected_without_leaking_its_value(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("name", ("OPENAI_API_KEY", "CODEX_ACCESS_TOKEN", "codex_api_key"))
+    def test_token_environment_is_rejected_without_leaking_its_value(self, tmp_path: Path, name: str) -> None:
         home = _home(tmp_path)
         token = "sk-" + "x" * 40
         with pytest.raises(CanaryError) as stopped:
             build_codex_canary_invocation(
                 home=home,
                 codex_executable=Path(sys.executable).resolve(),
-                reviewer_env={"OPENAI_API_KEY": token},
+                reviewer_env={name: token},
             )
         assert stopped.value.stage == "environment"
         assert token not in str(stopped.value)
@@ -340,6 +341,18 @@ class TestCodexCanaryInvocation:
         assert set(parameters) == {"home", "codex_executable", "reviewer_env", "last_message_path"}
         assert parameters["codex_executable"].annotation == "Path"
         assert not [name for name in dir(module) if "capability" in name.lower()]
+
+
+@pytest.mark.parametrize("platform", ("win32", "linux"))
+def test_auth_setup_configuration_fixes_the_credential_store_only(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """ADR-0031 決定3: loginの前に置くconfigはkeyring保存だけを固定し、profileを持たない。"""
+    monkeypatch.setattr(module, "_platform", lambda: platform)
+    config = tomllib.loads(module.render_auth_setup_configuration())
+    assert config["cli_auth_credentials_store"] == "keyring" and config["approval_policy"] == "never"
+    assert "permissions" not in config and "default_permissions" not in config
+    assert ("windows" in config) == (platform == "win32")
 
 
 def test_diagnostic_uses_the_shared_redaction_registry() -> None:

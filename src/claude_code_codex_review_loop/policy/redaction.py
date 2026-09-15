@@ -36,6 +36,13 @@ TOKEN_ENV_NAMES: Final[tuple[str, ...]] = (
     "CLAUDE_CODE_OAUTH_TOKEN",
     "OPENAI_API_KEY",
     "OPENAI_KEY",
+    # Codex CLIが認証材料として読む変数（codex-cli 0.154.0のbinaryとloginのhelpから棚卸し。
+    # `CODEX_ACCESS_TOKEN`は`codex login --with-access-token`の入力、`CODEX_API_KEY`は
+    # `OPENAI_API_KEY`の同義。PR #83レビュー）
+    "CODEX_API_KEY",
+    "CODEX_ACCESS_TOKEN",
+    "CODEX_CONNECTORS_TOKEN",
+    "CODEX_GITHUB_PERSONAL_ACCESS_TOKEN",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
 )

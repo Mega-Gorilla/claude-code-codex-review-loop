@@ -281,6 +281,22 @@ def _platform() -> str:
     return sys.platform
 
 
+def render_auth_setup_configuration() -> str:
+    """auth-setup（ADR-0031 決定3）用の最小config。permission profileは持たず、認証保存先だけを固定する。
+
+    loginの前にこのconfigを置くことで、`codex login`がfile保存（auth.json）へ進まない。setup後の
+    reviewer turnはhomeを再生成し、通常の生成config（profile付き）へ置き換える。
+    """
+    lines = [
+        'approval_policy = "never"',
+        'cli_auth_credentials_store = "keyring"',
+        "",
+    ]
+    if _platform() == "win32":
+        lines.extend(("[windows]", 'sandbox = "elevated"', ""))
+    return "\n".join(lines)
+
+
 def _toml_string(value: str) -> str:
     """JSON stringはTOML basic stringの有効なsubsetである。"""
     return json.dumps(value, ensure_ascii=False)
