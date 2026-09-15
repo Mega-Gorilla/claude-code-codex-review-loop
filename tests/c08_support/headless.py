@@ -36,15 +36,6 @@ note = os.environ.get("CC_REVIEW_FAKE_HOST_STDERR", "")
 if note:
     sys.stderr.write(note + "\\n")
 
-# 自分が生きている間のcheckpointを写す。親は`wait`で止まっているので、ここに自分のtreeが
-# 見えるなら「登録は待機より先」が成り立っている
-ledger_out = os.environ.get("CC_REVIEW_FAKE_HOST_LEDGER_OUT", "")
-if ledger_out:
-    with open(os.environ["CC_REVIEW_FAKE_HOST_CHECKPOINT"], encoding="utf-8") as handle:
-        seen = json.load(handle).get("processes")
-    with open(ledger_out, "w", encoding="utf-8") as handle:
-        json.dump(seen, handle)
-
 with open(envelope_path, encoding="utf-8") as handle:
     envelope = json.load(handle)
 with open(plan_path, encoding="utf-8") as handle:
@@ -146,13 +137,12 @@ def host_env(
     *,
     stderr_note: str = "",
     exit_code: int = 0,
-    ledger_out: Path | None = None,
-    checkpoint: Path | None = None,
 ) -> dict[str, str]:
     """子へ渡す環境変数（`SpawnSpec`は継承しないので必要なものを明示する）。
 
-    `ledger_out`を渡すと、子は**自分が生きている間**のcheckpointの`processes` sectionを
-    そこへ写す。親は`wait`で止まっているので、自分のtreeが見えれば「登録は待機より先」である。
+    子にcheckpoint（`processes`台帳）を読ませる観測は持たない。親の登録と子の読取の順序は
+    保証されず（Issue #79のrace）、Windowsでは親の原子的置換が子の開いたhandleと衝突し得る。
+    「登録は待機より先」は親側の`TreeHandle.wait`の呼出で観測する（`test_c08_headless.py`）。
     """
     from c03_support.helpers import child_env
 
@@ -161,9 +151,6 @@ def host_env(
     env["CC_REVIEW_FAKE_HOST_STATE"] = str(state)
     env["CC_REVIEW_FAKE_HOST_STDERR"] = stderr_note
     env["CC_REVIEW_FAKE_HOST_EXIT"] = str(exit_code)
-    if ledger_out is not None and checkpoint is not None:
-        env["CC_REVIEW_FAKE_HOST_LEDGER_OUT"] = str(ledger_out)
-        env["CC_REVIEW_FAKE_HOST_CHECKPOINT"] = str(checkpoint)
     return env
 
 
