@@ -273,6 +273,18 @@ class TestCodexCanaryInvocation:
         assert not [name for name in dir(module) if "capability" in name.lower()]
 
 
+@pytest.mark.parametrize("platform", ("win32", "linux"))
+def test_auth_setup_configuration_fixes_the_credential_store_only(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    """ADR-0031 決定3: loginの前に置くconfigはkeyring保存だけを固定し、profileを持たない。"""
+    monkeypatch.setattr(module, "_platform", lambda: platform)
+    config = tomllib.loads(module.render_auth_setup_configuration())
+    assert config["cli_auth_credentials_store"] == "keyring" and config["approval_policy"] == "never"
+    assert "permissions" not in config and "default_permissions" not in config
+    assert ("windows" in config) == (platform == "win32")
+
+
 def test_diagnostic_uses_the_shared_redaction_registry() -> None:
     token = "sk-" + "x" * 40
     result = redact_canary_diagnostic("OPENAI_API_KEY=" + token)
