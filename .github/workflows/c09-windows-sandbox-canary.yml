@@ -1,0 +1,186 @@
+# SPDX-License-Identifier: Apache-2.0
+
+name: C-09 Windows sandbox canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c09-windows-sandbox-canary
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Windows Server 2025 reference measurement
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      CODEX_VERSION: "0.154.0"
+      RESULT_ROOT: ${{ runner.temp }}\c09-windows-sandbox-canary
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install diagnostic dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          npm install --global "@openai/codex@$env:CODEX_VERSION"
+          if ((codex --version) -ne "codex-cli $env:CODEX_VERSION") {
+            throw "unexpected Codex CLI version"
+          }
+
+      - name: Record runner metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Path $env:RESULT_ROOT -Force | Out-Null
+          $firewall = try {
+            @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName FirewallProduct -ErrorAction Stop |
+              Select-Object displayName, pathToSignedProductExe, productState)
+          } catch {
+            @(@{ status = "unavailable"; type = $_.Exception.GetType().FullName })
+          }
+          $metadata = [ordered]@{
+            image_os = $env:ImageOS
+            image_version = $env:ImageVersion
+            windows = Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber
+            powershell = $PSVersionTable.PSVersion.ToString()
+            codex = (codex --version)
+            firewall_provider = $firewall
+          }
+          $metadata | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8NoBOM "$env:RESULT_ROOT\metadata.json"
+
+      - name: Provision elevated sandbox
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $codexHome = Join-Path $env:USERPROFILE ".codex"
+          New-Item -ItemType Directory -Path $codexHome -Force | Out-Null
+          @'
+          [windows]
+          sandbox = "elevated"
+          '@ | Set-Content -Encoding utf8NoBOM (Join-Path $codexHome "config.toml")
+          codex sandbox setup --elevated --current-user
+          if ($LASTEXITCODE -ne 0) {
+            throw "elevated sandbox provisioning failed"
+          }
+          $doctor = codex doctor --json
+          if ($LASTEXITCODE -ne 0) {
+            throw "codex doctor failed"
+          }
+          $doctor | Set-Content -Encoding utf8NoBOM "$env:RESULT_ROOT\doctor.json"
+
+      - name: Run credential-free preflight canary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $npmRoot = (npm root --global).Trim()
+          $native = Join-Path $npmRoot "@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe"
+          if (-not (Test-Path -LiteralPath $native -PathType Leaf)) {
+            throw "native Codex executable was not found"
+          }
+          $env:CC_REVIEW_CODEX = (Resolve-Path -LiteralPath $native).Path
+          $script = Join-Path $env:RUNNER_TEMP "run-c09-windows-sandbox-canary.py"
+          @'
+          import json
+          import os
+          from dataclasses import asdict
+          from pathlib import Path
+
+          from claude_code_codex_review_loop.identity import (
+              build_reviewer_env,
+              create_private_dir,
+              prepare_reviewer_home,
+          )
+          from claude_code_codex_review_loop.runtime.codex_canary import prepare_codex_canary_home
+          from claude_code_codex_review_loop.runtime.codex_preflight import PreflightError, run_sandbox_preflight
+          from claude_code_codex_review_loop.runtime.codex_provisioning import mirror_provisioning_artifacts
+
+          result_root = Path(os.environ["RESULT_ROOT"]).resolve()
+          base = (result_root / "measurement").resolve()
+          base.mkdir(parents=True, exist_ok=False)
+          private = base / "private"
+          create_private_dir(private)
+          workspace = base / "workspace"
+          workspace.mkdir()
+          state = base / "state"
+          state.mkdir()
+          evidence = base / "evidence"
+          create_private_dir(evidence)
+          repository = Path.cwd().resolve()
+          codex = Path(os.environ["CC_REVIEW_CODEX"]).resolve()
+          summary: dict[str, object] = {"status": "failed", "stage": "unhandled"}
+
+          try:
+              home = prepare_codex_canary_home(
+                  private_root=private,
+                  name="codex-home",
+                  workspace_root=workspace,
+                  protected_roots=(repository, state),
+              )
+              mirror_provisioning_artifacts(home, Path.home().resolve() / ".codex")
+              reviewer_env = build_reviewer_env(
+                  os.environ,
+                  prepare_reviewer_home(private, "reviewer-home"),
+              )
+              measured = run_sandbox_preflight(
+                  home=home,
+                  codex_executable=codex,
+                  reviewer_env=reviewer_env,
+                  evidence_root=evidence,
+                  timeout_seconds=180.0,
+                  grace_seconds=5.0,
+              )
+              summary = {"status": "ok", "evidence": asdict(measured)}
+          except PreflightError as error:
+              summary = {"status": "failed", "stage": error.stage}
+              raise
+          finally:
+              (result_root / "summary.json").write_text(
+                  json.dumps(summary, ensure_ascii=False, indent=2, default=str) + "\n",
+                  encoding="utf-8",
+              )
+          '@ | Set-Content -Encoding utf8NoBOM $script
+          python $script
+
+      - name: Publish summary
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath "$env:RESULT_ROOT\summary.json") {
+            "### C-09 Windows sandbox canary" >> $env:GITHUB_STEP_SUMMARY
+            "``````json" >> $env:GITHUB_STEP_SUMMARY
+            Get-Content -Raw "$env:RESULT_ROOT\summary.json" >> $env:GITHUB_STEP_SUMMARY
+            "``````" >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: c09-windows-server-2025-reference
+          # provisioning成果物（`.sandbox-secrets/sandbox_users.json`）はuploadしない。
+          # 認証なしの実測でも、artifactは公開に必要な診断fileへ限定する。
+          path: |
+            ${{ runner.temp }}\c09-windows-sandbox-canary\metadata.json
+            ${{ runner.temp }}\c09-windows-sandbox-canary\doctor.json
+            ${{ runner.temp }}\c09-windows-sandbox-canary\summary.json
+            ${{ runner.temp }}\c09-windows-sandbox-canary\measurement\evidence\*.stdout
+            ${{ runner.temp }}\c09-windows-sandbox-canary\measurement\evidence\*.stderr
+          if-no-files-found: warn
+          retention-days: 7
